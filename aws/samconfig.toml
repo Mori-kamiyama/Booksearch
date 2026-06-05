@@ -1,0 +1,11 @@
+version = 0.1
+
+[default.global.parameters]
+stack_name = "booksearch"
+
+[default.deploy.parameters]
+region = "ap-northeast-1"
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = false
+resolve_image_repos = true
+image_repositories = []

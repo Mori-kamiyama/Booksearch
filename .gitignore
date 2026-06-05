@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.venv_sarashina/
+.ruff_cache/
+.python-version
+
+# Go
+backend/booksearch-backend
+backend/*.exe
+
+# Node / frontend
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
+
+# Data / outputs (大きいファイル)
+outputs/
+runs/
+dataset/
+*.pt
+*.db
+!aws/functions/go_api/library.db
+!aws/functions/lookup_worker/assets/library.db
+
+# Misc
+.nvimlog
+.DS_Store
