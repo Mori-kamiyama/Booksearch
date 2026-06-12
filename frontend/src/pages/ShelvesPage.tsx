@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { apiFetch } from '../lib/api'
 
 interface ShelfCandidate {
   book_id: number
@@ -15,7 +16,7 @@ export default function ShelvesPage() {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    fetch('/api/shelf-candidates')
+    apiFetch('/api/shelf-candidates')
       .then(res => res.json())
       .then(data => setCandidates(data.candidates ?? []))
       .catch(() => setCandidates([]))

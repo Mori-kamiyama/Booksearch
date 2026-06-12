@@ -17,6 +17,7 @@ import (
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -52,9 +53,12 @@ func init() {
 	sqsClient = sqs.NewFromConfig(cfg)
 
 	dbPath := filepath.Join(staticAssets, "library.db")
+	if _, statErr := os.Stat(dbPath); statErr != nil {
+		log.Printf("warn: library.db stat failed at %s: %v", dbPath, statErr)
+	}
 	bookStore, err = OpenBookStore(dbPath)
 	if err != nil {
-		log.Printf("warn: library.db not available: %v", err)
+		log.Printf("warn: library.db not available (path=%s): %v", dbPath, err)
 	}
 }
 
@@ -86,8 +90,14 @@ func handler(ctx context.Context, req events.APIGatewayV2HTTPRequest) (events.AP
 		return getJob(ctx, req)
 	case method == "POST" && path == "/api/scan":
 		return scan(ctx, req)
+	case method == "POST" && path == "/api/scan/init":
+		return scanInit(ctx, req)
+	case method == "POST" && path == "/api/scan/start":
+		return scanStart(ctx, req)
 	case method == "GET" && path == "/api/shelves":
 		return getShelves(ctx)
+	case method == "GET" && strings.HasPrefix(path, "/api/crops/"):
+		return getCrop(ctx, path)
 	default:
 		return errJSON(404, "not found"), nil
 	}
@@ -287,6 +297,131 @@ func scan(ctx context.Context, req events.APIGatewayV2HTTPRequest) (events.APIGa
 	return okJSON(202, map[string]any{"job_id": jobID}), nil
 }
 
+// ---- POST /api/scan/init ----
+// presigned PUT URL を発行し、フロントから S3 に直接アップロードさせる。
+// API Gateway の 10MB ペイロード制限を回避する。
+// body: { filename: string, content_type?: string }
+// resp: { job_id, upload_url, key, content_type }
+func scanInit(ctx context.Context, req events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {
+	body := decodeBody(req)
+	var payload struct {
+		Filename    string `json:"filename"`
+		ContentType string `json:"content_type"`
+	}
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		return errJSON(400, "expected JSON {filename, content_type?}"), nil
+	}
+	if payload.Filename == "" {
+		return errJSON(400, "filename is required"), nil
+	}
+	ext := strings.ToLower(filepath.Ext(payload.Filename))
+	if ext == "" {
+		ext = ".jpg"
+	}
+	ct := payload.ContentType
+	if ct == "" {
+		ct = contentTypeForExt(ext)
+	}
+	jobID := uuid.New().String()
+	key := fmt.Sprintf("uploads/%s/upload%s", jobID, ext)
+
+	presigner := s3.NewPresignClient(s3Client)
+	presigned, err := presigner.PresignPutObject(ctx, &s3.PutObjectInput{
+		Bucket:      aws.String(bucket),
+		Key:         aws.String(key),
+		ContentType: aws.String(ct),
+	}, func(o *s3.PresignOptions) { o.Expires = 15 * time.Minute })
+	if err != nil {
+		return errJSON(500, "presign: "+err.Error()), nil
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := ddbClient.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName: aws.String(jobsTable),
+		Item: map[string]ddbtypes.AttributeValue{
+			"job_id":     &ddbtypes.AttributeValueMemberS{Value: jobID},
+			"status":     &ddbtypes.AttributeValueMemberS{Value: "uploading"},
+			"image_key":  &ddbtypes.AttributeValueMemberS{Value: key},
+			"created_at": &ddbtypes.AttributeValueMemberS{Value: now},
+			"updated_at": &ddbtypes.AttributeValueMemberS{Value: now},
+		},
+	}); err != nil {
+		return errJSON(500, "ddb put: "+err.Error()), nil
+	}
+
+	return okJSON(200, map[string]any{
+		"job_id":       jobID,
+		"upload_url":   presigned.URL,
+		"key":          key,
+		"content_type": ct,
+	}), nil
+}
+
+// ---- POST /api/scan/start ----
+// scanInit でアップロード完了後、SQS にメッセージを投入して処理開始。
+// body: { job_id }
+func scanStart(ctx context.Context, req events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {
+	body := decodeBody(req)
+	var payload struct {
+		JobID string `json:"job_id"`
+	}
+	if err := json.Unmarshal([]byte(body), &payload); err != nil || payload.JobID == "" {
+		return errJSON(400, "expected JSON {job_id}"), nil
+	}
+	out, err := ddbClient.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName: aws.String(jobsTable),
+		Key: map[string]ddbtypes.AttributeValue{
+			"job_id": &ddbtypes.AttributeValueMemberS{Value: payload.JobID},
+		},
+	})
+	if err != nil || out.Item == nil {
+		return errJSON(404, "job not found"), nil
+	}
+	var key string
+	if v, ok := out.Item["image_key"].(*ddbtypes.AttributeValueMemberS); ok {
+		key = v.Value
+	}
+	if key == "" {
+		return errJSON(400, "image_key missing on job"), nil
+	}
+	// S3 にオブジェクトが届いているか軽く確認
+	if _, err := s3Client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)}); err != nil {
+		return errJSON(400, "upload not found in S3: "+err.Error()), nil
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := ddbClient.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: aws.String(jobsTable),
+		Key: map[string]ddbtypes.AttributeValue{
+			"job_id": &ddbtypes.AttributeValueMemberS{Value: payload.JobID},
+		},
+		UpdateExpression:         aws.String("SET #s = :s, updated_at = :u"),
+		ExpressionAttributeNames: map[string]string{"#s": "status"},
+		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+			":s": &ddbtypes.AttributeValueMemberS{Value: "pending"},
+			":u": &ddbtypes.AttributeValueMemberS{Value: now},
+		},
+	}); err != nil {
+		return errJSON(500, "ddb update: "+err.Error()), nil
+	}
+	msg, _ := json.Marshal(map[string]string{"job_id": payload.JobID, "image_key": key})
+	if _, err := sqsClient.SendMessage(ctx, &sqs.SendMessageInput{
+		QueueUrl:    aws.String(yoloQueueURL),
+		MessageBody: aws.String(string(msg)),
+	}); err != nil {
+		return errJSON(500, "sqs send: "+err.Error()), nil
+	}
+	return okJSON(202, map[string]any{"job_id": payload.JobID}), nil
+}
+
+func decodeBody(req events.APIGatewayV2HTTPRequest) string {
+	if req.IsBase64Encoded {
+		if dec, err := base64.StdEncoding.DecodeString(req.Body); err == nil {
+			return string(dec)
+		}
+	}
+	return req.Body
+}
+
 // ---- GET /api/jobs/{id} ----
 func getJob(ctx context.Context, req events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {
 	id := filepath.Base(req.RawPath)
@@ -301,12 +436,11 @@ func getJob(ctx context.Context, req events.APIGatewayV2HTTPRequest) (events.API
 	}
 
 	resp := map[string]any{"job_id": id}
-	for k, v := range out.Item {
-		if s, ok := v.(*ddbtypes.AttributeValueMemberS); ok {
-			resp[k] = s.Value
-		}
-		if n, ok := v.(*ddbtypes.AttributeValueMemberN); ok {
-			resp[k] = n.Value
+	// Map/List も含めて全属性を一般的な Go の型に展開する
+	var generic map[string]any
+	if err := attributevalue.UnmarshalMap(out.Item, &generic); err == nil {
+		for k, v := range generic {
+			resp[k] = v
 		}
 	}
 
@@ -323,6 +457,47 @@ func getJob(ctx context.Context, req events.APIGatewayV2HTTPRequest) (events.API
 		}
 	}
 	return okJSON(200, resp), nil
+}
+
+// ---- GET /api/crops/{job_id}/{crop_id}.jpg ----
+// catalog.json は s3://bucket/crops/{job_id}/{crop_id}.jpg を返すが、
+// ブラウザから直接 S3 は触れないので Lambda 経由でストリーミングする。
+func getCrop(ctx context.Context, rawPath string) (events.APIGatewayV2HTTPResponse, error) {
+	key := strings.TrimPrefix(rawPath, "/api/crops/")
+	if key == "" || strings.Contains(key, "..") {
+		return errJSON(400, "invalid crop key"), nil
+	}
+	s3Key := "crops/" + key
+	obj, err := s3Client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String(s3Key)})
+	if err != nil {
+		return errJSON(404, "crop not found"), nil
+	}
+	defer obj.Body.Close()
+	buf := make([]byte, 0, 1024*1024)
+	tmp := make([]byte, 64*1024)
+	for {
+		n, rerr := obj.Body.Read(tmp)
+		if n > 0 {
+			buf = append(buf, tmp[:n]...)
+		}
+		if rerr != nil {
+			break
+		}
+	}
+	ct := "image/jpeg"
+	if obj.ContentType != nil && *obj.ContentType != "" {
+		ct = *obj.ContentType
+	}
+	return events.APIGatewayV2HTTPResponse{
+		StatusCode: 200,
+		Headers: map[string]string{
+			"Content-Type":                ct,
+			"Cache-Control":               "public, max-age=300",
+			"Access-Control-Allow-Origin": "*",
+		},
+		Body:            base64.StdEncoding.EncodeToString(buf),
+		IsBase64Encoded: true,
+	}, nil
 }
 
 // ---- GET /api/shelves ----

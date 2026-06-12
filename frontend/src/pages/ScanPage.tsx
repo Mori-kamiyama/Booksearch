@@ -1,11 +1,13 @@
 import { useState, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { apiFetch } from '../lib/api'
 
 export default function ScanPage() {
   const [mode, setMode] = useState<'upload' | 'camera'>('upload')
   const [file, setFile] = useState<File | null>(null)
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState('')
+  const [progress, setProgress] = useState(0)
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const recorderRef = useRef<MediaRecorder | null>(null)
@@ -47,21 +49,32 @@ export default function ScanPage() {
     if (!file) return
     setUploading(true)
     setError('')
+    setProgress(0)
     try {
-      const contentBase64 = await fileToBase64(file)
-      const res = await fetch('/api/scan', {
+      const contentType = file.type || 'application/octet-stream'
+      // 1. presigned PUT URL を取得
+      const initRes = await apiFetch('/api/scan/init', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          filename: file.name,
-          content_base64: contentBase64,
-        }),
+        body: JSON.stringify({ filename: file.name, content_type: contentType }),
       })
-      if (!res.ok) throw new Error(`${res.status}`)
-      const data = await res.json()
-      navigate(`/jobs/${data.job_id}`)
+      if (!initRes.ok) throw new Error(`init ${initRes.status}: ${await initRes.text()}`)
+      const init = (await initRes.json()) as { job_id: string; upload_url: string; content_type: string }
+
+      // 2. S3 へ直接 PUT（XHR で進捗付き）
+      await putWithProgress(init.upload_url, file, init.content_type, setProgress)
+
+      // 3. 処理開始を通知
+      const startRes = await apiFetch('/api/scan/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ job_id: init.job_id }),
+      })
+      if (!startRes.ok) throw new Error(`start ${startRes.status}: ${await startRes.text()}`)
+
+      navigate(`/jobs/${init.job_id}`)
     } catch (e) {
-      setError(`アップロードに失敗しました: ${e}`)
+      setError(`アップロードに失敗しました: ${e instanceof Error ? e.message : String(e)}`)
     } finally {
       setUploading(false)
     }
@@ -131,8 +144,13 @@ export default function ScanPage() {
         onClick={submit}
         className="mt-6 w-full py-3 bg-[#1f7a5c] text-white rounded-xl font-bold text-base hover:bg-[#196649] disabled:opacity-40 transition-colors"
       >
-        {uploading ? '送信中…' : '解析する'}
+        {uploading ? (progress > 0 && progress < 100 ? `アップロード中… ${progress}%` : '送信中…') : '解析する'}
       </button>
+      {uploading && progress > 0 && progress < 100 && (
+        <div className="mt-3 w-full h-2 bg-gray-200 rounded-full overflow-hidden">
+          <div className="h-full bg-[#1f7a5c] transition-all" style={{ width: `${progress}%` }} />
+        </div>
+      )}
 
       <p className="text-xs text-gray-400 mt-3 text-center">
         本棚にAprilTagが貼られている場合、棚IDも自動で認識されます。
@@ -141,14 +159,28 @@ export default function ScanPage() {
   )
 }
 
-function fileToBase64(file: File): Promise<string> {
+function putWithProgress(
+  url: string,
+  file: File,
+  contentType: string,
+  onProgress: (pct: number) => void,
+): Promise<void> {
   return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => {
-      const value = String(reader.result || '')
-      resolve(value.replace(/^data:.*?;base64,/, ''))
+    const xhr = new XMLHttpRequest()
+    xhr.open('PUT', url)
+    xhr.setRequestHeader('Content-Type', contentType)
+    xhr.upload.onprogress = e => {
+      if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100))
     }
-    reader.onerror = reject
-    reader.readAsDataURL(file)
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        onProgress(100)
+        resolve()
+      } else {
+        reject(new Error(`S3 PUT ${xhr.status}: ${xhr.responseText.slice(0, 200)}`))
+      }
+    }
+    xhr.onerror = () => reject(new Error('S3 PUT network error'))
+    xhr.send(file)
   })
 }

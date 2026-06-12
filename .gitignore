@@ -16,6 +16,9 @@ frontend/dist/
 frontend/*.tsbuildinfo
 frontend/vite.config.js
 frontend/vite.config.d.ts
+tests/node_modules/
+tests/playwright-report/
+tests/test-results/
 
 # Data / outputs (大きいファイル)
 outputs/
@@ -25,7 +28,10 @@ dataset/
 *.db
 !aws/functions/go_api/library.db
 !aws/functions/lookup_worker/assets/library.db
+!aws/functions/yolo_worker/assets/yolo_model.pt
 
 # Misc
+.claude/
+aws/.aws-sam/
 .nvimlog
 .DS_Store

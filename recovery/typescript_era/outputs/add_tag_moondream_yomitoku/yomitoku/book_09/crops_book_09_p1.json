@@ -1,0 +1,220 @@
+{
+    "figures": [
+        {
+            "box": [
+                0,
+                0,
+                146,
+                586
+            ],
+            "direction": "horizontal",
+            "order": 0,
+            "paragraphs": [
+                {
+                    "box": [
+                        66,
+                        141,
+                        86,
+                        172
+                    ],
+                    "contents": "教育",
+                    "direction": "horizontal",
+                    "order": 0,
+                    "role": null
+                },
+                {
+                    "box": [
+                        0,
+                        228,
+                        20,
+                        297
+                    ],
+                    "contents": "はつ",
+                    "direction": "vertical",
+                    "order": 1,
+                    "role": null
+                },
+                {
+                    "box": [
+                        7,
+                        187,
+                        79,
+                        417
+                    ],
+                    "contents": "で未来の教室をつくろう",
+                    "direction": "horizontal",
+                    "order": 2,
+                    "role": null
+                },
+                {
+                    "box": [
+                        72,
+                        460,
+                        100,
+                        504
+                    ],
+                    "contents": "家入",
+                    "direction": "horizontal",
+                    "order": 3,
+                    "role": null
+                },
+                {
+                    "box": [
+                        117,
+                        470,
+                        139,
+                        503
+                    ],
+                    "contents": "矢島",
+                    "direction": "horizontal",
+                    "order": 4,
+                    "role": null
+                },
+                {
+                    "box": [
+                        19,
+                        501,
+                        52,
+                        521
+                    ],
+                    "contents": "63. 15",
+                    "direction": "horizontal",
+                    "order": 5,
+                    "role": null
+                }
+            ]
+        }
+    ],
+    "paragraphs": [],
+    "tables": [],
+    "words": [
+        {
+            "content": "63. 15",
+            "det_score": 0.509600294561646,
+            "direction": "horizontal",
+            "points": [
+                [
+                    23,
+                    501
+                ],
+                [
+                    52,
+                    508
+                ],
+                [
+                    49,
+                    521
+                ],
+                [
+                    19,
+                    514
+                ]
+            ],
+            "rec_score": 0.022766511887311935
+        },
+        {
+            "content": "矢島",
+            "det_score": 0.5856411249158322,
+            "direction": "horizontal",
+            "points": [
+                [
+                    120,
+                    470
+                ],
+                [
+                    139,
+                    472
+                ],
+                [
+                    136,
+                    503
+                ],
+                [
+                    117,
+                    501
+                ]
+            ],
+            "rec_score": 0.8190934062004089
+        },
+        {
+            "content": "家入",
+            "det_score": 0.6475030544182979,
+            "direction": "horizontal",
+            "points": [
+                [
+                    79,
+                    460
+                ],
+                [
+                    100,
+                    463
+                ],
+                [
+                    94,
+                    504
+                ],
+                [
+                    72,
+                    501
+                ]
+            ],
+            "rec_score": 0.9963716864585876
+        },
+        {
+            "content": "はつ",
+            "det_score": 0.5022253765626897,
+            "direction": "vertical",
+            "points": [
+                [
+                    0,
+                    228
+                ],
+                [
+                    20,
+                    228
+                ],
+                [
+                    19,
+                    297
+                ],
+                [
+                    0,
+                    297
+                ]
+            ],
+            "rec_score": 0.08896514773368835
+        },
+        {
+            "content": "で未来の教室をつくろう",
+            "det_score": 0.6770445687419107,
+            "direction": "horizontal",
+            "points": [
+                [
+                    7,
+                    412
+                ],
+                [
+                    50,
+                    187
+                ],
+                [
+                    79,
+                    192
+                ],
+                [
+                    35,
+                    417
+                ]
+            ],
+            "rec_score": 0.7596724033355713
+        },
+        {
+            "content": "教育",
+            "det_score": 0.5454741138125453,
+            "direction": "horizontal",
+            "points": [
+                [
+                    69,
+                    141
+                ],
+                [

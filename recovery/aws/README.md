@@ -1,0 +1,210 @@
+# Booksearch AWS Backend
+
+ホンノキ バックエンドの AWS (SAM) 移植版。プランの「Go API + S3 + DynamoDB + SQS + Python Worker」分割を、4 つの Lambda として実装した。
+
+## アーキテクチャ
+
+```
+[Client]
+    │ POST /api/scan {filename, content_base64}
+    ▼
+[API Gateway HTTP API]
+    │
+    ▼
+[ApiFunction] (Go, provided.al2023, arm64)
+    ├─ S3 PUT uploads/{job_id}/upload.jpg
+    ├─ DDB PutItem jobs (status=pending)
+    └─ SQS yolo-queue へ
+            │
+            ▼
+    [YoloFunction] (Container, arm64, 3GB)
+        ├─ S3 GET image
+        ├─ YOLO 推論 (model.pt は image 同梱)
+        ├─ AprilTag 検出 + shelf 割当
+        ├─ crop S3 PUT crops/{job_id}/{crop_id}.jpg
+        ├─ DDB PutItem crops × N
+        ├─ DDB Update jobs.crop_total = readable crop 数
+        ├─ DDB Update jobs.detected_crop_total = 検出 crop 数
+        ├─ DDB Update jobs.skipped_crop_total = 低品質 skip 数
+        └─ SQS ocr-queue へ × N (readable のみ)
+                │
+                ▼
+        [OcrFunction] (Python zip, arm64) × N 並列
+            ├─ Secrets Manager から GEMINI_API_KEY
+            ├─ S3 GET crop
+            ├─ Gemini OCR
+            ├─ DDB Update crops.titles
+            ├─ DDB ADD jobs.ocr_done += 1 (ATOMIC)
+            └─ 最後の 1 件のみ SQS lookup-queue へ
+                    │
+                    ▼
+            [LookupFunction] (Container, arm64)
+                ├─ DDB Query crops (全件)
+                ├─ library.db (image 同梱) で照合
+                ├─ known_books.json で補完
+                ├─ catalog.json を S3 PUT catalogs/{job_id}/
+                └─ DDB Update jobs.status=done
+```
+
+## 前提
+
+- AWS CLI v2、`aws configure` 済み、ap-northeast-1
+- AWS SAM CLI 1.16+
+- Docker (Container Lambda の build と push に必要)
+- Go 1.22+
+- `outputs/library/library.db` がローカルに存在 (`uv run python scripts/build_library_db.py` で生成)
+- YOLO 学習済みモデル `runs/detect/runs/picture_box_detection/yolo11n_quick/weights/best.pt`
+- Gemini API key
+
+## デプロイ手順
+
+```bash
+cd aws
+
+# 1. Container イメージに同梱するアセットを集める
+./scripts/prepare_assets.sh
+
+# 2. ビルド (Go バイナリ + 2 つの Container イメージ)
+sam build
+
+# 3. 初回デプロイ (--guided で対話設定が記録される)
+sam deploy --guided \
+  --parameter-overrides "GeminiApiKey=$GEMINI_API_KEY"
+
+# 以降の更新
+sam deploy --parameter-overrides "GeminiApiKey=$GEMINI_API_KEY"
+```
+
+初回 `sam deploy --guided` で次を聞かれる:
+- Stack Name: `booksearch`
+- Region: `ap-northeast-1`
+- `Save arguments to samconfig.toml`: yes
+- Container Lambda の image repo は `resolve_image_repos = true` で SAM に自動作成させる
+
+現在のデプロイでは、SAM が次の ECR repo を自動作成している:
+
+```text
+277707097118.dkr.ecr.ap-northeast-1.amazonaws.com/booksearch475a0c1a/yolofunction5b111eaerepo
+277707097118.dkr.ecr.ap-northeast-1.amazonaws.com/booksearch475a0c1a/lookupfunction9a029982repo
+```
+
+`sam build` には Docker が必要。Docker が起動していない状態で Go API / OCR zip Lambda だけを確認する場合:
+
+```bash
+sam build --exclude YoloFunction --exclude LookupFunction
+```
+
+## アセットの S3 配置 (任意)
+
+`/api/shelves` で AprilTag mapping を返すには S3 にも置く必要がある:
+
+```bash
+./scripts/upload_apriltag_to_s3.sh
+```
+
+## E2E テスト
+
+```bash
+./scripts/e2e_test.sh                        # Picture/ の 1 枚目
+./scripts/e2e_test.sh path/to/your_image.jpg # 任意の画像
+```
+
+POST → 5秒ごとにポーリング → status が `done` になったら catalog の book 件数を表示する。
+
+## デバッグ
+
+```bash
+# 各 Lambda のログ
+sam logs --stack-name booksearch -n ApiFunction --tail
+sam logs --stack-name booksearch -n YoloFunction --tail
+sam logs --stack-name booksearch -n OcrFunction --tail
+sam logs --stack-name booksearch -n LookupFunction --tail
+
+# DynamoDB の状態
+aws dynamodb get-item --table-name booksearch-jobs \
+  --key '{"job_id":{"S":"<UUID>"}}'
+
+aws dynamodb query --table-name booksearch-crops \
+  --key-condition-expression "job_id = :j" \
+  --expression-attribute-values '{":j":{"S":"<UUID>"}}'
+
+# 失敗した SQS は DLQ に
+aws sqs receive-message --queue-url $(aws cloudformation describe-stacks \
+  --stack-name booksearch --query "Stacks[0].Outputs[?OutputKey=='YoloQueueUrl'].OutputValue" \
+  --output text | sed 's/-queue$/-dlq/')
+```
+
+## 解体
+
+```bash
+# S3 バケットを空にしてから sam delete
+BUCKET=$(aws cloudformation describe-stacks --stack-name booksearch \
+  --query "Stacks[0].Outputs[?OutputKey=='BucketName'].OutputValue" --output text)
+aws s3 rm "s3://$BUCKET" --recursive
+sam delete --stack-name booksearch --no-prompts
+
+# ECR
+aws ecr delete-repository --repository-name booksearch/yolo --force
+aws ecr delete-repository --repository-name booksearch/lookup --force
+```
+
+## ファイル構成
+
+```
+aws/
+├── template.yaml              # SAM テンプレ
+├── samconfig.toml             # stack 名・region
+├── README.md
+├── scripts/
+│   ├── prepare_assets.sh      # 同梱アセットを集める
+│   ├── upload_apriltag_to_s3.sh
+│   └── e2e_test.sh
+└── functions/
+    ├── go_api/                # provided.al2023 zip Lambda (Go)
+    │   ├── main.go            # ルーティング、handler 群
+    │   ├── books.go           # SQLite 検索
+    │   ├── go.mod
+    │   └── Makefile           # SAM BuildMethod: makefile
+    ├── yolo_worker/           # Container Lambda
+    │   ├── Dockerfile
+    │   ├── handler.py         # YOLO + AprilTag + crop + fan-out
+    │   ├── requirements.txt
+    │   └── assets/            # prepare_assets.sh が生成
+    │       ├── yolo_model.pt
+    │       ├── apriltag_shelf_map.json
+    │       └── known_books.json
+    ├── ocr_worker/            # Python zip Lambda
+    │   ├── handler.py         # Gemini OCR + ATOMIC INCR
+    │   └── requirements.txt
+    └── lookup_worker/         # Container Lambda
+        ├── Dockerfile
+        ├── handler.py         # SQLite 照合 + catalog 生成
+        ├── requirements.txt
+        └── assets/            # prepare_assets.sh が生成
+            ├── library.db
+            └── known_books.json
+```
+
+## API
+
+### `POST /api/scan`
+```json
+{ "filename": "shelf.jpg", "content_base64": "..." }
+```
+→ `202 { "job_id": "..." }`
+
+multipart upload ではなく JSON を受け取る。フロントエンドはこの形式に合わせる。
+
+### `GET /api/jobs/{job_id}`
+→ `200 { "status": "pending|ocr_pending|lookup_pending|done|failed|no_detection|no_readable_crops", "catalog": { ... } }`
+
+`status==done` のときだけ `catalog` フィールドが返る（S3 から動的に取得）。
+
+### `GET /api/books/search?q=...&limit=20`
+ローカル SQLite 検索（Lambda zip に同梱）。
+
+### `GET /api/books/{id}`
+個別取得。
+
+### `GET /api/shelves`
+S3 の AprilTag mapping を返す。

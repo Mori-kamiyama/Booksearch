@@ -75,9 +75,16 @@ def assess_quality(crop: np.ndarray, box: tuple[int, int, int, int],
     if x2 >= width - margin_x: edge_touch.append("right")
     if y2 >= height - margin_y: edge_touch.append("bottom")
 
+    # 画像サイズ相対の閾値。スマホ等の小さい入力でも crop が落ちないように。
+    # MIN_SHORT_EDGE_PX, MIN_SHORT_EDGE_RATIO, MIN_BLUR_SCORE は環境変数で上書き可。
+    min_edge_abs = int(os.environ.get("MIN_SHORT_EDGE_PX", "80"))
+    min_edge_ratio = float(os.environ.get("MIN_SHORT_EDGE_RATIO", "0.06"))
+    min_short_edge = max(min_edge_abs, int(min(width, height) * min_edge_ratio))
+    min_blur = float(os.environ.get("MIN_BLUR_SCORE", "50"))
+
     reasons = []
-    if blur_score < 150.0: reasons.append("blurry")
-    if short_edge < 550: reasons.append("too_small")
+    if blur_score < min_blur: reasons.append("blurry")
+    if short_edge < min_short_edge: reasons.append("too_small")
     if edge_touch and aspect_ratio >= 1.45: reasons.append("edge_wide")
     elif edge_touch and aspect_ratio <= 0.45: reasons.append("edge_tall")
 
@@ -123,16 +130,32 @@ class DetectedTag:
         return float(np.linalg.norm(np.array(point, dtype=np.float32) - self.center))
 
 
-def detect_tags(image: np.ndarray, mapping: dict[str, Any]) -> list[DetectedTag]:
-    dict_name = mapping.get("dictionary", "DICT_APRILTAG_36h11")
-    if dict_name not in ARUCO_DICTIONARIES:
-        return []
-    aruco_dict = cv2.aruco.getPredefinedDictionary(ARUCO_DICTIONARIES[dict_name])
-    detector = cv2.aruco.ArucoDetector(aruco_dict)
+def detect_tags(image: np.ndarray, mapping: dict[str, Any]) -> tuple[list[DetectedTag], dict[str, Any]]:
+    """AprilTag/ArUco を検出。mapping の辞書で失敗したら全辞書を試行し、
+    最も多く検出できた辞書を採用する。検出サマリも返す。"""
+    primary = mapping.get("dictionary", "DICT_APRILTAG_36h11")
+    candidates = [primary] + [k for k in ARUCO_DICTIONARIES if k != primary]
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    corners, ids, _ = detector.detectMarkers(gray)
-    if ids is None:
-        return []
+    best: tuple[list[Any], Any, str] = ([], None, primary)
+    diagnostics: dict[str, Any] = {"tried": [], "selected": None, "raw_ids": []}
+    for name in candidates:
+        if name not in ARUCO_DICTIONARIES:
+            continue
+        aruco_dict = cv2.aruco.getPredefinedDictionary(ARUCO_DICTIONARIES[name])
+        detector = cv2.aruco.ArucoDetector(aruco_dict)
+        corners, ids, _ = detector.detectMarkers(gray)
+        n = 0 if ids is None else len(ids)
+        diagnostics["tried"].append({"dict": name, "count": n})
+        if ids is not None and n > len(best[0]):
+            best = (list(corners), ids, name)
+        # 1辞書で十分検出できれば打ち切り
+        if ids is not None and n >= 2:
+            break
+    corners, ids, used_dict = best
+    diagnostics["selected"] = used_dict
+    if ids is None or len(ids) == 0:
+        return [], diagnostics
+    diagnostics["raw_ids"] = [int(x) for x in ids.flatten()]
     tag_cfg = mapping.get("tags", {})
     out = []
     for marker, raw_id in zip(corners, ids.flatten()):
@@ -156,7 +179,7 @@ def detect_tags(image: np.ndarray, mapping: dict[str, Any]) -> list[DetectedTag]
             tag_id=int(raw_id), center=pts.mean(axis=0),
             angle_deg=angle, orientation_status=status,
         ))
-    return out
+    return out, diagnostics
 
 
 def assign_shelf(box_xyxy, tags, mapping, max_distance=None):
@@ -230,13 +253,15 @@ def process_job(job_id: str, image_key: str) -> None:
     # 3. AprilTag (optional)
     mapping = None
     tags: list[DetectedTag] = []
+    tag_diag: dict[str, Any] = {}
     if APRILTAG_MAP_PATH.exists():
         try:
             mapping = json.loads(APRILTAG_MAP_PATH.read_text())
-            tags = detect_tags(img, mapping)
-            print(f"[yolo] detected {len(tags)} apriltags")
+            tags, tag_diag = detect_tags(img, mapping)
+            print(f"[yolo] detected {len(tags)} apriltags via {tag_diag.get('selected')} ids={tag_diag.get('raw_ids')}")
         except Exception as e:
             print(f"[yolo] apriltag failed: {e}")
+            tag_diag = {"error": str(e)}
 
     # 4. crop, S3 PUT, DDB
     image_stem = Path(image_key).stem
@@ -271,18 +296,29 @@ def process_job(job_id: str, image_key: str) -> None:
         if quality["readable"]:
             readable_count += 1
 
-    # 5. jobs テーブル更新
+    # 5. jobs テーブル更新（apriltag 診断情報を含む）
+    skip_reason_counts: dict[str, int] = {}
+    for r in crop_records:
+        for reason in r["quality"].get("reasons", []):
+            skip_reason_counts[reason] = skip_reason_counts.get(reason, 0) + 1
+    diag = {
+        "apriltag": tag_diag,
+        "skip_reasons": skip_reason_counts,
+        "readable_count": readable_count,
+        "total_crops": len(crop_records),
+    }
     jobs_table.update_item(
         Key={"job_id": job_id},
         UpdateExpression="SET #s = :s, crop_total = :n, ocr_done = :z, "
-                         "image_width = :w, image_height = :h",
-        ExpressionAttributeNames={"#s": "status"},
+                         "image_width = :w, image_height = :h, #d = :d",
+        ExpressionAttributeNames={"#s": "status", "#d": "diagnostics"},
         ExpressionAttributeValues={
             ":s": "ocr_pending" if readable_count > 0 else "no_readable_crops",
             ":n": len(crop_records),
             ":z": 0,
             ":w": width,
             ":h": height,
+            ":d": ddb_safe(diag),
         },
     )
 

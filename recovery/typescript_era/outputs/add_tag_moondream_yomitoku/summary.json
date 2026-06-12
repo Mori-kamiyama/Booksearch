@@ -1,0 +1,211 @@
+{
+  "response_json": "../outputs/add_tag/moondream_response.json",
+  "warped_image": "/Users/yuta/date/TypeScript/Booksearch/outputs/add_tag/add_tag_warped.jpg",
+  "padding": 0.02,
+  "books": [
+    {
+      "index": 1,
+      "crop_image": "../outputs/add_tag_moondream_yomitoku/crops/book_01.jpg",
+      "yomitoku_json": "../outputs/add_tag_moondream_yomitoku/yomitoku/book_01/book_01_p1.json",
+      "box": {
+        "left": 63,
+        "top": 242,
+        "right": 181,
+        "bottom": 846
+      },
+      "strings": []
+    },
+    {
+      "index": 2,
+      "crop_image": "../outputs/add_tag_moondream_yomitoku/crops/book_02.jpg",
+      "yomitoku_json": "../outputs/add_tag_moondream_yomitoku/yomitoku/book_02/book_02_p1.json",
+      "box": {
+        "left": 121,
+        "top": 217,
+        "right": 312,
+        "bottom": 833
+      },
+      "strings": []
+    },
+    {
+      "index": 3,
+      "crop_image": "../outputs/add_tag_moondream_yomitoku/crops/book_03.jpg",
+      "yomitoku_json": "../outputs/add_tag_moondream_yomitoku/yomitoku/book_03/book_03_p1.json",
+      "box": {
+        "left": 188,
+        "top": 229,
+        "right": 357,
+        "bottom": 806
+      },
+      "strings": []
+    },
+    {
+      "index": 4,
+      "crop_image": "../outputs/add_tag_moondream_yomitoku/crops/book_04.jpg",
+      "yomitoku_json": "../outputs/add_tag_moondream_yomitoku/yomitoku/book_04/book_04_p1.json",
+      "box": {
+        "left": 227,
+        "top": 231,
+        "right": 395,
+        "bottom": 819
+      },
+      "strings": []
+    },
+    {
+      "index": 5,
+      "crop_image": "../outputs/add_tag_moondream_yomitoku/crops/book_05.jpg",
+      "yomitoku_json": "../outputs/add_tag_moondream_yomitoku/yomitoku/book_05/book_05_p1.json",
+      "box": {
+        "left": 263,
+        "top": 242,
+        "right": 439,
+        "bottom": 846
+      },
+      "strings": []
+    },
+    {
+      "index": 6,
+      "crop_image": "../outputs/add_tag_moondream_yomitoku/crops/book_06.jpg",
+      "yomitoku_json": "../outputs/add_tag_moondream_yomitoku/yomitoku/book_06/book_06_p1.json",
+      "box": {
+        "left": 299,
+        "top": 353,
+        "right": 440,
+        "bottom": 840
+      },
+      "strings": []
+    },
+    {
+      "index": 7,
+      "crop_image": "../outputs/add_tag_moondream_yomitoku/crops/book_07.jpg",
+      "yomitoku_json": "../outputs/add_tag_moondream_yomitoku/yomitoku/book_07/book_07_p1.json",
+      "box": {
+        "left": 349,
+        "top": 323,
+        "right": 482,
+        "bottom": 840
+      },
+      "strings": []
+    },
+    {
+      "index": 8,
+      "crop_image": "../outputs/add_tag_moondream_yomitoku/crops/book_08.jpg",
+      "yomitoku_json": "../outputs/add_tag_moondream_yomitoku/yomitoku/book_08/book_08_p1.json",
+      "box": {
+        "left": 394,
+        "top": 316,
+        "right": 521,
+        "bottom": 839
+      },
+      "strings": []
+    },
+    {
+      "index": 9,
+      "crop_image": "../outputs/add_tag_moondream_yomitoku/crops/book_09.jpg",
+      "yomitoku_json": "../outputs/add_tag_moondream_yomitoku/yomitoku/book_09/book_09_p1.json",
+      "box": {
+        "left": 439,
+        "top": 249,
+        "right": 585,
+        "bottom": 838
+      },
+      "strings": []
+    },
+    {
+      "index": 10,
+      "crop_image": "../outputs/add_tag_moondream_yomitoku/crops/book_10.jpg",
+      "yomitoku_json": "../outputs/add_tag_moondream_yomitoku/yomitoku/book_10/book_10_p1.json",
+      "box": {
+        "left": 520,
+        "top": 246,
+        "right": 653,
+        "bottom": 842
+      },
+      "strings": []
+    },
+    {
+      "index": 11,
+      "crop_image": "../outputs/add_tag_moondream_yomitoku/crops/book_11.jpg",
+      "yomitoku_json": "../outputs/add_tag_moondream_yomitoku/yomitoku/book_11/book_11_p1.json",
+      "box": {
+        "left": 532,
+        "top": 244,
+        "right": 697,
+        "bottom": 844
+      },
+      "strings": []
+    },
+    {
+      "index": 12,
+      "crop_image": "../outputs/add_tag_moondream_yomitoku/crops/book_12.jpg",
+      "yomitoku_json": "../outputs/add_tag_moondream_yomitoku/yomitoku/book_12/book_12_p1.json",
+      "box": {
+        "left": 570,
+        "top": 248,
+        "right": 739,
+        "bottom": 840
+      },
+      "strings": []
+    },
+    {
+      "index": 13,
+      "crop_image": "../outputs/add_tag_moondream_yomitoku/crops/book_13.jpg",
+      "yomitoku_json": "../outputs/add_tag_moondream_yomitoku/yomitoku/book_13/book_13_p1.json",
+      "box": {
+        "left": 611,
+        "top": 248,
+        "right": 771,
+        "bottom": 840
+      },
+      "strings": []
+    },
+    {
+      "index": 14,
+      "crop_image": "../outputs/add_tag_moondream_yomitoku/crops/book_14.jpg",
+      "yomitoku_json": "../outputs/add_tag_moondream_yomitoku/yomitoku/book_14/book_14_p1.json",
+      "box": {
+        "left": 652,
+        "top": 238,
+        "right": 835,
+        "bottom": 842
+      },
+      "strings": []
+    },
+    {
+      "index": 15,
+      "crop_image": "../outputs/add_tag_moondream_yomitoku/crops/book_15.jpg",
+      "yomitoku_json": "../outputs/add_tag_moondream_yomitoku/yomitoku/book_15/book_15_p1.json",
+      "box": {
+        "left": 757,
+        "top": 236,
+        "right": 906,
+        "bottom": 829
+      },
+      "strings": []
+    },
+    {
+      "index": 16,
+      "crop_image": "../outputs/add_tag_moondream_yomitoku/crops/book_16.jpg",
+      "yomitoku_json": "../outputs/add_tag_moondream_yomitoku/yomitoku/book_16/book_16_p1.json",
+      "box": {
+        "left": 841,
+        "top": 242,
+        "right": 967,
+        "bottom": 853
+      },
+      "strings": []
+    },
+    {
+      "index": 17,
+      "crop_image": "../outputs/add_tag_moondream_yomitoku/crops/book_17.jpg",
+      "yomitoku_json": "../outputs/add_tag_moondream_yomitoku/yomitoku/book_17/book_17_p1.json",
+      "box": {
+        "left": 921,
+        "top": 0,
+        "right": 999,
+        "bottom": 876
+      },
+      "strings": []
+    }
+  ]
+}

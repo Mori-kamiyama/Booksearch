@@ -1,0 +1,85 @@
+{
+  "segment_summary": "../outputs/add_tag_segment/summary.json",
+  "image": "/Users/yuta/date/TypeScript/Booksearch/outputs/add_tag/add_tag_warped.jpg",
+  "books": [
+    {
+      "index": 9,
+      "segment_bbox": {
+        "x_min": 0.4334305150631681,
+        "y_min": 0.2726326742976067,
+        "x_max": 0.5665694849368319,
+        "y_max": 0.8574401664932362
+      },
+      "mask_image": "../outputs/add_tag_segment_yomitoku/masks/book_09_mask.png",
+      "masked_crop": "../outputs/add_tag_segment_yomitoku/masked_crops/book_09_masked.png",
+      "yomitoku_json": "../outputs/add_tag_segment_yomitoku/yomitoku/book_09/masked_crops_book_09_masked_p1.json",
+      "strings": []
+    },
+    {
+      "index": 11,
+      "segment_bbox": {
+        "x_min": 0.5121477162293488,
+        "y_min": 0.2715920915712799,
+        "x_max": 0.6773566569484937,
+        "y_max": 0.8605619146722164
+      },
+      "mask_image": "../outputs/add_tag_segment_yomitoku/masks/book_11_mask.png",
+      "masked_crop": "../outputs/add_tag_segment_yomitoku/masked_crops/book_11_masked.png",
+      "yomitoku_json": "../outputs/add_tag_segment_yomitoku/yomitoku/book_11/masked_crops_book_11_masked_p1.json",
+      "strings": [
+        "和える",
+        "矢島",
+        "か"
+      ]
+    },
+    {
+      "index": 13,
+      "segment_bbox": {
+        "x_min": 0.5928085519922255,
+        "y_min": 0.26222684703433924,
+        "x_max": 0.7755102040816326,
+        "y_max": 0.858480749219563
+      },
+      "mask_image": "../outputs/add_tag_segment_yomitoku/masks/book_13_mask.png",
+      "masked_crop": "../outputs/add_tag_segment_yomitoku/masked_crops/book_13_masked.png",
+      "yomitoku_json": "../outputs/add_tag_segment_yomitoku/yomitoku/book_13/masked_crops_book_13_masked_p1.json",
+      "strings": [
+        "ブラントハンター西晶清順 人の心し棒物を破える\n戦略\nmg"
+      ]
+    },
+    {
+      "index": 15,
+      "segment_bbox": {
+        "x_min": 0.7444120505344995,
+        "y_min": 0.2601456815816857,
+        "x_max": 0.8794946550048591,
+        "y_max": 0.8511966701352758
+      },
+      "mask_image": "../outputs/add_tag_segment_yomitoku/masks/book_15_mask.png",
+      "masked_crop": "../outputs/add_tag_segment_yomitoku/masked_crops/book_15_masked.png",
+      "yomitoku_json": "../outputs/add_tag_segment_yomitoku/yomitoku/book_15/masked_crops_book_15_masked_p1.json",
+      "strings": [
+        "温かいテクノロジー"
+      ]
+    },
+    {
+      "index": 16,
+      "segment_bbox": {
+        "x_min": 0.8211856171039844,
+        "y_min": 0.26742976066597296,
+        "x_max": 0.9378036929057337,
+        "y_max": 0.8782518210197711
+      },
+      "mask_image": "../outputs/add_tag_segment_yomitoku/masks/book_16_mask.png",
+      "masked_crop": "../outputs/add_tag_segment_yomitoku/masked_crops/book_16_masked.png",
+      "yomitoku_json": "../outputs/add_tag_segment_yomitoku/yomitoku/book_16/masked_crops_book_16_masked_p1.json",
+      "strings": [
+        "SHU YAMAGUCH",
+        "山口周",
+        "ビジネスの未ャ",
+        "22.6",
+        "カ"
+      ]
+    }
+  ]
+}

@@ -1,8 +1,12 @@
 # YOLO + OpenCV + AprilTag を全部入れた Lambda Container (x86_64)
+# python:3.11 は AL2 ベース、yum を使う
 FROM public.ecr.aws/lambda/python:3.11
 
-# OS deps (opencv が必要とする libGL など)
-RUN dnf install -y mesa-libGL libglvnd-glx && dnf clean all
+# OS deps (opencv が必要とする libGL、numpy ビルド用 gcc など)
+RUN yum install -y mesa-libGL libglvnd-glx gcc gcc-c++ make && yum clean all
+
+# pip と build tools を最新化（meson-python が新しい numpy ビルドに必要）
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
 # Python deps
 COPY requirements.txt /tmp/

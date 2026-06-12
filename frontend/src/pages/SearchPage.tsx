@@ -1,4 +1,5 @@
 import { useState, useCallback } from 'react'
+import { apiFetch } from '../lib/api'
 
 interface Book {
   id: number
@@ -32,7 +33,7 @@ export default function SearchPage() {
     setLoading(true)
     setSearched(true)
     try {
-      const res = await fetch(`/api/books/search?q=${encodeURIComponent(q)}&limit=30`)
+      const res = await apiFetch(`/api/books/search?q=${encodeURIComponent(q)}&limit=30`)
       const data = await res.json()
       setBooks(data.books ?? [])
     } catch {

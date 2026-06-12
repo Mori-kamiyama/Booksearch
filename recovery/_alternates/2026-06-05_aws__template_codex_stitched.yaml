@@ -1,0 +1,274 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Booksearch (ホンノキ) backend on AWS — 4 Lambdas + S3 + DynamoDB + SQS
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: booksearch
+  GeminiModel:
+    Type: String
+    Default: gemini-3.1-flash-lite-preview
+  GeminiApiKey:
+    Type: String
+    NoEcho: true
+    Description: Gemini API key. Stored in Secrets Manager.
+
+Globals:
+  Function:
+    MemorySize: 512
+    Timeout: 30
+    Tracing: Active
+    Environment:
+      Variables:
+        PROJECT_NAME: !Ref ProjectName
+        BUCKET: !Ref AssetsBucket
+        JOBS_TABLE: !Ref JobsTable
+        CROPS_TABLE: !Ref CropsTable
+        OCR_QUEUE_URL: !Ref OcrQueue
+        LOOKUP_QUEUE_URL: !Ref LookupQueue
+        SECRET_GEMINI_ARN: !Ref GeminiSecret
+
+Resources:
+
+  # ---------- Storage ----------
+  AssetsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${ProjectName}-${AWS::AccountId}-${AWS::Region}
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireUploads
+            Status: Enabled
+            Prefix: uploads/
+            ExpirationInDays: 30
+          - Id: ExpireCrops
+            Status: Enabled
+            Prefix: crops/
+            ExpirationInDays: 30
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: ['*']
+            AllowedMethods: [GET, PUT, POST]
+            AllowedOrigins: ['*']
+
+  # ---------- DynamoDB ----------
+  JobsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${ProjectName}-jobs
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: job_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: job_id
+          KeyType: HASH
+
+  CropsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${ProjectName}-crops
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: job_id
+          AttributeType: S
+        - AttributeName: crop_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: job_id
+          KeyType: HASH
+        - AttributeName: crop_id
+          KeyType: RANGE
+
+  # ---------- SQS ----------
+  YoloDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${ProjectName}-yolo-dlq
+      MessageRetentionPeriod: 1209600
+
+  YoloQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${ProjectName}-yolo-queue
+      VisibilityTimeout: 900
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt YoloDLQ.Arn
+        maxReceiveCount: 2
+
+  OcrDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${ProjectName}-ocr-dlq
+      MessageRetentionPeriod: 1209600
+
+  OcrQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${ProjectName}-ocr-queue
+      VisibilityTimeout: 180
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt OcrDLQ.Arn
+        maxReceiveCount: 3
+
+  LookupDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${ProjectName}-lookup-dlq
+      MessageRetentionPeriod: 1209600
+
+  LookupQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${ProjectName}-lookup-queue
+      VisibilityTimeout: 300
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt LookupDLQ.Arn
+        maxReceiveCount: 2
+
+  # ---------- Secrets ----------
+  GeminiSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub ${ProjectName}/gemini-api-key
+      SecretString: !Sub '{"GEMINI_API_KEY":"${GeminiApiKey}"}'
+
+  # ---------- HTTP API (API Gateway v2) ----------
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration:
+        AllowOrigins: ['*']
+        AllowHeaders: ['*']
+        AllowMethods: [GET, POST, OPTIONS]
+
+  # ---------- Lambdas ----------
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ProjectName}-api
+      CodeUri: functions/go_api/
+      Handler: bootstrap
+      Runtime: provided.al2023
+      Architectures: [arm64]
+      MemorySize: 512
+      Timeout: 30
+      Environment:
+        Variables:
+          YOLO_QUEUE_URL: !Ref YoloQueue
+      Policies:
+        - S3CrudPolicy: { BucketName: !Ref AssetsBucket }
+        - DynamoDBCrudPolicy: { TableName: !Ref JobsTable }
+        - DynamoDBReadPolicy: { TableName: !Ref CropsTable }
+        - SQSSendMessagePolicy: { QueueName: !GetAtt YoloQueue.QueueName }
+      Events:
+        AnyRoot:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: ANY
+            Path: /{proxy+}
+        Root:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: ANY
+            Path: /
+
+  YoloFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ProjectName}-yolo
+      PackageType: Image
+      Architectures: [x86_64]
+      MemorySize: 3008
+      Timeout: 600
+      EphemeralStorage: { Size: 2048 }
+      Policies:
+        - S3CrudPolicy: { BucketName: !Ref AssetsBucket }
+        - DynamoDBCrudPolicy: { TableName: !Ref JobsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref CropsTable }
+        - SQSSendMessagePolicy: { QueueName: !GetAtt OcrQueue.QueueName }
+        - SQSSendMessagePolicy: { QueueName: !GetAtt LookupQueue.QueueName }
+      Events:
+        FromYoloQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt YoloQueue.Arn
+            BatchSize: 1
+    Metadata:
+      Dockerfile: Dockerfile
+      DockerContext: ./functions/yolo_worker
+      DockerTag: latest
+
+  OcrFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ProjectName}-ocr
+      CodeUri: functions/ocr_worker/
+      Handler: handler.handler
+      Runtime: python3.12
+      Architectures: [arm64]
+      MemorySize: 512
+      Timeout: 120
+      Environment:
+        Variables:
+          GEMINI_MODEL: !Ref GeminiModel
+      Policies:
+        - S3CrudPolicy: { BucketName: !Ref AssetsBucket }
+        - DynamoDBCrudPolicy: { TableName: !Ref JobsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref CropsTable }
+        - SQSSendMessagePolicy: { QueueName: !GetAtt LookupQueue.QueueName }
+        - Statement:
+            Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource: !Ref GeminiSecret
+      Events:
+        FromOcrQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt OcrQueue.Arn
+            BatchSize: 1
+
+  LookupFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ProjectName}-lookup
+      PackageType: Image
+      Architectures: [arm64]
+      MemorySize: 1024
+      Timeout: 120
+      Policies:
+        - S3CrudPolicy: { BucketName: !Ref AssetsBucket }
+        - DynamoDBCrudPolicy: { TableName: !Ref JobsTable }
+        - DynamoDBReadPolicy: { TableName: !Ref CropsTable }
+      Events:
+        FromLookupQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt LookupQueue.Arn
+            BatchSize: 1
+    Metadata:
+      Dockerfile: Dockerfile
+      DockerContext: ./functions/lookup_worker
+      DockerTag: latest
+
+Outputs:
+  ApiEndpoint:
+    Description: HTTP API endpoint
+    Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com
+    Description: HTTP API endpoint
+    Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com
+  BucketName:
+    Value: !Ref AssetsBucket
+  JobsTable:
+    Value: !Ref JobsTable
+  CropsTable:
+    Value: !Ref CropsTable
+  YoloQueueUrl:
+    Value: !Ref YoloQueue
+  OcrQueueUrl:
+    Value: !Ref OcrQueue
+  LookupQueueUrl:
+    Value: !Ref LookupQueue

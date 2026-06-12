@@ -1,0 +1,260 @@
+{
+    "figures": [
+        {
+            "box": [
+                3,
+                0,
+                1025,
+                959
+            ],
+            "direction": "horizontal",
+            "order": 0,
+            "paragraphs": [
+                {
+                    "box": [
+                        524,
+                        285,
+                        562,
+                        346
+                    ],
+                    "contents": "起床",
+                    "direction": "vertical",
+                    "order": 0,
+                    "role": null
+                },
+                {
+                    "box": [
+                        561,
+                        307,
+                        594,
+                        366
+                    ],
+                    "contents": "松沢2JFOR~",
+                    "direction": "vertical",
+                    "order": 1,
+                    "role": null
+                },
+                {
+                    "box": [
+                        69,
+                        379,
+                        96,
+                        658
+                    ],
+                    "contents": "不要にしているのかもしれない。",
+                    "direction": "vertical",
+                    "order": 2,
+                    "role": null
+                },
+                {
+                    "box": [
+                        91,
+                        384,
+                        107,
+                        660
+                    ],
+                    "contents": "会社というモンスターが僕たちを",
+                    "direction": "vertical",
+                    "order": 3,
+                    "role": null
+                },
+                {
+                    "box": [
+                        284,
+                        375,
+                        340,
+                        483
+                    ],
+                    "contents": "学校が変わる なの",
+                    "direction": "vertical",
+                    "order": 4,
+                    "role": null
+                },
+                {
+                    "box": [
+                        170,
+                        442,
+                        266,
+                        684
+                    ],
+                    "contents": "残量に一経営も人生も「ひねらんかい",
+                    "direction": "horizontal",
+                    "order": 5,
+                    "role": null
+                },
+                {
+                    "box": [
+                        263,
+                        510,
+                        302,
+                        578
+                    ],
+                    "contents": "0000\n--------",
+                    "direction": "vertical",
+                    "order": 6,
+                    "role": null
+                },
+                {
+                    "box": [
+                        306,
+                        405,
+                        363,
+                        559
+                    ],
+                    "contents": "幸せをつくるシゴト",
+                    "direction": "horizontal",
+                    "order": 7,
+                    "role": null
+                },
+                {
+                    "box": [
+                        331,
+                        469,
+                        382,
+                        582
+                    ],
+                    "contents": "旅をする木",
+                    "direction": "vertical",
+                    "order": 8,
+                    "role": null
+                },
+                {
+                    "box": [
+                        352,
+                        486,
+                        415,
+                        653
+                    ],
+                    "contents": "そらみみ植物園",
+                    "direction": "horizontal",
+                    "order": 9,
+                    "role": null
+                },
+                {
+                    "box": [
+                        403,
+                        478,
+                        462,
+                        640
+                    ],
+                    "contents": "はつみみ植物園",
+                    "direction": "horizontal",
+                    "order": 10,
+                    "role": null
+                },
+                {
+                    "box": [
+                        448,
+                        388,
+                        599,
+                        668
+                    ],
+                    "contents": "教育 で未来の教室をつくろう\nプラントハンター群馬\nなめらかなお金がめくる社会。",
+                    "direction": "horizontal",
+                    "order": 11,
+                    "role": null
+                },
+                {
+                    "box": [
+                        613,
+                        437,
+                        644,
+                        491
+                    ],
+                    "contents": "●和える",
+                    "direction": "vertical",
+                    "order": 12,
+                    "role": null
+                },
+                {
+                    "box": [
+                        574,
+                        496,
+                        630,
+                        662
+                    ],
+                    "contents": "9883\n以綾摩葉を子どもにつきて功義女性能集家",
+                    "direction": "vertical",
+                    "order": 13,
+                    "role": null
+                },
+                {
+                    "box": [
+                        623,
+                        393,
+                        694,
+                        630
+                    ],
+                    "contents": "やりがいから考える 自分らしい働き方",
+                    "direction": "horizontal",
+                    "order": 14,
+                    "role": null
+                },
+                {
+                    "box": [
+                        665,
+                        403,
+                        731,
+                        608
+                    ],
+                    "contents": "ブラントハンター西晶清順 人の心に様物を植える",
+                    "direction": "horizontal",
+                    "order": 15,
+                    "role": null
+                },
+                {
+                    "box": [
+                        682,
+                        402,
+                        786,
+                        604
+                    ],
+                    "contents": "ポジショニング戦略\nファイブ·ウェイ·",
+                    "direction": "horizontal",
+                    "order": 16,
+                    "role": null
+                },
+                {
+                    "box": [
+                        760,
+                        369,
+                        836,
+                        663
+                    ],
+                    "contents": "ファイブ·ウェイ·\nから考える「好き」を強みにする生き方 影戦争調査に\n温かいテクノロジー",
+                    "direction": "horizontal",
+                    "order": 17,
+                    "role": null
+                },
+                {
+                    "box": [
+                        808,
+                        505,
+                        860,
+                        683
+                    ],
+                    "contents": "温かいテクノロジー",
+                    "direction": "vertical",
+                    "order": 18,
+                    "role": null
+                },
+                {
+                    "box": [
+                        882,
+                        539,
+                        903,
+                        615
+                    ],
+                    "contents": "DETHEREAN",
+                    "direction": "vertical",
+                    "order": 19,
+                    "role": null
+                },
+                {
+                    "box": [
+                        898,
+                        542,
+                        916,
+                        603
+                    ],
+                    "contents": "OF BUSNESS",

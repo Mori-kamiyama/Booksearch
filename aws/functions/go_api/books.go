@@ -37,7 +37,8 @@ type BookStore struct {
 }
 
 func OpenBookStore(path string) (*BookStore, error) {
-	d, err := sql.Open("sqlite", path+"?mode=ro&_pragma=journal_mode(off)")
+	dsn := "file:" + path + "?mode=ro&immutable=1&_pragma=journal_mode(off)"
+	d, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}

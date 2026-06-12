@@ -91,6 +91,37 @@ sam deploy --parameter-overrides "GeminiApiKey=$GEMINI_API_KEY"
 ./scripts/upload_apriltag_to_s3.sh
 ```
 
+## フロントエンドのデプロイ
+
+S3 + CloudFront のスタックは `frontend-stack.yaml` で別管理。初回のみ:
+
+```bash
+cd aws
+aws cloudformation deploy \
+  --template-file frontend-stack.yaml \
+  --stack-name booksearch-frontend \
+  --region ap-northeast-1 \
+  --capabilities CAPABILITY_IAM
+```
+
+ビルド + 同期 + キャッシュ無効化:
+
+```bash
+cd ../frontend
+npm install
+npm run build
+BUCKET=$(aws cloudformation describe-stacks --stack-name booksearch-frontend \
+  --query "Stacks[0].Outputs[?OutputKey=='FrontendBucketName'].OutputValue" --output text)
+DIST=$(aws cloudformation describe-stacks --stack-name booksearch-frontend \
+  --query "Stacks[0].Outputs[?OutputKey=='FrontendDistributionId'].OutputValue" --output text)
+aws s3 sync dist/ s3://$BUCKET/ --delete --cache-control "public, max-age=300"
+aws cloudfront create-invalidation --distribution-id $DIST --paths "/*"
+```
+
+現在の配信 URL: <https://d2uel8nex1m4w7.cloudfront.net>
+
+API base URL は `frontend/.env.production` で固定。差し替える場合は `VITE_API_BASE_URL` を書き換えてから `npm run build`。
+
 ## E2E テスト
 
 ```bash
@@ -99,6 +130,16 @@ sam deploy --parameter-overrides "GeminiApiKey=$GEMINI_API_KEY"
 ```
 
 POST → 5秒ごとにポーリング → status が `done` になったら catalog の book 件数を表示する。
+
+### Playwright E2E（ブラウザ + API）
+
+```bash
+cd ../tests
+npm install && npx playwright install
+npm test
+```
+
+詳細は `tests/README.md`。
 
 ## デバッグ
 

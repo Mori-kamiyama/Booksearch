@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
+import { apiFetch, apiUrl } from '../lib/api'
 
 interface Candidate {
   title: string
@@ -32,11 +33,26 @@ interface Catalog {
   entries?: CatalogEntry[]
 }
 
+interface Diagnostics {
+  apriltag?: {
+    tried?: { dict: string; count: number }[]
+    selected?: string
+    raw_ids?: number[]
+    error?: string
+  }
+  skip_reasons?: Record<string, number>
+  readable_count?: number
+  total_crops?: number
+}
+
 interface JobState {
   job_id: string
-  status: 'pending' | 'running' | 'ocr_pending' | 'lookup_pending' | 'no_detection' | 'no_readable_crops' | 'done' | 'failed'
+  status: 'pending' | 'running' | 'ocr_pending' | 'lookup_pending' | 'no_detection' | 'no_readable_crops' | 'done' | 'failed' | 'uploading'
   error?: string
   catalog?: Catalog
+  diagnostics?: Diagnostics
+  crop_total?: number | string
+  ocr_done?: number | string
 }
 
 export default function JobPage() {
@@ -47,7 +63,7 @@ export default function JobPage() {
     let timer: ReturnType<typeof setInterval>
     const poll = async () => {
       try {
-        const res = await fetch(`/api/jobs/${id}`)
+        const res = await apiFetch(`/api/jobs/${id}`)
         const data: JobState = await res.json()
         setJob(data)
         if (data.status === 'done' || data.status === 'failed') {
@@ -89,7 +105,7 @@ export default function JobPage() {
       ) : (
         <>
           {/* サマリー */}
-          <div className="grid grid-cols-3 gap-4 mb-8">
+          <div className="grid grid-cols-3 gap-4 mb-6">
             {[
               { label: '検出 box', value: entries.length },
               { label: 'OCR タイトル', value: bookCount },
@@ -102,6 +118,9 @@ export default function JobPage() {
             ))}
           </div>
 
+          <DiagnosticsPanel diag={job.diagnostics} />
+
+
           {/* エントリ一覧 */}
           <div className="grid gap-6">
             {entries.map(entry => (
@@ -112,6 +131,81 @@ export default function JobPage() {
       )}
     </div>
   )
+}
+
+function DiagnosticsPanel({ diag }: { diag?: Diagnostics }) {
+  if (!diag) return null
+  const tag = diag.apriltag
+  const skip = diag.skip_reasons ?? {}
+  const skipEntries = Object.entries(skip)
+  const hasContent =
+    (tag?.raw_ids?.length ?? 0) > 0 ||
+    (tag?.tried?.length ?? 0) > 0 ||
+    skipEntries.length > 0
+  if (!hasContent) return null
+
+  return (
+    <details className="mb-6 bg-white border border-gray-200 rounded-xl">
+      <summary className="cursor-pointer select-none px-5 py-3 font-semibold text-gray-700 hover:bg-gray-50">
+        🔧 診断情報
+      </summary>
+      <div className="px-5 py-4 border-t border-gray-100 space-y-4 text-sm">
+        <div>
+          <p className="font-semibold text-gray-700 mb-1">AprilTag 検出</p>
+          {tag?.error ? (
+            <p className="text-red-600">エラー: {tag.error}</p>
+          ) : (tag?.raw_ids?.length ?? 0) > 0 ? (
+            <p className="text-gray-600">
+              辞書 <code className="bg-gray-100 px-1 rounded">{tag?.selected}</code> で
+              tag ID = [{tag?.raw_ids?.join(', ')}] を検出
+            </p>
+          ) : (
+            <p className="text-gray-500">タグ検出なし。試行: {(tag?.tried ?? []).map(t => `${t.dict}=${t.count}`).join(' / ') || '—'}</p>
+          )}
+        </div>
+        {skipEntries.length > 0 && (
+          <div>
+            <p className="font-semibold text-gray-700 mb-1">crop スキップ理由（{diag.readable_count}/{diag.total_crops} が読取対象）</p>
+            <div className="flex flex-wrap gap-2">
+              {skipEntries.map(([reason, count]) => (
+                <span key={reason} className="text-xs bg-orange-50 text-orange-700 px-2 py-0.5 rounded">
+                  {reasonLabel(reason)}: {count}
+                </span>
+              ))}
+            </div>
+            {('too_small' in skip) && (
+              <p className="text-xs text-gray-500 mt-2">
+                ヒント: 撮影画像が小さい/被写体が遠いと「too_small」が出ます。より高解像度で撮影するか、被写体に近づいてください。
+              </p>
+            )}
+          </div>
+        )}
+      </div>
+    </details>
+  )
+}
+
+function reasonLabel(r: string): string {
+  switch (r) {
+    case 'too_small': return 'サイズ小'
+    case 'blurry': return 'ピンボケ'
+    case 'edge_wide': return '横長で端切れ'
+    case 'edge_tall': return '縦長で端切れ'
+    default: return r
+  }
+}
+
+function cropImageUrl(raw: string | undefined): string | null {
+  if (!raw) return null
+  // AWS catalog: "s3://bucket/crops/{job}/{crop}.jpg" → /api/crops/{job}/{crop}.jpg
+  const s3Match = raw.match(/^s3:\/\/[^/]+\/crops\/(.+)$/)
+  if (s3Match) return apiUrl('/api/crops/' + s3Match[1])
+  // local backend: /outputs/jobs/... → /static/jobs/...
+  if (raw.includes('/outputs/')) {
+    return apiUrl('/static/' + raw.replace(/^.*?\/outputs\//, 'jobs/'))
+  }
+  if (raw.startsWith('/')) return apiUrl(raw)
+  return raw
 }
 
 function StatusBadge({ status }: { status: string }) {
@@ -143,9 +237,7 @@ function StatusBadge({ status }: { status: string }) {
 }
 
 function EntryCard({ entry }: { entry: CatalogEntry }) {
-  const cropSrc = entry.crop_image
-    ? '/static/' + entry.crop_image.replace(/^.*?\/outputs\//, 'jobs/').replace(/^.*?outputs\//, '')
-    : null
+  const cropSrc = cropImageUrl(entry.crop_image)
 
   return (
     <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">

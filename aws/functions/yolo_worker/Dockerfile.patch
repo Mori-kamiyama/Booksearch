@@ -1,0 +1,6 @@
+# 既存の動作確認済み YOLO イメージをベースに、handler.py だけを差し替えるパッチ用 Dockerfile。
+# scipy/numpy のソースビルドを避けるため。
+FROM 277707097118.dkr.ecr.ap-northeast-1.amazonaws.com/booksearch475a0c1a/yolofunction5b111eaerepo@sha256:2d121abe14bfece5cb21b89794d8bbb294db24e04a1141691e91eb522f20b066
+
+COPY handler.py ${LAMBDA_TASK_ROOT}/
+COPY assets/ ${LAMBDA_TASK_ROOT}/assets/

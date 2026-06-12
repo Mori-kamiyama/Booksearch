@@ -1,0 +1,16 @@
+[project]
+name = "booksearch"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "accelerate>=1.13.0",
+    "huggingface-hub>=1.11.0",
+    "moondream>=0.0.10",
+    "opencv-python>=4.13.0.92",
+    "pillow>=10.4.0,<11.0.0",
+    "safetensors>=0.7.0",
+    "sentencepiece>=0.2.1",
+    "transformers>=5.5.4",
+]
