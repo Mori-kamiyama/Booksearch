@@ -13,4 +13,7 @@
 - Additional source, AWS, frontend, E2E, model, and historical files were salvaged without overwriting the recovery directory.
 - Verification passed for the backend Go tests, AWS Go API build/tests, Python syntax checks, and frontend production build.
 - The recovered YOLO model loaded successfully and detected four `box` instances in `A4 - 9.png`.
-- Some files under `recovery/` match secret/API-key patterns. Do not stage the directory wholesale until those values are removed or replaced.
+- Embedded credentials in recovered historical scripts were removed before the recovery checkpoint was pushed to GitHub.
+- Production Playwright E2E passed 22/22 against CloudFront and API Gateway:
+  desktop Chromium and mobile Safari UI, search, shelf candidates, SPA routing,
+  API health/search, legacy scan upload, and presigned S3 upload/start flow.
