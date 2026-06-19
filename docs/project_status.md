@@ -17,3 +17,19 @@
 - Production Playwright E2E passed 22/22 against CloudFront and API Gateway:
   desktop Chromium and mobile Safari UI, search, shelf candidates, SPA routing,
   API health/search, legacy scan upload, and presigned S3 upload/start flow.
+
+## 2026-06-19
+
+- Fixed a production job stuck in `ocr_pending`: YOLO counted all crops in
+  `crop_total`, while OCR only received readable crops. OCR now compares
+  `ocr_done` with `ocr_total` or the job diagnostics `readable_count`.
+- Updated Lookup Lambda to use the restored bundled `library.db` and open it as
+  an immutable read-only SQLite database.
+- Hardened the API Lambda request parser so job/status routes survive API
+  Gateway payload-shape differences.
+- Improved the job page so polling failures are visible instead of leaving the
+  last status on screen forever.
+- Reprocessed job `465791b6-2ece-48af-accd-06974db2e6a5`; it now finishes as
+  `done` with 3 detected boxes, 17 OCR titles, and 16 DB matches.
+- Redeployed API, OCR, Lookup, frontend S3/CloudFront, then reran production
+  Playwright E2E: 22/22 passed.

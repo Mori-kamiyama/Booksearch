@@ -298,8 +298,9 @@ def build_catalog(job_id: str) -> dict[str, Any]:
 
     entries = []
     if DB_PATH.exists():
-        con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+        con = sqlite3.connect(f"file:{DB_PATH}?mode=ro&immutable=1", uri=True)
         con.row_factory = sqlite3.Row
+        con.execute("PRAGMA query_only = ON")
     else:
         con = None
         print("[lookup] WARNING: library.db not bundled")

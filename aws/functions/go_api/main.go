@@ -66,12 +66,8 @@ func main() {
 	lambda.Start(handler)
 }
 
-func handler(ctx context.Context, req events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {
-	method := req.RequestContext.HTTP.Method
-	path := req.RawPath
-	if path == "" {
-		path = req.RequestContext.HTTP.Path
-	}
+func handler(ctx context.Context, raw json.RawMessage) (events.APIGatewayV2HTTPResponse, error) {
+	req, method, path := parseRequest(raw)
 
 	if method == "OPTIONS" {
 		return okJSON(204, nil), nil
@@ -101,6 +97,72 @@ func handler(ctx context.Context, req events.APIGatewayV2HTTPRequest) (events.AP
 	default:
 		return errJSON(404, "not found"), nil
 	}
+}
+
+func parseRequest(raw json.RawMessage) (events.APIGatewayV2HTTPRequest, string, string) {
+	var req events.APIGatewayV2HTTPRequest
+	_ = json.Unmarshal(raw, &req)
+
+	method := req.RequestContext.HTTP.Method
+	path := requestPath(req)
+	if method != "" && path != "" {
+		return req, method, path
+	}
+
+	var generic map[string]any
+	if err := json.Unmarshal(raw, &generic); err != nil {
+		return req, method, path
+	}
+	if method == "" {
+		if v, ok := generic["httpMethod"].(string); ok {
+			method = v
+		}
+	}
+	if path == "" {
+		if v, ok := generic["rawPath"].(string); ok {
+			path = v
+		} else if v, ok := generic["path"].(string); ok {
+			path = v
+		}
+	}
+	if method == "" || path == "" {
+		if rc, ok := generic["requestContext"].(map[string]any); ok {
+			if httpCtx, ok := rc["http"].(map[string]any); ok {
+				if method == "" {
+					if v, ok := httpCtx["method"].(string); ok {
+						method = v
+					}
+				}
+				if path == "" {
+					if v, ok := httpCtx["path"].(string); ok {
+						path = v
+					}
+				}
+			}
+		}
+	}
+	if req.RawPath == "" {
+		req.RawPath = path
+	}
+	if req.QueryStringParameters == nil {
+		if qs, ok := generic["queryStringParameters"].(map[string]any); ok {
+			req.QueryStringParameters = map[string]string{}
+			for k, v := range qs {
+				if s, ok := v.(string); ok {
+					req.QueryStringParameters[k] = s
+				}
+			}
+		}
+	}
+	if req.Body == "" {
+		if v, ok := generic["body"].(string); ok {
+			req.Body = v
+		}
+	}
+	if v, ok := generic["isBase64Encoded"].(bool); ok {
+		req.IsBase64Encoded = v
+	}
+	return req, method, path
 }
 
 // ---- /api/books/search ----
@@ -424,7 +486,10 @@ func decodeBody(req events.APIGatewayV2HTTPRequest) string {
 
 // ---- GET /api/jobs/{id} ----
 func getJob(ctx context.Context, req events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {
-	id := filepath.Base(req.RawPath)
+	id := strings.Trim(strings.TrimPrefix(requestPath(req), "/api/jobs/"), "/")
+	if id == "" || id == requestPath(req) {
+		id = filepath.Base(requestPath(req))
+	}
 	out, err := ddbClient.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName: aws.String(jobsTable),
 		Key: map[string]ddbtypes.AttributeValue{
@@ -457,6 +522,13 @@ func getJob(ctx context.Context, req events.APIGatewayV2HTTPRequest) (events.API
 		}
 	}
 	return okJSON(200, resp), nil
+}
+
+func requestPath(req events.APIGatewayV2HTTPRequest) string {
+	if req.RawPath != "" {
+		return req.RawPath
+	}
+	return req.RequestContext.HTTP.Path
 }
 
 // ---- GET /api/crops/{job_id}/{crop_id}.jpg ----

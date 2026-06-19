@@ -146,7 +146,13 @@ def process_one(job_id: str, crop_id: str, crop_key: str) -> None:
     )
     item = out.get("Attributes", {})
     done = int(item.get("ocr_done", 0))
-    total = int(item.get("crop_total", 0))
+    diagnostics = item.get("diagnostics") or {}
+    total = int(
+        item.get(
+            "ocr_total",
+            diagnostics.get("readable_count", item.get("crop_total", 0)),
+        )
+    )
     print(f"[ocr] progress {done}/{total}")
     if total > 0 and done >= total:
         # 最後の OCR が lookup_queue に投入

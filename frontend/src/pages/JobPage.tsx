@@ -58,18 +58,25 @@ interface JobState {
 export default function JobPage() {
   const { id } = useParams<{ id: string }>()
   const [job, setJob] = useState<JobState | null>(null)
+  const [pollError, setPollError] = useState('')
 
   useEffect(() => {
     let timer: ReturnType<typeof setInterval>
     const poll = async () => {
       try {
         const res = await apiFetch(`/api/jobs/${id}`)
+        if (!res.ok) {
+          throw new Error(`ジョブ取得に失敗しました (${res.status})`)
+        }
         const data: JobState = await res.json()
         setJob(data)
-        if (data.status === 'done' || data.status === 'failed') {
+        setPollError('')
+        if (['done', 'failed', 'no_detection', 'no_readable_crops'].includes(data.status)) {
           clearInterval(timer)
         }
-      } catch { /* ignore */ }
+      } catch (e) {
+        setPollError(e instanceof Error ? e.message : 'ジョブ取得に失敗しました')
+      }
     }
     poll()
     timer = setInterval(poll, 2000)
@@ -92,6 +99,12 @@ export default function JobPage() {
         <h2 className="text-2xl font-bold text-gray-800">スキャン結果</h2>
         <StatusBadge status={job.status} />
       </div>
+
+      {pollError && (
+        <div className="mb-6 bg-red-50 border border-red-200 rounded-xl p-4 text-sm text-red-700">
+          {pollError}。画面を再読み込みするか、スキャンをやり直してください。
+        </div>
+      )}
 
       {['pending', 'running', 'ocr_pending', 'lookup_pending'].includes(job.status) ? (
         <div className="text-center py-20 text-gray-500">

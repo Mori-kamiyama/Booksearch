@@ -309,12 +309,13 @@ def process_job(job_id: str, image_key: str) -> None:
     }
     jobs_table.update_item(
         Key={"job_id": job_id},
-        UpdateExpression="SET #s = :s, crop_total = :n, ocr_done = :z, "
+        UpdateExpression="SET #s = :s, crop_total = :n, ocr_total = :ot, ocr_done = :z, "
                          "image_width = :w, image_height = :h, #d = :d",
         ExpressionAttributeNames={"#s": "status", "#d": "diagnostics"},
         ExpressionAttributeValues={
             ":s": "ocr_pending" if readable_count > 0 else "no_readable_crops",
             ":n": len(crop_records),
+            ":ot": readable_count,
             ":z": 0,
             ":w": width,
             ":h": height,
