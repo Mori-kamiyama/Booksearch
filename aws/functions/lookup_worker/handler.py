@@ -306,6 +306,11 @@ def build_catalog(job_id: str) -> dict[str, Any]:
         print("[lookup] WARNING: library.db not bundled")
 
     for crop in crops:
+        quality = crop.get("quality") or {}
+        if crop.get("status") == "skipped_low_quality" or quality.get("readable") is False:
+            print(f"[lookup] skip unreadable crop {crop.get('crop_id')} reasons={quality.get('reasons')}")
+            continue
+
         crop_titles = crop.get("titles") or []
         enriched = []
         for book in crop_titles:

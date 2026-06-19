@@ -39,3 +39,8 @@
   `sha256:3ac833e0525afc06b20908897c87e7d321b7ef7398a38f54fb5fe60269a338ad`.
 - Pinned YOLO worker `scipy==1.11.4` so the arm64 Lambda image uses a wheel
   instead of trying to compile the latest SciPy with the Lambda base GCC.
+- Fixed the remaining production display issue where unreadable crops were
+  correctly skipped by YOLO/OCR but still included in the Lookup catalog. Lookup
+  now omits `skipped_low_quality` / `quality.readable=false` crops from
+  `catalog.entries`; job `ccdd375b-76c5-4e72-afff-502b812eaed9` was reprocessed
+  and now shows 1 readable box instead of 3 total detected boxes.
