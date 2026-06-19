@@ -44,3 +44,7 @@
   now omits `skipped_low_quality` / `quality.readable=false` crops from
   `catalog.entries`; job `ccdd375b-76c5-4e72-afff-502b812eaed9` was reprocessed
   and now shows 1 readable box instead of 3 total detected boxes.
+- Clarified the frontend location workflow: search results now always show a
+  location row, using the highest-confidence shelf candidate when available and
+  showing `場所未登録` when no shelf observation has been learned yet. The old
+  `棚候補` navigation label was renamed to `本の場所`.

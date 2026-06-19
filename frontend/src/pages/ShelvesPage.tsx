@@ -30,11 +30,11 @@ export default function ShelvesPage() {
 
   return (
     <div>
-      <h2 className="text-2xl font-bold text-gray-800 mb-6">棚候補</h2>
+      <h2 className="text-2xl font-bold text-gray-800 mb-6">本の場所候補</h2>
       {loading ? (
         <div className="text-center text-gray-500 py-12">読み込み中…</div>
       ) : Object.keys(grouped).length === 0 ? (
-        <div className="text-center text-gray-400 py-12">棚候補はまだありません。</div>
+        <div className="text-center text-gray-400 py-12">場所データはまだありません。</div>
       ) : (
         <div className="grid gap-6">
           {Object.entries(grouped).sort().map(([shelfID, rows]) => (

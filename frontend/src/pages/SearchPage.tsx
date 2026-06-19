@@ -94,6 +94,9 @@ export default function SearchPage() {
 }
 
 function BookCard({ book }: { book: Book }) {
+  const shelfCandidates = [...(book.shelf_candidates ?? [])].sort((a, b) => b.confidence - a.confidence)
+  const bestShelf = shelfCandidates[0]
+
   return (
     <div className="bg-white border border-gray-200 rounded-xl p-4 flex gap-4 items-start hover:shadow-md transition-shadow">
       {book.thumbnail ? (
@@ -111,6 +114,26 @@ function BookCard({ book }: { book: Book }) {
         <p className="font-bold text-gray-800 text-base leading-tight mb-1">{book.title}</p>
         {book.authors && <p className="text-sm text-gray-600">{book.authors}</p>}
         {book.publisher && <p className="text-sm text-gray-400">{book.publisher}</p>}
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <span className="text-xs font-semibold text-gray-500">場所</span>
+          {bestShelf ? (
+            <>
+              <span className="text-sm bg-green-50 text-green-800 px-2.5 py-1 rounded font-bold">
+                {bestShelf.shelf_id}
+              </span>
+              <span className="text-xs text-gray-500">
+                {Math.round(bestShelf.confidence * 100)}% / {bestShelf.observations}回
+              </span>
+              {shelfCandidates.slice(1).map(c => (
+                <span key={c.shelf_id} className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded">
+                  {c.shelf_id} {Math.round(c.confidence * 100)}%
+                </span>
+              ))}
+            </>
+          ) : (
+            <span className="text-sm text-gray-400">場所未登録</span>
+          )}
+        </div>
         <div className="flex flex-wrap gap-2 mt-2">
           {book.isbn && (
             <span className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded">ISBN: {book.isbn}</span>
@@ -118,11 +141,6 @@ function BookCard({ book }: { book: Book }) {
           {book.class_number && (
             <span className="text-xs bg-blue-50 text-blue-700 px-2 py-0.5 rounded">分類: {book.class_number}</span>
           )}
-          {(book.shelf_candidates ?? []).map(c => (
-            <span key={c.shelf_id} className="text-xs bg-green-50 text-green-700 px-2 py-0.5 rounded font-semibold">
-              棚: {c.shelf_id} ({Math.round(c.confidence * 100)}%, {c.observations}回)
-            </span>
-          ))}
         </div>
       </div>
       {book.info_link && (

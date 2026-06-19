@@ -23,7 +23,7 @@ function Nav() {
       <span className="text-xl font-bold text-[#1f7a5c] mr-4">🌳 ホンノキ</span>
       {link('/', '本を探す')}
       {link('/scan', '棚をスキャン')}
-      {link('/shelves', '棚候補')}
+      {link('/shelves', '本の場所')}
     </header>
   )
 }
