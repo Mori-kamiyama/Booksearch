@@ -33,3 +33,9 @@
   `done` with 3 detected boxes, 17 OCR titles, and 16 DB matches.
 - Redeployed API, OCR, Lookup, frontend S3/CloudFront, then reran production
   Playwright E2E: 22/22 passed.
+- Deployed the current YOLO worker image to AWS so edge-touching wide/tall crop
+  rejection (`edge_wide` / `edge_tall`) is active in production. The image was
+  pushed as `edge-aspect-filter-20260619` and Lambda now resolves to digest
+  `sha256:3ac833e0525afc06b20908897c87e7d321b7ef7398a38f54fb5fe60269a338ad`.
+- Pinned YOLO worker `scipy==1.11.4` so the arm64 Lambda image uses a wheel
+  instead of trying to compile the latest SciPy with the Lambda base GCC.
