@@ -48,3 +48,9 @@
   location row, using the highest-confidence shelf candidate when available and
   showing `場所未登録` when no shelf observation has been learned yet. The old
   `棚候補` navigation label was renamed to `本の場所`.
+- Added a growing Google Books cover cache to the AWS API. Search/book detail
+  responses now backfill missing `thumbnail` / `info_link` values by querying
+  Google Books for up to 5 missing covers per request and storing results in
+  `s3://booksearch-277707097118-ap-northeast-1/cache/google_book_covers.json`.
+  Missing-cover results are cached, while transient Google Books 429/5xx errors
+  are retried after 1 hour instead of being treated as long-term misses.

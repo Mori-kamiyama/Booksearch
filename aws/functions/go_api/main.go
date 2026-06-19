@@ -5,7 +5,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -35,6 +38,7 @@ var (
 	sqsClient            *sqs.Client
 	bookStore            *BookStore
 	staticAssets         string
+	googleBooksClient    = &http.Client{Timeout: 4 * time.Second}
 )
 
 func init() {
@@ -77,7 +81,7 @@ func handler(ctx context.Context, raw json.RawMessage) (events.APIGatewayV2HTTPR
 	case method == "GET" && path == "/api/health":
 		return okJSON(200, map[string]any{"status": "ok", "time": time.Now().Unix()}), nil
 	case method == "GET" && path == "/api/books/search":
-		return searchBooks(req)
+		return searchBooks(ctx, req)
 	case method == "GET" && path == "/api/shelf-candidates":
 		return listShelfCandidates(ctx)
 	case method == "GET" && strings.HasPrefix(path, "/api/books/"):
@@ -166,7 +170,7 @@ func parseRequest(raw json.RawMessage) (events.APIGatewayV2HTTPRequest, string, 
 }
 
 // ---- /api/books/search ----
-func searchBooks(req events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {
+func searchBooks(ctx context.Context, req events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {
 	q := req.QueryStringParameters["q"]
 	if q == "" {
 		return errJSON(400, "q is required"), nil
@@ -184,7 +188,8 @@ func searchBooks(req events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPRes
 	if err != nil {
 		return errJSON(500, err.Error()), nil
 	}
-	attachShelfCandidates(context.Background(), books)
+	attachShelfCandidates(ctx, books)
+	attachCoverCache(ctx, books)
 	return okJSON(200, map[string]any{"books": books, "query": q}), nil
 }
 
@@ -206,6 +211,7 @@ func getBook(ctx context.Context, req events.APIGatewayV2HTTPRequest) (events.AP
 	}
 	books := []Book{*book}
 	attachShelfCandidates(ctx, books)
+	attachCoverCache(ctx, books)
 	*book = books[0]
 	return okJSON(200, book), nil
 }
@@ -225,6 +231,243 @@ func attachShelfCandidates(ctx context.Context, books []Book) {
 			books[i].ShelfIDs = append(books[i].ShelfIDs, c.ShelfID)
 		}
 	}
+}
+
+type coverCacheEntry struct {
+	Thumbnail *string `json:"thumbnail,omitempty"`
+	InfoLink  *string `json:"info_link,omitempty"`
+	Error     string  `json:"error,omitempty"`
+	FetchedAt string  `json:"fetched_at"`
+	Query     string  `json:"query,omitempty"`
+	Title     string  `json:"title,omitempty"`
+}
+
+type googleBooksResponse struct {
+	Items []struct {
+		ID         string `json:"id"`
+		VolumeInfo struct {
+			Title      string `json:"title"`
+			InfoLink   string `json:"infoLink"`
+			ImageLinks struct {
+				Thumbnail      string `json:"thumbnail"`
+				SmallThumbnail string `json:"smallThumbnail"`
+			} `json:"imageLinks"`
+		} `json:"volumeInfo"`
+	} `json:"items"`
+}
+
+func attachCoverCache(ctx context.Context, books []Book) {
+	if bucket == "" || s3Client == nil {
+		return
+	}
+	cacheKey := os.Getenv("COVER_CACHE_KEY")
+	if cacheKey == "" {
+		cacheKey = "cache/google_book_covers.json"
+	}
+	cache := loadCoverCache(ctx, cacheKey)
+	changed := false
+	fetchLimit := coverFetchLimit()
+	fetched := 0
+
+	for i := range books {
+		if books[i].Thumbnail != nil && *books[i].Thumbnail != "" {
+			continue
+		}
+		id := strconv.Itoa(books[i].ID)
+		if entry, ok := cache[id]; ok {
+			if entry.Thumbnail != nil && *entry.Thumbnail != "" {
+				books[i].Thumbnail = entry.Thumbnail
+				books[i].InfoLink = entry.InfoLink
+				continue
+			}
+			if !coverCacheRetryDue(entry) {
+				continue
+			}
+		}
+		if fetched >= fetchLimit {
+			continue
+		}
+		entry := fetchGoogleBookCover(ctx, books[i])
+		cache[id] = entry
+		changed = true
+		fetched++
+		if entry.Thumbnail != nil && *entry.Thumbnail != "" {
+			books[i].Thumbnail = entry.Thumbnail
+			books[i].InfoLink = entry.InfoLink
+		}
+	}
+
+	if changed {
+		saveCoverCache(ctx, cacheKey, cache)
+	}
+}
+
+func coverFetchLimit() int {
+	limit := 5
+	if raw := os.Getenv("COVER_FETCH_LIMIT"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n >= 0 {
+			limit = n
+		}
+	}
+	return limit
+}
+
+func coverCacheRetryDue(entry coverCacheEntry) bool {
+	retryAfter := 30 * 24 * time.Hour
+	if raw := os.Getenv("COVER_RETRY_AFTER_DAYS"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil {
+			retryAfter = time.Duration(n) * 24 * time.Hour
+		}
+	}
+	if transientGoogleBooksError(entry.Error) {
+		retryAfter = time.Hour
+	}
+	if retryAfter <= 0 || entry.FetchedAt == "" {
+		return retryAfter <= 0
+	}
+	fetchedAt, err := time.Parse(time.RFC3339, entry.FetchedAt)
+	if err != nil {
+		return true
+	}
+	return time.Since(fetchedAt) >= retryAfter
+}
+
+func transientGoogleBooksError(err string) bool {
+	if strings.Contains(err, "google books status 429") {
+		return true
+	}
+	for _, code := range []string{"500", "502", "503", "504"} {
+		if strings.Contains(err, "google books status "+code) {
+			return true
+		}
+	}
+	return false
+}
+
+func loadCoverCache(ctx context.Context, key string) map[string]coverCacheEntry {
+	cache := map[string]coverCacheEntry{}
+	out, err := s3Client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return cache
+	}
+	defer out.Body.Close()
+	body, err := io.ReadAll(out.Body)
+	if err != nil {
+		log.Printf("cover cache read: %v", err)
+		return cache
+	}
+	if err := json.Unmarshal(body, &cache); err != nil {
+		log.Printf("cover cache decode: %v", err)
+	}
+	return cache
+}
+
+func saveCoverCache(ctx context.Context, key string, cache map[string]coverCacheEntry) {
+	body, err := json.MarshalIndent(cache, "", "  ")
+	if err != nil {
+		log.Printf("cover cache encode: %v", err)
+		return
+	}
+	_, err = s3Client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:      aws.String(bucket),
+		Key:         aws.String(key),
+		Body:        strings.NewReader(string(body)),
+		ContentType: aws.String("application/json; charset=utf-8"),
+	})
+	if err != nil {
+		log.Printf("cover cache save: %v", err)
+	}
+}
+
+func fetchGoogleBookCover(ctx context.Context, book Book) coverCacheEntry {
+	query := googleBooksQuery(book)
+	entry := coverCacheEntry{
+		FetchedAt: time.Now().UTC().Format(time.RFC3339),
+		Query:     query,
+		Title:     book.Title,
+	}
+	if query == "" {
+		entry.Error = "missing query"
+		return entry
+	}
+	reqURL := "https://www.googleapis.com/books/v1/volumes?" + query
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		entry.Error = err.Error()
+		return entry
+	}
+	resp, err := googleBooksClient.Do(req)
+	if err != nil {
+		entry.Error = err.Error()
+		return entry
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		entry.Error = fmt.Sprintf("google books status %d", resp.StatusCode)
+		return entry
+	}
+	var decoded googleBooksResponse
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		entry.Error = err.Error()
+		return entry
+	}
+	for _, item := range decoded.Items {
+		info := item.VolumeInfo
+		thumbnail := info.ImageLinks.Thumbnail
+		if thumbnail == "" {
+			thumbnail = info.ImageLinks.SmallThumbnail
+		}
+		if thumbnail == "" {
+			continue
+		}
+		thumbnail = strings.Replace(thumbnail, "http://", "https://", 1)
+		entry.Thumbnail = &thumbnail
+		if info.InfoLink != "" {
+			entry.InfoLink = &info.InfoLink
+		}
+		if info.Title != "" {
+			entry.Title = info.Title
+		}
+		return entry
+	}
+	entry.Error = "no thumbnail"
+	return entry
+}
+
+func googleBooksQuery(book Book) string {
+	values := url.Values{}
+	if isbn := normalizedISBN(book.ISBN); isbn != "" {
+		values.Set("q", "isbn:"+isbn)
+	} else if strings.TrimSpace(book.Title) != "" {
+		values.Set("q", "intitle:"+strings.TrimSpace(book.Title))
+	} else {
+		return ""
+	}
+	values.Set("maxResults", "3")
+	values.Set("printType", "books")
+	if key := os.Getenv("GOOGLE_BOOKS_API_KEY"); key != "" {
+		values.Set("key", key)
+	}
+	return values.Encode()
+}
+
+func normalizedISBN(raw string) string {
+	var b strings.Builder
+	for _, r := range raw {
+		if r >= '0' && r <= '9' {
+			b.WriteRune(r)
+		} else if r == 'x' || r == 'X' {
+			b.WriteRune('X')
+		}
+	}
+	isbn := b.String()
+	if len(isbn) >= 10 {
+		return isbn
+	}
+	return ""
 }
 
 func fetchShelfCandidates(ctx context.Context, bookID int) ([]ShelfCandidate, error) {
