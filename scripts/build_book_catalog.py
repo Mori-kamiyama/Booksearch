@@ -11,11 +11,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 import time
-import urllib.parse
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -39,28 +36,6 @@ DEFAULT_YOLO_MODEL = "aws/functions/yolo_worker/assets/yolo_model.pt"
 DEFAULT_LIBRARY_DB = "outputs/library/library.db"
 KNOWN_BOOKS_PATH = REPO_ROOT / "data" / "known_books.json"
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
-
-OCR_PROMPT = """\
-この画像は本が入った箱、または本棚の一区画を切り出したものです。
-背表紙から読み取れる本のタイトルだけをすべて抽出し、JSON object だけを返してください。
-
-形式:
-{
-  "books": [
-    {
-      "title": "書名"
-    }
-  ]
-}
-
-ルール:
-- 1冊につき1エントリ
-- タイトルが読めない本は除外
-- 著者名、出版社、ISBNは抽出しない
-- タイトル以外の文字を無理に混ぜない
-- 説明文や Markdown は不要。JSON object だけ返す
-"""
-
 
 @dataclass
 class DetectedBox:
@@ -241,141 +216,6 @@ def detect_and_crop(
         )
 
     return detected
-
-
-def strip_json_markdown(text: str) -> str:
-    text = text.strip()
-    if text.startswith("```"):
-        parts = text.split("```")
-        if len(parts) >= 2:
-            text = parts[1].strip()
-            if text.startswith("json"):
-                text = text[4:].strip()
-    return text
-
-
-def gemini_ocr(image_path: Path, model: str) -> list[dict[str, Any]]:
-    from google import genai
-    from google.genai import types
-
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        raise RuntimeError("GEMINI_API_KEY 環境変数が未設定です。")
-
-    client = genai.Client(api_key=api_key)
-    suffix = image_path.suffix.lower()
-    mime = "image/jpeg" if suffix in {".jpg", ".jpeg"} else "image/png"
-    response = client.models.generate_content(
-        model=model,
-        contents=[
-            types.Part.from_bytes(data=image_path.read_bytes(), mime_type=mime),
-            OCR_PROMPT,
-        ],
-    )
-    raw = strip_json_markdown(response.text or "")
-    data = json.loads(raw)
-    books = data.get("books", data if isinstance(data, list) else [])
-    normalized = [normalize_book(item) for item in books if isinstance(item, dict)]
-    return [book for book in normalized if book.get("title")]
-
-
-def normalize_book(item: dict[str, Any]) -> dict[str, Any]:
-    title = clean_text(item.get("title"))
-    return {"title": title}
-
-
-def clean_text(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
-
-
-def google_books_lookup(title: str | None) -> dict[str, Any] | None:
-    if not title:
-        return None
-
-    terms = [f'intitle:"{title}"']
-    query = " ".join(terms)
-    params = urllib.parse.urlencode(
-        {"q": query, "maxResults": 5, "printType": "books", "langRestrict": "ja"}
-    )
-    url = f"https://www.googleapis.com/books/v1/volumes?{params}"
-
-    try:
-        with urllib.request.urlopen(url, timeout=10) as response:
-            data = json.loads(response.read().decode("utf-8"))
-    except Exception as exc:
-        return {"error": str(exc), "query": query}
-
-    candidates = []
-    for item in data.get("items", []):
-        info = item.get("volumeInfo", {})
-        identifiers = info.get("industryIdentifiers", [])
-        isbns = [
-            ident.get("identifier")
-            for ident in identifiers
-            if ident.get("type") in {"ISBN_10", "ISBN_13"} and ident.get("identifier")
-        ]
-        candidates.append(
-            {
-                "title": info.get("title"),
-                "authors": info.get("authors", []),
-                "publisher": info.get("publisher"),
-                "published_date": info.get("publishedDate"),
-                "description": info.get("description"),
-                "page_count": info.get("pageCount"),
-                "categories": info.get("categories", []),
-                "language": info.get("language"),
-                "isbns": isbns,
-                "google_books_id": item.get("id"),
-                "info_link": info.get("infoLink"),
-                "thumbnail": (info.get("imageLinks") or {}).get("thumbnail"),
-            }
-        )
-
-    return {"query": query, "candidates": candidates}
-
-
-def library_db_lookup(
-    title: str | None,
-    db_path: Path,
-    limit: int = 5,
-    min_score: float = 0.75,
-    review_min_score: float = 0.65,
-) -> dict[str, Any] | None:
-    if not title or not db_path.exists():
-        return None
-
-    from search_library import search_library
-
-    results = search_library(db_path, title, limit=limit)
-    candidates = []
-    for item in results:
-        score = float(item.get("score") or 0.0)
-        if score < review_min_score:
-            continue
-        candidates.append(
-            {
-                "source": "library_db",
-                "score": score,
-                "match_confidence": "auto" if score >= min_score else "review",
-                "title": item.get("title"),
-                "authors": [item["authors"]] if item.get("authors") else [],
-                "publisher": item.get("publisher"),
-                "published_date": item.get("published_date"),
-                "class_number": item.get("class_number"),
-                "acquisition_type": item.get("acquisition_type"),
-                "registration_number": item.get("registration_number"),
-                "isbns": [item["isbn"]] if item.get("isbn") else [],
-                "library_db_id": item.get("id"),
-                "thumbnail": item.get("thumbnail"),
-                "info_link": item.get("info_link"),
-            }
-        )
-    if not candidates:
-        candidates = book_lookup.known_book_candidates(title, min_score=review_min_score)[:limit]
-    return {"query": title, "source": "library_db", "candidates": candidates}
 
 
 def make_catalog_entry(

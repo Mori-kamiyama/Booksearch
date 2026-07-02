@@ -19,7 +19,6 @@ import sys
 from typing import Any
 
 import boto3
-from boto3.dynamodb.conditions import Attr
 
 BUCKET = os.environ["BUCKET"]
 JOBS_TABLE = os.environ["JOBS_TABLE"]

@@ -20,7 +20,6 @@ import json
 import statistics
 from difflib import SequenceMatcher
 from pathlib import Path
-from collections import defaultdict
 
 
 GROUND_TRUTH_PATH = Path(__file__).parent.parent / "benchmark" / "ground_truth.json"
