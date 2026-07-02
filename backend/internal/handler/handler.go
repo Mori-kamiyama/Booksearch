@@ -1,12 +1,17 @@
 package handler
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"booksearch/backend/internal/db"
@@ -60,6 +65,80 @@ func (h *Handler) GetBook(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, book)
+}
+
+func (h *Handler) ShelfCandidates(c *gin.Context) {
+	limit := 500
+	if l, err := strconv.Atoi(c.Query("limit")); err == nil && l > 0 {
+		limit = l
+	}
+	candidates, err := h.Store.AllShelfCandidates(limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	h.attachCropURLs(candidates)
+	c.JSON(http.StatusOK, gin.H{"candidates": candidates})
+}
+
+type bookshelfData struct {
+	Shelves []struct {
+		ShelfID string `json:"shelf_id"`
+		Books   []struct {
+			BookID      int `json:"book_id"`
+			SourceBoxes []struct {
+				CropImage string `json:"crop_image"`
+			} `json:"source_boxes"`
+		} `json:"books"`
+	} `json:"shelves"`
+}
+
+func (h *Handler) attachCropURLs(candidates []db.ShelfCandidateRow) {
+	outputsDir := filepath.Clean(filepath.Join(h.JobsDir, ".."))
+	dataPath := filepath.Join(outputsDir, "book_catalog_data_260702", "bookshelf_data.json")
+	raw, err := os.ReadFile(dataPath)
+	if err != nil {
+		return
+	}
+	var data bookshelfData
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return
+	}
+
+	crops := map[string]string{}
+	for _, shelf := range data.Shelves {
+		for _, book := range shelf.Books {
+			if len(book.SourceBoxes) == 0 || book.SourceBoxes[0].CropImage == "" {
+				continue
+			}
+			crop := filepath.Clean(book.SourceBoxes[0].CropImage)
+			if !filepath.IsAbs(crop) {
+				crop = filepath.Join(h.Jobs.RepoRoot, crop)
+			}
+			if rel, ok := outputRelativePath(outputsDir, crop); ok {
+				key := fmt.Sprintf("%d:%s", book.BookID, shelf.ShelfID)
+				crops[key] = rel
+			}
+		}
+	}
+
+	for i := range candidates {
+		key := fmt.Sprintf("%d:%s", candidates[i].BookID, candidates[i].ShelfID)
+		rel, ok := crops[key]
+		if !ok {
+			continue
+		}
+		candidates[i].CropImage = rel
+		candidates[i].CropURL = "/static/" + strings.ReplaceAll(rel, string(filepath.Separator), "/")
+	}
+}
+
+func outputRelativePath(outputsDir string, path string) (string, bool) {
+	rel, err := filepath.Rel(outputsDir, path)
+	if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." {
+		return "", false
+	}
+	return rel, true
 }
 
 func (h *Handler) Scan(c *gin.Context) {
@@ -130,6 +209,74 @@ func (h *Handler) GetShelves(c *gin.Context) {
 	}
 	// マッピングJSONをそのまま返す（フロントで使いやすい形に）
 	c.Data(http.StatusOK, "application/json", data)
+}
+
+func (h *Handler) DetectTags(c *gin.Context) {
+	if h.TagMap == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "apriltag map is not configured"})
+		return
+	}
+	file, header, err := c.Request.FormFile("image")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "image field required"})
+		return
+	}
+	defer file.Close()
+
+	ext := filepath.Ext(header.Filename)
+	if ext == "" {
+		ext = ".jpg"
+	}
+	tmp, err := os.CreateTemp("", "booksearch-tag-*"+ext)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if _, err := io.Copy(tmp, file); err != nil {
+		tmp.Close()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	repoRoot := ""
+	if h.Jobs != nil {
+		repoRoot = h.Jobs.RepoRoot
+	}
+	if repoRoot == "" {
+		repoRoot = "."
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 8*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "uv", "run", "python", "scripts/detect_apriltags.py", "--image", tmpPath, "--map", h.TagMap)
+	cmd.Dir = repoRoot
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if ctx.Err() == context.DeadlineExceeded {
+		c.JSON(http.StatusGatewayTimeout, gin.H{"error": "tag detection timed out"})
+		return
+	}
+	if err != nil {
+		msg := stderr.String()
+		if msg == "" {
+			msg = err.Error()
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": msg})
+		return
+	}
+
+	var payload any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid detector response"})
+		return
+	}
+	c.JSON(http.StatusOK, payload)
 }
 
 func (h *Handler) ServeStatic(c *gin.Context) {

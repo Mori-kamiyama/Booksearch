@@ -208,11 +208,17 @@ def assign_shelf(box_xyxy, tags, mapping, max_distance=None):
                           "distance_px": round(d, 2)})
     if not votes:
         return None
+    votes.sort(key=lambda v: v["distance_px"])
     unique = {v["shelf_id"] for v in votes}
     if len(unique) == 1:
         return {"shelf_id": votes[0]["shelf_id"], "status": "assigned", "votes": votes}
-    return {"shelf_id": None, "status": "skipped",
-            "reason": "conflicting", "votes": votes}
+    return {
+        "shelf_id": votes[0]["shelf_id"],
+        "status": "assigned",
+        "reason": "nearest_of_conflicting_votes",
+        "conflicting_shelf_ids": sorted(unique),
+        "votes": votes,
+    }
 
 
 # ---------- main ----------

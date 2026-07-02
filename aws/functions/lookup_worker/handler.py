@@ -62,14 +62,20 @@ def normalize_isbn(value: Any) -> str:
     return re.sub(r"[^0-9xX]", "", str(value)).upper()
 
 
+# 1-2文字のOCR断片が長い書名/著者名にたまたま含まれるだけで
+# 0.7以上のスコアが付き、無関係な本に自動一致していたため、
+# 部分一致による高スコアは共有断片が一定文字数以上のときだけ許可する。
+MIN_TRUSTED_SUBSTRING_LEN = 4
+
+
 def score_text(qn: str, vn: str) -> float:
     if not qn or not vn:
         return 0.0
     if qn == vn:
         return 1.0
-    if qn in vn:
+    if qn in vn and len(qn) >= MIN_TRUSTED_SUBSTRING_LEN:
         return min(0.98, 0.7 + len(qn) / len(vn) * 0.25)
-    if vn in qn:
+    if vn in qn and len(vn) >= MIN_TRUSTED_SUBSTRING_LEN:
         if len(vn) >= 6:
             return min(0.96, 0.82 + len(vn) / len(qn) * 0.15)
         return min(0.94, 0.65 + len(vn) / len(qn) * 0.25)
@@ -103,11 +109,11 @@ def search_library(con, title: str, limit: int = 5) -> list[dict[str, Any]]:
         a = score_text(qn, row["authors_norm"] or "") * 0.9
         p = score_text(qn, row["publisher_norm"] or "") * 0.8
         score = max(t, a, p)
-        if score >= 0.65:
+        if score >= 0.72:
             results.append({
                 "source": "library_db",
                 "score": round(score, 4),
-                "match_confidence": "auto" if score >= 0.75 else "review",
+                "match_confidence": "auto" if score >= 0.85 else "review",
                 "title": row["title"],
                 "authors": [row["authors"]] if row["authors"] else [],
                 "publisher": row["publisher"],
@@ -132,12 +138,12 @@ def known_books_candidates(title: str, records: list[dict[str, Any]], limit: int
     for rec in records:
         aliases = [rec.get("title"), *(rec.get("aliases") or [])]
         score = max(score_text(qn, normalize_text(a)) for a in aliases if a)
-        if score < 0.65:
+        if score < 0.72:
             continue
         out.append({
             "source": "known_books",
             "score": round(score, 4),
-            "match_confidence": "auto" if score >= 0.75 else "review",
+            "match_confidence": "auto" if score >= 0.85 else "review",
             "title": rec.get("title"),
             "authors": rec.get("authors") or [],
             "publisher": rec.get("publisher"),

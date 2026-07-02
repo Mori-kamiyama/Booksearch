@@ -3,6 +3,7 @@ import SearchPage from './pages/SearchPage'
 import ScanPage from './pages/ScanPage'
 import JobPage from './pages/JobPage'
 import ShelvesPage from './pages/ShelvesPage'
+import TagPlacementPage from './pages/TagPlacementPage'
 
 function Nav() {
   const { pathname } = useLocation()
@@ -23,6 +24,7 @@ function Nav() {
       <span className="text-xl font-bold text-[#1f7a5c] mr-4">🌳 ホンノキ</span>
       {link('/', '本を探す')}
       {link('/scan', '棚をスキャン')}
+      {link('/tag-placement', 'タグ貼り付け')}
       {link('/shelves', '本の場所')}
     </header>
   )
@@ -37,6 +39,7 @@ export default function App() {
           <Routes>
             <Route path="/" element={<SearchPage />} />
             <Route path="/scan" element={<ScanPage />} />
+            <Route path="/tag-placement" element={<TagPlacementPage />} />
             <Route path="/shelves" element={<ShelvesPage />} />
             <Route path="/jobs/:id" element={<JobPage />} />
           </Routes>

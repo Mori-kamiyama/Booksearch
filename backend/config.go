@@ -41,3 +41,12 @@ func envOr(key, fallback string) string {
 	}
 	return fallback
 }
+
+func absFlagPath(path *string) {
+	if *path == "" || filepath.IsAbs(*path) {
+		return
+	}
+	if abs, err := filepath.Abs(*path); err == nil {
+		*path = abs
+	}
+}

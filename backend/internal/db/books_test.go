@@ -30,6 +30,11 @@ func setupDB(t *testing.T) *db.Store {
 		"go言語プログラミング", "山田太郎", "9781234567890",
 	)
 	raw.Exec(`INSERT INTO book_covers (book_id, thumbnail, info_link) VALUES (1, NULL, NULL)`)
+	raw.Exec(
+		`INSERT INTO book_shelf_candidates (book_id, shelf_id, confidence, observations, last_seen_at)
+		 VALUES (?, ?, ?, ?, ?)`,
+		1, "shelf-A-01", 0.81234, 3, "2026-06-29T00:00:00Z",
+	)
 
 	// book 2: Python
 	raw.Exec(
@@ -63,6 +68,30 @@ func TestSearch_ByTitle(t *testing.T) {
 	}
 	if books[0].Title != "Go言語プログラミング" {
 		t.Errorf("wrong title: %q", books[0].Title)
+	}
+}
+
+func TestSearch_AttachesShelfCandidates(t *testing.T) {
+	store := setupDB(t)
+
+	books, err := store.Search("Go言語", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(books) != 1 {
+		t.Fatalf("want 1, got %d", len(books))
+	}
+	if len(books[0].ShelfCandidates) != 1 {
+		t.Fatalf("want 1 shelf candidate, got %d", len(books[0].ShelfCandidates))
+	}
+	if got := books[0].ShelfCandidates[0].ShelfID; got != "shelf-A-01" {
+		t.Errorf("shelf_id: got %q", got)
+	}
+	if got := books[0].ShelfCandidates[0].Confidence; got != 0.8123 {
+		t.Errorf("confidence: got %.4f", got)
+	}
+	if len(books[0].ShelfIDs) != 1 || books[0].ShelfIDs[0] != "shelf-A-01" {
+		t.Errorf("shelf_ids: got %#v", books[0].ShelfIDs)
 	}
 }
 

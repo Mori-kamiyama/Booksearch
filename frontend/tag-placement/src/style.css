@@ -1,0 +1,303 @@
+@import "tailwindcss";
+
+:root {
+  --accent: #1f7a5c;
+  --accent-soft: #eff8f4;
+  --line: #dde3e8;
+  --text: #1d252c;
+}
+
+body {
+  margin: 0;
+  background: #f6f7f9;
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+main {
+  width: min(1120px, calc(100vw - 32px));
+  margin: 0 auto;
+  padding: 28px 0 40px;
+}
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  align-items: center;
+  margin-bottom: 24px;
+}
+
+.brand {
+  margin: 0 0 4px;
+  color: var(--accent);
+  font-weight: 800;
+}
+
+h1 {
+  margin: 0;
+  font-size: 30px;
+  line-height: 1.2;
+}
+
+button,
+select {
+  font: inherit;
+}
+
+button {
+  border: 1px solid #cbd4dc;
+  background: white;
+  color: #33404c;
+  border-radius: 6px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
+.primary {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+
+.tagPicker {
+  display: inline-flex;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: white;
+}
+
+.tagPicker button {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+}
+
+.tagPicker select {
+  min-width: 120px;
+  border: 0;
+  outline: 0;
+  text-align: center;
+  font-weight: 800;
+  background: white;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  gap: 20px;
+}
+
+.placementPanel,
+.sidePanel {
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.selected {
+  padding: 20px;
+  border-bottom: 1px solid #edf0f2;
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  align-items: center;
+}
+
+.label {
+  margin: 0;
+  color: #697782;
+  font-size: 14px;
+}
+
+.tagTitle {
+  margin: 2px 0 0;
+  color: var(--accent);
+  font-size: 42px;
+  line-height: 1;
+  font-weight: 900;
+}
+
+.tagBadge {
+  width: 58px;
+  height: 58px;
+  border: 2px solid var(--accent);
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  color: var(--accent);
+  font-size: 20px;
+  font-weight: 900;
+}
+
+.placement {
+  margin: 20px;
+  padding: 16px;
+  border: 1px solid #c8eadc;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  display: flex;
+  gap: 12px;
+}
+
+.placement svg {
+  color: var(--accent);
+  flex: 0 0 auto;
+}
+
+.placement p {
+  margin: 0;
+  font-weight: 800;
+}
+
+.placement span,
+.status {
+  color: #5f6d78;
+  font-size: 14px;
+}
+
+.quadrants {
+  padding: 0 20px 20px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.quadrants div {
+  min-height: 104px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafb;
+  padding: 14px;
+}
+
+.quadrants span {
+  color: #7b8791;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.quadrants strong {
+  display: block;
+  margin-top: 8px;
+  overflow-wrap: anywhere;
+}
+
+aside {
+  display: grid;
+  align-content: start;
+  gap: 16px;
+}
+
+.sidePanel {
+  padding: 18px;
+}
+
+.panelHead,
+.sideTitle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-weight: 800;
+}
+
+.sideTitle,
+.panelHead span {
+  justify-content: flex-start;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.panelHead button {
+  height: 36px;
+  padding: 0 14px;
+}
+
+.videoBox {
+  margin-top: 14px;
+  aspect-ratio: 16 / 9;
+  border-radius: 8px;
+  background: #050607;
+  color: #8e99a3;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+.videoBox video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.detectedTags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.detectedTags span {
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: #e9f7ef;
+  color: #176543;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.detectedTags .warn {
+  background: #fff3df;
+  color: #9a5d00;
+}
+
+.empty,
+.error {
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 20px;
+}
+
+.error {
+  color: #b42318;
+}
+
+.small {
+  margin-top: 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 860px) {
+  main {
+    width: min(100vw - 24px, 680px);
+    padding-top: 18px;
+  }
+
+  .topbar,
+  .layout {
+    grid-template-columns: 1fr;
+    display: grid;
+  }
+
+  .tagPicker {
+    justify-self: start;
+  }
+
+  h1 {
+    font-size: 25px;
+  }
+}

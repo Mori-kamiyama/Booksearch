@@ -8,7 +8,7 @@ test.describe('ホンノキ Frontend (CloudFront)', () => {
     await expect(page.locator('text=ホンノキ')).toBeVisible()
     await expect(page.getByRole('link', { name: '本を探す' })).toBeVisible()
     await expect(page.getByRole('link', { name: '棚をスキャン' })).toBeVisible()
-    await expect(page.getByRole('link', { name: '棚候補' })).toBeVisible()
+    await expect(page.getByRole('link', { name: '本の場所' })).toBeVisible()
     await expect(page.getByRole('heading', { name: '本を探す' })).toBeVisible()
   })
 
@@ -24,6 +24,17 @@ test.describe('ホンノキ Frontend (CloudFront)', () => {
     expect(count).toBeGreaterThan(0)
   })
 
+  test('本の検索: スキャン登録済みの本に場所候補が表示される', async ({ page }) => {
+    await page.goto('/')
+    await page.fill('input[placeholder*="タイトル"]', '詳説デザインマネジメント')
+    await page.click('button:has-text("検索")')
+
+    await expect(page.locator('text=詳説デザインマネジメント')).toBeVisible({ timeout: 15000 })
+    await expect(page.locator('text=この本はここにありそう')).toBeVisible()
+    await expect(page.locator('text=shelf-B-02')).toBeVisible()
+    await expect(page.locator('text=1回検出')).toBeVisible()
+  })
+
   test('検索: 存在しないクエリで「見つかりませんでした」表示', async ({ page }) => {
     await page.goto('/')
     await page.fill('input[placeholder*="タイトル"]', 'zzzz_no_such_book_xxx_qqq')
@@ -31,13 +42,20 @@ test.describe('ホンノキ Frontend (CloudFront)', () => {
     await expect(page.locator('text=見つかりませんでした')).toBeVisible({ timeout: 15000 })
   })
 
-  test('棚候補ページが開く', async ({ page }) => {
+  test('本の場所ページが開く', async ({ page }) => {
     await page.goto('/shelves')
-    await expect(page.locator('h2:has-text("棚候補")')).toBeVisible()
+    await expect(page.locator('h2:has-text("本の場所")')).toBeVisible()
     // 候補がない初期状態 or 候補リスト
-    const empty = page.locator('text=棚候補はまだありません')
+    const empty = page.locator('text=場所データはまだありません')
     const list = page.locator('section').first()
     await expect(empty.or(list)).toBeVisible({ timeout: 10000 })
+  })
+
+  test('本の場所ページにスキャン登録済みの場所候補が表示される', async ({ page }) => {
+    await page.goto('/shelves')
+
+    await expect(page.locator('text=shelf-B-02')).toBeVisible({ timeout: 15000 })
+    await expect(page.locator('text=詳説デザインマネジメント')).toBeVisible()
   })
 
   test('スキャンページが開きアップロード UI が表示される', async ({ page }) => {

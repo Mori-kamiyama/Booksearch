@@ -18,9 +18,11 @@ func buildRouter(h *handler.Handler) *gin.Engine {
 		api.GET("/health", h.Health)
 		api.GET("/books/search", h.SearchBooks)
 		api.GET("/books/:id", h.GetBook)
+		api.GET("/shelf-candidates", h.ShelfCandidates)
 		api.POST("/scan", h.Scan)
 		api.GET("/jobs/:id", h.GetJob)
 		api.GET("/shelves", h.GetShelves)
+		api.POST("/tags/detect", h.DetectTags)
 	}
 	r.GET("/static/*path", h.ServeStatic)
 

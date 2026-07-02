@@ -13,6 +13,7 @@ backend/*.exe
 # Node / frontend
 frontend/node_modules/
 frontend/dist/
+frontend/tag-placement/dist/
 frontend/*.tsbuildinfo
 frontend/vite.config.js
 frontend/vite.config.d.ts
@@ -26,6 +27,8 @@ runs/
 dataset/
 *.pt
 *.db
+*.db-shm
+*.db-wal
 !aws/functions/go_api/library.db
 !aws/functions/lookup_worker/assets/library.db
 !aws/functions/yolo_worker/assets/yolo_model.pt
@@ -35,3 +38,4 @@ dataset/
 aws/.aws-sam/
 .nvimlog
 .DS_Store
+.vercel

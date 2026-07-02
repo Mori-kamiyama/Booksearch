@@ -2,6 +2,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:tag-placement": "node tag-placement/scripts/copy-tag-map.mjs && tsc -p tag-placement/tsconfig.json && vite build --config tag-placement/vite.config.ts",
     "preview": "vite preview"
   },
   "dependencies": {

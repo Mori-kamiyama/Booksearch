@@ -54,3 +54,30 @@
   `s3://booksearch-277707097118-ap-northeast-1/cache/google_book_covers.json`.
   Missing-cover results are cached, while transient Google Books 429/5xx errors
   are retried after 1 hour instead of being treated as long-term misses.
+
+## 2026-06-29
+
+- Improved the search-result location UI from a mock-ish row into a reviewable
+  panel: top shelf candidate, confidence, observation count, alternate shelves,
+  and local confirm/reject/correct actions.
+- Added local backend support for `book_shelf_candidates` so search and book
+  detail responses can attach `shelf_candidates` in the same shape as production.
+- Production scan job `2aa5cf53-228a-4483-9016-6fc8252bbce3` previously read
+  books but added `0` shelf observations because AprilTag votes from nearby tags
+  conflicted. The hypothesis was that conflict should not discard the crop when
+  the nearest tag still provides a useful shelf.
+- Updated the YOLO worker so conflicting shelf votes assign the nearest voted
+  shelf with diagnostic reason `nearest_of_conflicting_votes` instead of dropping
+  the shelf assignment.
+- Deployed the frontend to `https://d2uel8nex1m4w7.cloudfront.net/` and deployed
+  the AWS stack update, including shelf observation/candidate DynamoDB tables and
+  the new YOLO image.
+- Verified with production scan job `d75d6990-7e55-47bf-92a9-3c9859c27b63`:
+  `status=done`, `crop_total=4`, `ocr_done=2`, and
+  `shelf_observations_added=15`.
+- Verified production API visibility after the scan:
+  `/api/shelf-candidates` returns the new candidates, and searches such as
+  `詳説デザインマネジメント` include `shelf_candidates` with `shelf-B-02`.
+- Production Playwright E2E now includes explicit checks that the scanned book
+  appears with `この本はここにありそう` in search results and on the `本の場所`
+  page; desktop Chromium and mobile Safari passed 26/26.

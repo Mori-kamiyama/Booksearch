@@ -34,16 +34,25 @@ def normalize_isbn(value: Any) -> str:
     return re.sub(r"[^0-9xX]", "", str(value)).upper()
 
 
+MIN_TRUSTED_SUBSTRING_LEN = 4
+
+
 def score_text(query_norm: str, value_norm: str) -> float:
-    """Score normalized text with exact, substring, then fuzzy matching."""
+    """Score normalized text with exact, substring, then fuzzy matching.
+
+    Substring containment only gets a high score when the shared fragment is
+    at least MIN_TRUSTED_SUBSTRING_LEN characters; a 1-2 character OCR
+    fragment coincidentally appearing inside an unrelated long title
+    otherwise scored 0.7+, which let garbled OCR text auto-match wrong books.
+    """
 
     if not query_norm or not value_norm:
         return 0.0
     if query_norm == value_norm:
         return 1.0
-    if query_norm in value_norm:
+    if query_norm in value_norm and len(query_norm) >= MIN_TRUSTED_SUBSTRING_LEN:
         return min(0.98, 0.7 + len(query_norm) / len(value_norm) * 0.25)
-    if value_norm in query_norm:
+    if value_norm in query_norm and len(value_norm) >= MIN_TRUSTED_SUBSTRING_LEN:
         if len(value_norm) >= 6:
             return min(0.96, 0.82 + len(value_norm) / len(query_norm) * 0.15)
         return min(0.94, 0.65 + len(value_norm) / len(query_norm) * 0.25)
@@ -76,7 +85,7 @@ def row_to_record(row: sqlite3.Row) -> dict[str, Any]:
 def known_book_candidates(
     title: str | None,
     path: Path = KNOWN_BOOKS_PATH,
-    min_score: float = 0.65,
+    min_score: float = 0.72,
 ) -> list[dict[str, Any]]:
     """Find user-confirmed titles that are not present in the library DB."""
 
@@ -99,7 +108,7 @@ def known_book_candidates(
             {
                 "source": "known_books",
                 "score": score,
-                "match_confidence": "auto" if score >= 0.75 else "review",
+                "match_confidence": "auto" if score >= 0.85 else "review",
                 "title": title_value,
                 "authors": record.get("authors") or [],
                 "publisher": record.get("publisher"),
@@ -200,8 +209,8 @@ def library_db_lookup(
     title: str | None,
     db_path: Path,
     limit: int = 5,
-    min_score: float = 0.75,
-    review_min_score: float = 0.65,
+    min_score: float = 0.85,
+    review_min_score: float = 0.72,
 ) -> dict[str, Any] | None:
     """Find metadata candidates for one OCR title in the local library DB."""
 

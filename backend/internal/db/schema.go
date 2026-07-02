@@ -23,6 +23,14 @@ func CreateSchema(d *sql.DB) error {
 			thumbnail TEXT,
 			info_link TEXT
 		)`,
+		`CREATE TABLE IF NOT EXISTS book_shelf_candidates (
+			book_id INTEGER NOT NULL,
+			shelf_id TEXT NOT NULL,
+			confidence REAL NOT NULL DEFAULT 0,
+			observations INTEGER NOT NULL DEFAULT 0,
+			last_seen_at TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY (book_id, shelf_id)
+		)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := d.Exec(stmt); err != nil {

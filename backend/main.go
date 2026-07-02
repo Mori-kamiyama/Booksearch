@@ -24,6 +24,10 @@ func main() {
 	flag.Float64Var(&cfg.MaxTagDistance, "max-tag-distance", 0, "tag 検出最大距離px (0=auto)")
 	flag.Parse()
 
+	absFlagPath(&cfg.LibraryDB)
+	absFlagPath(&cfg.YOLOModel)
+	absFlagPath(&cfg.AprilTagMap)
+
 	if _, err := os.Stat(cfg.LibraryDB); os.IsNotExist(err) {
 		log.Printf("警告: library.db が見つかりません: %s", cfg.LibraryDB)
 		log.Println("  uv run python scripts/build_library_db.py を先に実行してください")

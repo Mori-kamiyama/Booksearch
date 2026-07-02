@@ -665,3 +665,54 @@ func TestGetShelves(t *testing.T) {
 		}
 	})
 }
+
+func TestDetectTagsRequestValidation(t *testing.T) {
+	t.Run("no_map", func(t *testing.T) {
+		env := setupTestEnv(t)
+		resp, err := http.Post(
+			env.server.URL+"/api/tags/detect",
+			"multipart/form-data; boundary=boundary123",
+			strings.NewReader("--boundary123--"),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("want 400, got %d", resp.StatusCode)
+		}
+	})
+
+	t.Run("missing_image", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		mapFile := filepath.Join(tmpDir, "map.json")
+		os.WriteFile(mapFile, []byte(`{"dictionary":"DICT_APRILTAG_36h11","tags":{}}`), 0o644)
+
+		jobsDir := filepath.Join(tmpDir, "jobs")
+		os.MkdirAll(jobsDir, 0o755)
+		store := openTestStore(t, tmpDir)
+		t.Cleanup(func() { store.Close() })
+
+		h := &handler.Handler{
+			Store:   store,
+			Jobs:    &job.Manager{JobsDir: jobsDir, RepoRoot: tmpDir},
+			JobsDir: jobsDir,
+			TagMap:  mapFile,
+		}
+		srv := httptest.NewServer(buildRouter(h))
+		t.Cleanup(srv.Close)
+
+		resp, err := http.Post(
+			srv.URL+"/api/tags/detect",
+			"multipart/form-data; boundary=boundary123",
+			strings.NewReader("--boundary123--"),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("want 400, got %d", resp.StatusCode)
+		}
+	})
+}

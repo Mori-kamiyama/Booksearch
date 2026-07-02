@@ -9,6 +9,7 @@ interface ShelfCandidate {
   avg_score: number
   title?: string
   updated_at?: string
+  crop_url?: string
 }
 
 export default function ShelvesPage() {
@@ -47,6 +48,16 @@ export default function ShelvesPage() {
                   .sort((a, b) => b.confidence - a.confidence)
                   .map(row => (
                     <div key={`${row.book_id}:${row.shelf_id}`} className="px-5 py-3 flex items-center gap-4">
+                      {row.crop_url ? (
+                        <img
+                          src={row.crop_url}
+                          alt=""
+                          className="h-20 w-28 shrink-0 rounded border border-gray-200 bg-gray-100 object-cover"
+                          loading="lazy"
+                        />
+                      ) : (
+                        <div className="h-20 w-28 shrink-0 rounded border border-gray-200 bg-gray-100" />
+                      )}
                       <div className="flex-1 min-w-0">
                         <p className="font-semibold text-gray-800 truncate">{row.title || `book_id ${row.book_id}`}</p>
                         <p className="text-xs text-gray-500">
