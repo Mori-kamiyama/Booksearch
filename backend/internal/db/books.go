@@ -4,9 +4,41 @@ import (
 	"database/sql"
 	"math"
 	"strings"
+	"unicode"
 
+	"golang.org/x/text/unicode/norm"
 	_ "modernc.org/sqlite"
 )
+
+// normalizeQuery mirrors src/lookup.py's normalize_text(): NFKC-normalize,
+// lowercase, then strip whitespace and punctuation so search queries match
+// against title_norm/authors_norm columns built by the same normalization.
+func normalizeQuery(value string) string {
+	text := strings.ToLower(norm.NFKC.String(value))
+	var b strings.Builder
+	b.Grow(len(text))
+	for _, r := range text {
+		if isStrippedPunct(r) {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+func isStrippedPunct(r rune) bool {
+	if unicode.IsSpace(r) {
+		return true
+	}
+	switch r {
+	case '　', '・', ':', '：', ',', '，', '.', '．', '。',
+		'『', '』', '「', '」', '"', '\'', '“', '”', '‘', '’',
+		'!', '?', '！', '？', '-', '‐', '‑', '‒', '–', '—', '―',
+		'（', '）', '(', ')', '【', '】', '[', ']':
+		return true
+	}
+	return false
+}
 
 type Book struct {
 	ID                 int              `json:"id"`
@@ -61,7 +93,7 @@ func Open(path string) (*Store, error) {
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) Search(query string, limit int) ([]Book, error) {
-	q := "%" + strings.ToLower(strings.TrimSpace(query)) + "%"
+	q := "%" + normalizeQuery(strings.TrimSpace(query)) + "%"
 	rows, err := s.db.Query(`
 		SELECT b.id, b.title, COALESCE(b.authors,''), COALESCE(b.publisher,''),
 		       COALESCE(b.published_date,''), COALESCE(b.class_number,''),

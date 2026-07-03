@@ -1,6 +1,6 @@
 module booksearch/aws/go_api
 
-go 1.24
+go 1.24.0
 
 require (
 	github.com/aws/aws-lambda-go v1.47.0
@@ -11,6 +11,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.71.0
 	github.com/aws/aws-sdk-go-v2/service/sqs v1.37.2
 	github.com/google/uuid v1.6.0
+	golang.org/x/text v0.34.0
 	modernc.org/sqlite v1.34.4
 )
 
