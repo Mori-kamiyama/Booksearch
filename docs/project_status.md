@@ -81,3 +81,56 @@
 - Production Playwright E2E now includes explicit checks that the scanned book
   appears with `この本はここにありそう` in search results and on the `本の場所`
   page; desktop Chromium and mobile Safari passed 26/26.
+
+## 2026-07-03
+
+- Implemented the Phase 1 UI slice from `docs/ui_phase1_playbook.md`: typed
+  frontend API helpers, layout-backed shelf label utilities, common loading /
+  empty / error states, bottom tabs, `/books/:id`, `/map`, and `/map/:shelfId`.
+- General search now sends users to a detail page where the top shelf candidate
+  is shown as a Japanese label plus a highlighted shelf grid, not as a raw
+  shelf ID.
+- Verified locally with `識別・予測・異常検知`, which resolves to
+  `base-01-c02-r04` in the API and displays as
+  `入口側から1台目 2列目 下から4段目` in the UI.
+- Hypothesis: the map-first browse flow is good enough for Phase 1, but the
+  density view will need better grouping or filtering once every shelf has many
+  candidates; otherwise a single crowded cell can dominate the experience.
+
+## 2026-07-10
+
+- Started the local Phase 1 acceptance pass with the Go backend and Vite
+  frontend running together.
+- Verified the real user path: search for `識別` -> book detail -> Japanese
+  shelf label and highlighted shelf map. Also verified map -> shelf cell ->
+  `/map/base-01-c02-r04` -> shelf detail.
+- Verified the book detail at 375px width: document width stayed at 375px with
+  no horizontal overflow, and the human-readable shelf label remained visible.
+- Local Playwright E2E passed 24 tests across desktop Chromium and mobile
+  Safari. Two production-only scan API tests are skipped for each browser when
+  `API_BASE` points at localhost; the local Phase 1 backend does not expose the
+  presigned S3 endpoints. Before this adjustment those four checks failed with
+  404/400, while all UI and read-only API checks passed.
+- Added an E2E check for map-to-shelf-detail navigation. The remaining Phase 1
+  work is visual review and deciding whether to commit/PR the current UI slice;
+  no new backend work was needed.
+- Adjusted the physical left/right convention for `base-01` through `base-03`.
+  The layout source now marks those units as mirrored, and the frontend, tag
+  generator, and tag-placement visualization all read the same flag. This
+  keeps displayed shelf IDs adjacent to the tags that identify them.
+- The physical tags on those units were pasted from a horizontally mirrored
+  initial diagram. Their IDs and shelf quadrants stay anchored to that initial
+  diagram, while only their physical intersections are mirrored; e.g. tag 29
+  is the upper-left tag on the reflected first unit.
+- The Go application now loads `data/apriltag_library_map.json` by default,
+  so both scan jobs and `POST /api/tags/detect` use the generated physical tag
+  map without requiring an `--apriltag-map` startup flag.
+- Re-ran AprilTag detection and shelf assignment only (without repeating OCR)
+  for `outputs/book_catalog_data_260702/catalog.json`. Replaced the SQLite
+  shelf candidates with 455 accepted observations / 370 unique book-shelf
+  pairs from the reassigned catalog, after saving
+  `outputs/library/library.before_apriltag_reassign_20260710.db` as a backup.
+- Added live AprilTag scanning to `/scan`: while the camera is active, a
+  downscaled frame is sent to `POST /api/tags/detect` every 1.6 seconds with
+  overlap protection, detected IDs and status shown below the preview, and
+  the existing stop-and-upload video flow remains available.

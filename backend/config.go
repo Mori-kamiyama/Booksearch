@@ -29,7 +29,8 @@ func defaultConfig() Config {
 		OutputsDir:  filepath.Join(repoRoot, "outputs"),
 		JobsDir:     filepath.Join(repoRoot, "outputs", "jobs"),
 		YOLOModel:   filepath.Join(repoRoot, "runs", "detect", "runs", "picture_box_detection", "yolo11n_quick", "weights", "best.pt"),
-		AprilTagMap: "", // --apriltag-map で上書き
+		// 生成済みのライブラリ全体マップを既定で使う。--apriltag-map で上書き可能。
+		AprilTagMap: filepath.Join(repoRoot, "data", "apriltag_library_map.json"),
 		Host:        envOr("HOST", "127.0.0.1"),
 		Port:        envOr("PORT", "8080"),
 	}

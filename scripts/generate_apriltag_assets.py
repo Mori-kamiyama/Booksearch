@@ -68,12 +68,10 @@ def shelf_id(slots: dict[str, dict[str, Any]], unit: str, col: int, row: int) ->
     return slot["shelf_id"]
 
 
-# 通路を挟んで逆向きに立つユニットは列番号を左右反転して扱う。
-MIRRORED_UNITS: set[str] = {"base-01"}
-
-
 def mirror_col(unit_cfg: dict[str, Any], col: int) -> int:
-    if unit_cfg["unit"] in MIRRORED_UNITS:
+    # タグの担当棚は、反転前の基準座標で決める。`mirrored` は実物の
+    # 見え方・タグの貼付位置のための属性であり、ここでは使わない。
+    if unit_cfg.get("tag_mapping_mirrored", False):
         return int(unit_cfg["cols"]) + 1 - col
     return col
 
@@ -155,10 +153,14 @@ def build_mapping(layout: dict[str, Any], slots: dict[str, dict[str, Any]]) -> d
     print_list: list[dict[str, Any]] = []
     candidates = candidate_intersections(layout, slots)
     selected = select_sparse_intersections(layout, candidates)
+    units_by_id = {unit["unit"]: unit for unit in units(layout)}
 
     for tag_id, candidate in enumerate(selected):
         unit = candidate["unit"]
-        x = candidate["x"]
+        unit_cfg = units_by_id[unit]
+        # 1〜3台目は、初期図（3列・空白4列・6列）を左右反転した実物へ
+        # 貼られている。タグIDと担当棚は初期図のまま、物理交点だけを反転する。
+        x = int(unit_cfg["cols"]) - int(candidate["x"]) if unit_cfg.get("mirrored", False) else candidate["x"]
         y = candidate["y"]
         quadrants = candidate["quadrants"]
         tags[str(tag_id)] = {
@@ -174,7 +176,8 @@ def build_mapping(layout: dict[str, Any], slots: dict[str, dict[str, Any]]) -> d
         "schema_version": 1,
         "dictionary": DICTIONARY_NAME,
         "auto_distance_scale": 1.25,
-        "placement": "Place each tag at the grid intersection between the listed columns and rows.",
+        "placement": "For mirrored units, tag IDs are placed at the horizontally mirrored intersection of the initial diagram.",
+        "tag_position_transform": "mirror_horizontal for units marked mirrored",
         "selection": {
             "strategy": "sparse checkerboard intersections plus greedy single-coverage fill",
             "coverage": "every usable shelf slot covered by at least one tag",

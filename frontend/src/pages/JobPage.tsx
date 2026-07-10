@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { apiFetch, apiUrl } from '../lib/api'
+import { formatShelfLabel } from '../lib/shelf'
 
 interface Candidate {
   title: string
@@ -258,7 +259,7 @@ function EntryCard({ entry }: { entry: CatalogEntry }) {
         <span className="text-sm font-mono text-gray-600">{entry.box_id}</span>
         {entry.shelf_id && (
           <span className="text-xs bg-green-100 text-green-800 px-2 py-0.5 rounded-full font-bold">
-            棚: {entry.shelf_id}
+            棚: {formatShelfLabel(entry.shelf_id)}
           </span>
         )}
         <span className="text-xs text-gray-400 ml-auto">

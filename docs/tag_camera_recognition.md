@@ -25,10 +25,11 @@ This also keeps dictionary support aligned with the generated print plan:
 
 ## Notes
 
-- Start the local API with an AprilTag map, for example:
+- Start the local API. The generated library map is loaded by default; pass
+  `--apriltag-map` only when you need to test another mapping:
 
 ```bash
-go run . --port 8081 --apriltag-map ../data/apriltag_library_map.json
+go run . --port 8081
 ```
 
 - The frontend can point at that API with:
