@@ -102,6 +102,7 @@ def draw_unit(
     cols: int,
     rows: int,
     label: str,
+    mirrored: bool = False,
 ) -> None:
     ox, oy = origin
     draw.text((ox, oy - UNIT_LABEL_H), label, fill=COLORS["text"], font=font(30, bold=True))
@@ -111,7 +112,8 @@ def draw_unit(
         for row in range(1, rows + 1):
             x0 = ox + (col - 1) * CELL
             y0 = oy + (rows - row) * CELL
-            slot = slots.get((unit, col, row))
+            actual_col = cols + 1 - col if mirrored else col
+            slot = slots.get((unit, actual_col, row))
             status = "usable" if not slot else slot["status"]
             fill = COLORS["side"] if unit.startswith("side") and status == "usable" else COLORS[status]
             draw.rectangle((x0, y0, x0 + CELL, y0 + CELL), fill=fill, outline=COLORS["border"], width=2)
@@ -119,7 +121,7 @@ def draw_unit(
                 draw.line((x0 + 12, y0 + 12, x0 + CELL - 12, y0 + CELL - 12), fill=(160, 166, 173), width=3)
                 draw.line((x0 + CELL - 12, y0 + 12, x0 + 12, y0 + CELL - 12), fill=(160, 166, 173), width=3)
             else:
-                draw_centered(draw, (x0, y0, x0 + CELL, y0 + CELL), f"c{col:02d}\nr{row:02d}", COLORS["muted"], font(17))
+                draw_centered(draw, (x0, y0, x0 + CELL, y0 + CELL), f"c{actual_col:02d}\nr{row:02d}", COLORS["muted"], font(17))
 
     for x in range(1, cols):
         for y in range(1, rows):
@@ -169,16 +171,17 @@ def main() -> None:
         font=font(23),
     )
 
-    for unit_index in range(1, len(base_units) + 1):
+    for unit_index, unit_cfg in enumerate(base_units, start=1):
         draw_unit(
             draw,
             slots,
             tags,
-            f"base-{unit_index:02d}",
+            unit_cfg["unit"],
             unit_origin(unit_index),
             13,
             7,
-            f"base-{unit_index:02d}  entrance order {unit_index}",
+            f"{unit_cfg['unit']}  entrance order {unit_index}",
+            mirrored=bool(unit_cfg.get("mirrored", False)),
         )
 
     for side_index in range(1, len(side_units) + 1):
@@ -191,7 +194,7 @@ def main() -> None:
     draw.rectangle((MARGIN + 310, legend_y, MARGIN + 358, legend_y + 48), fill=COLORS["empty"], outline=COLORS["border"], width=2)
     draw.line((MARGIN + 320, legend_y + 10, MARGIN + 348, legend_y + 38), fill=(160, 166, 173), width=3)
     draw.line((MARGIN + 348, legend_y + 10, MARGIN + 320, legend_y + 38), fill=(160, 166, 173), width=3)
-    draw.text((MARGIN + 374, legend_y + 9), "empty: cols 4-7, rows 1-5 in every base unit", fill=COLORS["text"], font=font(23))
+    draw.text((MARGIN + 374, legend_y + 9), "empty: center 4 cols, rows 1-5 (mirrored units shown physically)", fill=COLORS["text"], font=font(23))
     draw.ellipse((MARGIN + 980, legend_y, MARGIN + 1028, legend_y + 48), fill=COLORS["tag"], outline="white", width=3)
     draw_centered(draw, (MARGIN + 980, legend_y, MARGIN + 1028, legend_y + 48), "tag", COLORS["tag_text"], font(14, bold=True))
     draw.text((MARGIN + 1046, legend_y + 9), "AprilTag ID at intersection", fill=COLORS["text"], font=font(23))

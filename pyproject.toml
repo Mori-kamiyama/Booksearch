@@ -19,3 +19,6 @@ dependencies = [
 
 [tool.uv]
 package = false
+
+[tool.vercel]
+entrypoint = "api.tags.detect:handler"

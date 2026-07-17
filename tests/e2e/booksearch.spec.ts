@@ -6,56 +6,64 @@ test.describe('ホンノキ Frontend (CloudFront)', () => {
   test('ホーム表示とナビゲーション', async ({ page }) => {
     await page.goto('/')
     await expect(page.locator('text=ホンノキ')).toBeVisible()
-    await expect(page.getByRole('link', { name: '本を探す' })).toBeVisible()
-    await expect(page.getByRole('link', { name: '棚をスキャン' })).toBeVisible()
-    await expect(page.getByRole('link', { name: '本の場所' })).toBeVisible()
-    await expect(page.getByRole('heading', { name: '本を探す' })).toBeVisible()
+    await expect(page.getByRole('link', { name: 'さがす' })).toBeVisible()
+    await expect(page.getByRole('link', { name: 'マップ' })).toBeVisible()
+    await expect(page.getByRole('link', { name: 'スキャン' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: '図書室の本、どこにある？' })).toBeVisible()
   })
 
   test('本の検索: クエリ「python」で結果が表示される', async ({ page }) => {
     await page.goto('/')
-    await page.fill('input[placeholder*="タイトル"]', 'python')
-    await page.click('button:has-text("検索")')
-    // 件数表示が出るまで待機
-    await expect(page.locator('text=/\\d+ 件/')).toBeVisible({ timeout: 15000 })
-    const cards = page.locator('p.font-bold.text-gray-800.text-base')
+    await page.fill('input[placeholder*="書名"]', 'python')
+    await page.getByRole('button', { name: '検索', exact: true }).click()
+    await expect(page.locator('text=/\\d+件/')).toBeVisible({ timeout: 15000 })
+    const cards = page.locator('button').filter({ hasText: /Python|python/ })
     await expect(cards.first()).toBeVisible()
     const count = await cards.count()
     expect(count).toBeGreaterThan(0)
   })
 
-  test('本の検索: スキャン登録済みの本に場所候補が表示される', async ({ page }) => {
+  test('本の検索: 場所候補つきの本から詳細ページへ進める', async ({ page }) => {
     await page.goto('/')
-    await page.fill('input[placeholder*="タイトル"]', '詳説デザインマネジメント')
-    await page.click('button:has-text("検索")')
+    await page.fill('input[placeholder*="書名"]', '識別')
+    await page.getByRole('button', { name: '検索', exact: true }).click()
 
-    await expect(page.locator('text=詳説デザインマネジメント')).toBeVisible({ timeout: 15000 })
-    await expect(page.locator('text=この本はここにありそう')).toBeVisible()
-    await expect(page.locator('text=shelf-B-02')).toBeVisible()
-    await expect(page.locator('text=1回検出')).toBeVisible()
+    await expect(page.locator('text=識別・予測・異常検知')).toBeVisible({ timeout: 15000 })
+    await page.getByText('識別・予測・異常検知').click()
+    await expect(page.getByRole('heading', { name: '本の場所' })).toBeVisible()
+    await expect(page.locator('text=/入口側から|壁側の棚/')).toBeVisible()
   })
 
   test('検索: 存在しないクエリで「見つかりませんでした」表示', async ({ page }) => {
     await page.goto('/')
-    await page.fill('input[placeholder*="タイトル"]', 'zzzz_no_such_book_xxx_qqq')
-    await page.click('button:has-text("検索")')
+    await page.fill('input[placeholder*="書名"]', 'zzzz_no_such_book_xxx_qqq')
+    await page.getByRole('button', { name: '検索', exact: true }).click()
     await expect(page.locator('text=見つかりませんでした')).toBeVisible({ timeout: 15000 })
   })
 
-  test('本の場所ページが開く', async ({ page }) => {
-    await page.goto('/shelves')
-    await expect(page.locator('h2:has-text("本の場所")')).toBeVisible()
+  test('マップページが開く', async ({ page }) => {
+    await page.goto('/map')
+    await expect(page.getByRole('heading', { name: '図書室マップ' })).toBeVisible()
     // 候補がない初期状態 or 候補リスト
-    const empty = page.locator('text=場所データはまだありません')
-    const list = page.locator('section').first()
+    const empty = page.locator('text=まだスキャンされていません')
+    const list = page.locator('text=入口側から1台目').first()
     await expect(empty.or(list)).toBeVisible({ timeout: 10000 })
   })
 
-  test('本の場所ページにスキャン登録済みの場所候補が表示される', async ({ page }) => {
-    await page.goto('/shelves')
+  test('マップから棚区画詳細へ進める', async ({ page }) => {
+    await page.goto('/map')
+    const cell = page.getByRole('button', { name: '入口側から1台目 2列目 下から4段目' })
+    await expect(cell).toBeVisible({ timeout: 10000 })
+    await cell.click()
+    await expect(page).toHaveURL(/\/map\/base-01-c02-r04$/)
+    await expect(page.getByRole('heading', { name: '棚区画' })).toBeVisible()
+    await expect(page.getByText('入口側から1台目 2列目 下から4段目')).toBeVisible()
+  })
 
-    await expect(page.locator('text=shelf-B-02')).toBeVisible({ timeout: 15000 })
-    await expect(page.locator('text=詳説デザインマネジメント')).toBeVisible()
+  test('旧本の場所URLは管理ページへリダイレクトする', async ({ page }) => {
+    await page.goto('/shelves')
+    await expect(page).toHaveURL(/\/admin\/shelves/)
+    await expect(page.locator('text=本の場所候補')).toBeVisible({ timeout: 15000 })
   })
 
   test('スキャンページが開きアップロード UI が表示される', async ({ page }) => {
@@ -98,6 +106,7 @@ test.describe('API 直接アクセス (E2E plumbing)', () => {
   })
 
   test('POST /api/scan/init + PUT to S3 + /api/scan/start (presigned flow)', async ({ request }) => {
+    test.skip(API_BASE.startsWith('http://127.0.0.1') || API_BASE.startsWith('http://localhost'), 'ローカルPhase 1バックエンドには本番用presigned APIがない')
     const initRes = await request.post(`${API_BASE}/api/scan/init`, {
       data: { filename: 'e2e-test.png', content_type: 'image/png' },
     })
@@ -129,6 +138,7 @@ test.describe('API 直接アクセス (E2E plumbing)', () => {
   })
 
   test('POST /api/scan (legacy base64)', async ({ request }) => {
+    test.skip(API_BASE.startsWith('http://127.0.0.1') || API_BASE.startsWith('http://localhost'), 'ローカルPhase 1バックエンドではスキャンAPIを検証しない')
     // 1x1 透明 PNG
     const tinyPng =
       'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII='
