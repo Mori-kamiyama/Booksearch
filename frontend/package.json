@@ -3,22 +3,25 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "build:tag-placement": "node tag-placement/scripts/copy-tag-map.mjs && tsc -p tag-placement/tsconfig.json && vite build --config tag-placement/vite.config.ts",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "vitest run"
   },
   "dependencies": {
-    "@vitejs/plugin-react": "^5.0.0",
     "@tailwindcss/vite": "^4.0.0",
-    "tailwindcss": "^4.0.0",
-    "vite": "^7.0.0",
-    "typescript": "^5.8.0",
+    "@techstark/opencv-js": "^5.0.0-release.1",
+    "@vitejs/plugin-react": "^5.0.0",
+    "lucide-react": "^0.468.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-router-dom": "^7.0.0",
-    "lucide-react": "^0.468.0"
+    "tailwindcss": "^4.0.0",
+    "typescript": "^5.8.0",
+    "vite": "^7.0.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@types/react": "^19.0.0",
-    "@types/react-dom": "^19.0.0"
+    "@types/react-dom": "^19.0.0",
+    "vitest": "^3.2.4"
   }
 }

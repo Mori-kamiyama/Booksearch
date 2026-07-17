@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useState, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { apiFetch } from '../lib/api'
+import { apiFetch, apiUrl } from '../lib/api'
+import { frameMetrics, shouldSendFrame, type FrameSkipReason } from '../lib/liveFrameGate'
+import { detectBrowserAprilTags } from '../lib/browserAprilTag'
+import { StableTagTracker } from '../lib/stableTagTracker'
 
 interface LiveDetectedTag {
   tag_id: number
@@ -13,6 +16,16 @@ interface LiveDetectResponse {
   tags: LiveDetectedTag[]
 }
 
+interface ShelfTagMap {
+  tags?: Record<string, { unit?: string; quadrants?: Record<string, string> }>
+}
+
+interface ShelfEvent {
+  id: string
+  label: string
+  time: string
+}
+
 export default function ScanPage() {
   const [mode, setMode] = useState<'upload' | 'camera'>('upload')
   const [file, setFile] = useState<File | null>(null)
@@ -21,16 +34,32 @@ export default function ScanPage() {
   const [progress, setProgress] = useState(0)
 
   const videoRef = useRef<HTMLVideoElement>(null)
-  const recorderRef = useRef<MediaRecorder | null>(null)
-  const chunksRef = useRef<Blob[]>([])
   const [recording, setRecording] = useState(false)
   const [detecting, setDetecting] = useState(false)
+  const [browserDetecting, setBrowserDetecting] = useState(false)
+  const [opencvState, setOpencvState] = useState<'loading' | 'ready' | 'fallback'>('loading')
   const [liveStatus, setLiveStatus] = useState('カメラを開始すると、タグを連続で読み取ります。')
   const [detectedTags, setDetectedTags] = useState<LiveDetectedTag[]>([])
+  const [currentShelfLabel, setCurrentShelfLabel] = useState('棚を探しています')
+  const [shelfEvents, setShelfEvents] = useState<ShelfEvent[]>([])
+  const [shelfTagMap, setShelfTagMap] = useState<ShelfTagMap>({})
   const streamRef = useRef<MediaStream | null>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const browserCanvasRef = useRef<HTMLCanvasElement>(null)
   const detectTimerRef = useRef<number | null>(null)
+  const browserDetectTimerRef = useRef<number | null>(null)
   const detectingRef = useRef(false)
+  const browserDetectingRef = useRef(false)
+  const stableTagTrackerRef = useRef(new StableTagTracker(3))
+  const scanCanvasRef = useRef<HTMLCanvasElement>(null)
+  const captureCanvasRef = useRef<HTMLCanvasElement>(null)
+  const scanAnimationRef = useRef<number | null>(null)
+  const scanGateRef = useRef<{ previous?: Uint8Array; lastSentAt: number }>({ lastSentAt: 0 })
+  const sessionRef = useRef<{ id: string; template: string } | null>(null)
+  const frameNumberRef = useRef(0)
+  const lastEvaluationRef = useRef(0)
+  const pendingUploadsRef = useRef<Set<Promise<void>>>(new Set())
+  const [scanStats, setScanStats] = useState({ evaluated: 0, sent: 0, skipped: {} as Partial<Record<FrameSkipReason, number>> })
   const navigate = useNavigate()
 
   const detectFrame = useCallback(async () => {
@@ -75,14 +104,66 @@ export default function ScanPage() {
     }
   }, [])
 
+  const detectBrowserFrame = useCallback(async () => {
+    if (browserDetectingRef.current) return
+    const video = videoRef.current
+    const canvas = browserCanvasRef.current
+    if (!video || !canvas || video.videoWidth === 0 || video.videoHeight === 0) return
+
+    browserDetectingRef.current = true
+    setBrowserDetecting(true)
+    try {
+      const width = Math.min(960, video.videoWidth)
+      canvas.width = width
+      canvas.height = Math.round((width / video.videoWidth) * video.videoHeight)
+      const context = canvas.getContext('2d')
+      if (!context) return
+      context.drawImage(video, 0, 0, canvas.width, canvas.height)
+      const tags = await detectBrowserAprilTags(canvas)
+      setOpencvState('ready')
+      const event = stableTagTrackerRef.current.update(tags.map(tag => tag.tagId))
+      if (!event) return
+
+      const primary = shelfTagMap.tags?.[String(event.tagIds[0])]
+      const label = primary?.unit
+        ? `${primary.unit}（tag ${event.tagIds.join(', ')}）`
+        : `tag ${event.tagIds.join(', ')}`
+      const time = new Date().toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+      setCurrentShelfLabel(label)
+      setShelfEvents(events => [{ id: `${event.key}-${Date.now()}`, label, time }, ...events].slice(0, 6))
+      setLiveStatus(`新しい棚を検知しました。${label}を確認しています…`)
+
+      // Browser detection is the low-latency trigger. Ask the backend for the
+      // authoritative orientation/quadrant/shelf assignment on this frame.
+      void detectFrame()
+    } catch (browserError) {
+      setOpencvState('fallback')
+      setLiveStatus(`ブラウザ検知を利用できないため、サーバー検知を使用中です。`)
+      if (browserError instanceof Error) console.warn(browserError)
+    } finally {
+      browserDetectingRef.current = false
+      setBrowserDetecting(false)
+    }
+  }, [detectFrame, shelfTagMap])
+
   const stopCamera = useCallback(() => {
     if (detectTimerRef.current != null) {
       window.clearInterval(detectTimerRef.current)
       detectTimerRef.current = null
     }
+    if (browserDetectTimerRef.current != null) {
+      window.clearInterval(browserDetectTimerRef.current)
+      browserDetectTimerRef.current = null
+    }
     streamRef.current?.getTracks().forEach(track => track.stop())
     streamRef.current = null
     if (videoRef.current) videoRef.current.srcObject = null
+    if (scanAnimationRef.current != null) cancelAnimationFrame(scanAnimationRef.current)
+    scanAnimationRef.current = null
+    stableTagTrackerRef.current.reset()
+    const abandoned = sessionRef.current
+    sessionRef.current = null
+    if (abandoned) void apiFetch(`/api/scan/sessions/${abandoned.id}/cancel`, { method: 'POST' })
     setRecording(false)
   }, [])
 
@@ -95,14 +176,25 @@ export default function ScanPage() {
         videoRef.current.srcObject = stream
         await videoRef.current.play()
       }
+      try {
+        const mapResponse = await apiFetch('/api/shelves')
+        if (mapResponse.ok) setShelfTagMap(await mapResponse.json() as ShelfTagMap)
+      } catch {
+        setShelfTagMap({})
+      }
+      setOpencvState('loading')
+      setCurrentShelfLabel('棚を探しています')
+      setShelfEvents([])
       setLiveStatus('タグを探しています。棚のタグを画面中央に写してください。')
       await detectFrame()
+      void detectBrowserFrame()
       detectTimerRef.current = window.setInterval(() => void detectFrame(), 1600)
+      browserDetectTimerRef.current = window.setInterval(() => void detectBrowserFrame(), 450)
     } catch {
       setError('カメラにアクセスできませんでした。')
       stopCamera()
     }
-  }, [detectFrame, stopCamera])
+  }, [detectBrowserFrame, detectFrame, stopCamera])
 
   useEffect(() => {
     if (mode !== 'camera') {
@@ -113,23 +205,92 @@ export default function ScanPage() {
     return stopCamera
   }, [mode, startCamera, stopCamera])
 
-  const startRecording = () => {
-    const stream = videoRef.current?.srcObject as MediaStream
-    if (!stream) return
-    chunksRef.current = []
-    const recorder = new MediaRecorder(stream)
-    recorder.ondataavailable = e => { if (e.data.size > 0) chunksRef.current.push(e.data) }
-    recorder.onstop = () => {
-      const blob = new Blob(chunksRef.current, { type: 'video/webm' })
-      setFile(new File([blob], `scan_${Date.now()}.webm`, { type: 'video/webm' }))
-      setRecording(false)
-    }
-    recorderRef.current = recorder
-    recorder.start()
-    setRecording(true)
+  const stopFrameLoop = () => {
+    if (scanAnimationRef.current != null) cancelAnimationFrame(scanAnimationRef.current)
+    scanAnimationRef.current = null
   }
 
-  const stopRecording = () => { recorderRef.current?.stop() }
+  const startRecording = async () => {
+    if (!videoRef.current?.srcObject) return
+    try {
+      const res = await apiFetch('/api/scan/sessions', { method: 'POST' })
+      if (!res.ok) throw new Error(await res.text())
+      const session = await res.json() as { session_id: string; frame_upload_url_template?: string; frame_upload_url_endpoint?: string }
+      sessionRef.current = { id: session.session_id, template: session.frame_upload_url_template ?? session.frame_upload_url_endpoint ?? '' }
+      frameNumberRef.current = 0; lastEvaluationRef.current = 0
+      scanGateRef.current = { lastSentAt: 0 }
+      setScanStats({ evaluated: 0, sent: 0, skipped: {} })
+      setRecording(true)
+      const loop = (now: number) => {
+        if (!sessionRef.current) return
+        if (now - lastEvaluationRef.current >= 1000 / 15) {
+          lastEvaluationRef.current = now
+          const video = videoRef.current; const canvas = scanCanvasRef.current
+          if (video && canvas && video.videoWidth) {
+            canvas.width = 160; canvas.height = Math.round(video.videoHeight * 160 / video.videoWidth)
+            const ctx = canvas.getContext('2d')
+            if (ctx) {
+              ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+              const evaluated = frameMetrics(ctx.getImageData(0, 0, canvas.width, canvas.height), scanGateRef.current.previous)
+              const reason = shouldSendFrame(evaluated.metrics, now, scanGateRef.current)
+              scanGateRef.current.previous = evaluated.sample
+              if (reason) setScanStats(s => ({ ...s, evaluated: s.evaluated + 1, skipped: { ...s.skipped, [reason]: (s.skipped[reason] ?? 0) + 1 } }))
+              else {
+                scanGateRef.current.lastSentAt = now
+                const frame = `frame_${String(++frameNumberRef.current).padStart(6, '0')}.jpg`
+                const capture = captureCanvasRef.current
+                if (!capture) return
+                const captureWidth = Math.min(1280, video.videoWidth)
+                capture.width = captureWidth
+                capture.height = Math.round(video.videoHeight * captureWidth / video.videoWidth)
+                capture.getContext('2d')?.drawImage(video, 0, 0, capture.width, capture.height)
+                capture.toBlob(blob => {
+                  if (!blob || !sessionRef.current) return
+                  const activeSession = sessionRef.current
+                  const upload = (async () => {
+                    let url = activeSession.template.replace('{frame_id}', frame)
+                    if (!activeSession.template.includes('{frame_id}')) {
+                      const init = await apiFetch(activeSession.template, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ filename: frame }) })
+                      if (!init.ok) throw new Error(`frame init ${init.status}`)
+                      url = (await init.json() as { upload_url: string }).upload_url
+                    }
+                    const put = await fetch(apiUrl(url), { method: 'PUT', headers: { 'Content-Type': 'image/jpeg' }, body: blob })
+                    if (!put.ok) throw new Error(`frame upload ${put.status}`)
+                    setScanStats(s => ({ ...s, evaluated: s.evaluated + 1, sent: s.sent + 1 }))
+                  })().catch(e => setError(`候補フレームの保存に失敗しました: ${String(e)}`))
+                  pendingUploadsRef.current.add(upload)
+                  void upload.finally(() => pendingUploadsRef.current.delete(upload))
+                }, 'image/jpeg', 0.82)
+              }
+            }
+          }
+        }
+        scanAnimationRef.current = requestAnimationFrame(loop)
+      }
+      scanAnimationRef.current = requestAnimationFrame(loop)
+    } catch (e) { setError(`ライブスキャンを開始できませんでした: ${String(e)}`) }
+  }
+
+  const stopRecording = async () => {
+    const session = sessionRef.current; stopFrameLoop(); setRecording(false)
+    if (!session) return
+    try {
+      await Promise.all([...pendingUploadsRef.current])
+      const res = await apiFetch(`/api/scan/sessions/${session.id}/complete`, { method: 'POST' })
+      if (!res.ok) throw new Error(await res.text())
+      const data = await res.json() as { job_id: string }
+      sessionRef.current = null
+      navigate(`/jobs/${data.job_id}`)
+    } catch (e) {
+      setRecording(true)
+      setError(`スキャン確定に失敗しました。再確定またはキャンセルできます: ${String(e)}`)
+    }
+  }
+
+  const cancelRecording = async () => {
+    const session = sessionRef.current; stopFrameLoop(); setRecording(false); sessionRef.current = null
+    if (session) await apiFetch(`/api/scan/sessions/${session.id}/cancel`, { method: 'POST' })
+  }
 
   const submit = async () => {
     if (!file) return
@@ -205,24 +366,29 @@ export default function ScanPage() {
         <div className="bg-black rounded-xl overflow-hidden mb-4">
           <video ref={videoRef} className="w-full max-h-80 object-contain" muted playsInline />
           <canvas ref={canvasRef} className="hidden" />
+          <canvas ref={browserCanvasRef} className="hidden" />
+          <canvas ref={scanCanvasRef} className="hidden" />
+          <canvas ref={captureCanvasRef} className="hidden" />
           <div className="flex gap-3 p-4 justify-center">
             {!recording ? (
               <button onClick={startRecording} className="px-6 py-2 bg-red-600 text-white rounded-lg font-semibold">
-                ● 録画開始
+                ● ライブスキャン開始
               </button>
             ) : (
               <button onClick={stopRecording} className="px-6 py-2 bg-gray-700 text-white rounded-lg font-semibold animate-pulse">
-                ■ 録画停止
+                ■ スキャンを確定
               </button>
             )}
           </div>
-          {file && (
-            <p className="text-center text-sm text-green-400 pb-4">
-              録画完了: {(file.size / 1024).toFixed(0)} KB
-            </p>
-          )}
+          {recording && <button onClick={() => void cancelRecording()} className="mx-auto mb-3 block text-xs text-gray-300 underline">キャンセル（OCRしない）</button>}
           <div className="px-4 pb-4 text-center">
-            <p className="text-sm text-white">{detecting ? 'タグを読み取り中…' : liveStatus}</p>
+            <p className="text-sm text-white">{detecting || browserDetecting ? 'タグを読み取り中…' : liveStatus}</p>
+            <div className="mt-2 flex flex-wrap justify-center gap-2 text-xs">
+              <span className="rounded-full bg-white/15 px-2 py-1 text-white">現在: {currentShelfLabel}</span>
+              <span className={`rounded-full px-2 py-1 ${opencvState === 'ready' ? 'bg-emerald-200 text-emerald-900' : opencvState === 'fallback' ? 'bg-amber-200 text-amber-900' : 'bg-white/15 text-white'}`}>
+                Webタグ検知: {opencvState === 'ready' ? '有効' : opencvState === 'fallback' ? 'サーバーへ切替' : '準備中'}
+              </span>
+            </div>
             {detectedTags.length > 0 && (
               <div className="mt-2 flex flex-wrap justify-center gap-2">
                 {detectedTags.map(tag => (
@@ -236,6 +402,20 @@ export default function ScanPage() {
               </div>
             )}
           </div>
+          {shelfEvents.length > 0 && (
+            <div className="mx-4 mb-3 rounded-lg bg-white/10 p-3 text-left text-xs text-white">
+              <p className="mb-2 font-semibold">検知した棚</p>
+              <div className="space-y-1.5">
+                {shelfEvents.map(event => (
+                  <div key={event.id} className="flex items-center justify-between gap-3">
+                    <span>✓ {event.label}</span>
+                    <span className="text-gray-300">{event.time}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          <p className="px-4 pb-4 text-center text-xs text-gray-300">評価 {scanStats.evaluated} / 送信 {scanStats.sent} / スキップ: ぶれ {scanStats.skipped.blurred ?? 0}・同一 {scanStats.skipped.unchanged ?? 0}・間隔 {scanStats.skipped.rate_limited ?? 0}</p>
         </div>
       )}
 
