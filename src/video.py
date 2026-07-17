@@ -57,6 +57,76 @@ def extract_frames(
     return saved
 
 
+def extract_keyframes(
+    video_path: Path,
+    output_dir: Path,
+    min_frame_blur: float = 80.0,
+    scene_change_threshold: float = 25.0,
+    min_interval_sec: float = 0.5,
+    max_frames: int | None = None,
+) -> list[Path]:
+    """Extract sharp, changed frames from a video for downstream detection.
+
+    This is the video-mode counterpart of the browser frame gate: it rejects
+    blurry frames, near-duplicates, and frames arriving before the configured
+    minimum interval.
+    """
+    import cv2
+    import numpy as np
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise ValueError(f"Cannot open video: {video_path}")
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    min_interval_frames = max(1, int(fps * min_interval_sec))
+    saved: list[Path] = []
+    previous_gray: np.ndarray | None = None
+    last_saved_idx = -min_interval_frames
+    frame_idx = 0
+    stats = {"blur_skip": 0, "similar_skip": 0, "interval_skip": 0}
+
+    while True:
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            break
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        blur_score = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+        if blur_score < min_frame_blur:
+            stats["blur_skip"] += 1
+            frame_idx += 1
+            continue
+        if frame_idx - last_saved_idx < min_interval_frames:
+            stats["interval_skip"] += 1
+            frame_idx += 1
+            continue
+        if previous_gray is not None:
+            diff = float(np.mean(np.abs(gray.astype(np.float32) - previous_gray)))
+            if diff < scene_change_threshold:
+                stats["similar_skip"] += 1
+                frame_idx += 1
+                continue
+
+        out_path = output_dir / f"frame_{frame_idx:06d}.jpg"
+        cv2.imwrite(str(out_path), frame, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+        saved.append(out_path)
+        previous_gray = gray
+        last_saved_idx = frame_idx
+        if max_frames is not None and len(saved) >= max_frames:
+            break
+        frame_idx += 1
+
+    cap.release()
+    print(
+        f"  keyframes: saved={len(saved)} "
+        f"blur_skip={stats['blur_skip']} "
+        f"similar_skip={stats['similar_skip']} "
+        f"interval_skip={stats['interval_skip']}"
+    )
+    return saved
+
+
 def crop_phash(image: Any, hash_size: int = DEFAULT_HASH_SIZE) -> int:
     """Compute a simple average-hash (aHash) for a crop image.
 
