@@ -2,6 +2,7 @@
 
 !.vercelignore
 !vercel.json
+!pyproject.toml
 !requirements.txt
 
 !api/
