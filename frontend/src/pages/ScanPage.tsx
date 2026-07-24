@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState, useRef } from 'react'
+import { ArrowUpLeft } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { apiFetch, apiUrl } from '../lib/api'
 import { frameMetrics, shouldSendFrame, type FrameSkipReason } from '../lib/liveFrameGate'
@@ -27,14 +28,17 @@ interface ShelfEvent {
 }
 
 export default function ScanPage() {
-  const [mode, setMode] = useState<'upload' | 'camera'>('upload')
+  const [mode, setMode] = useState<'upload' | 'camera'>('camera')
   const [file, setFile] = useState<File | null>(null)
+  const [filePreview, setFilePreview] = useState('')
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState('')
   const [progress, setProgress] = useState(0)
 
   const videoRef = useRef<HTMLVideoElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const [recording, setRecording] = useState(false)
+  const [cameraReady, setCameraReady] = useState(false)
   const [detecting, setDetecting] = useState(false)
   const [browserDetecting, setBrowserDetecting] = useState(false)
   const [opencvState, setOpencvState] = useState<'loading' | 'ready' | 'fallback'>('loading')
@@ -61,6 +65,16 @@ export default function ScanPage() {
   const pendingUploadsRef = useRef<Set<Promise<void>>>(new Set())
   const [scanStats, setScanStats] = useState({ evaluated: 0, sent: 0, skipped: {} as Partial<Record<FrameSkipReason, number>> })
   const navigate = useNavigate()
+
+  useEffect(() => {
+    if (!file?.type.startsWith('image/')) {
+      setFilePreview('')
+      return
+    }
+    const preview = URL.createObjectURL(file)
+    setFilePreview(preview)
+    return () => URL.revokeObjectURL(preview)
+  }, [file])
 
   const detectFrame = useCallback(async () => {
     if (detectingRef.current) return
@@ -165,6 +179,7 @@ export default function ScanPage() {
     sessionRef.current = null
     if (abandoned) void apiFetch(`/api/scan/sessions/${abandoned.id}/cancel`, { method: 'POST' })
     setRecording(false)
+    setCameraReady(false)
   }, [])
 
   const startCamera = useCallback(async () => {
@@ -175,6 +190,7 @@ export default function ScanPage() {
       if (videoRef.current) {
         videoRef.current.srcObject = stream
         await videoRef.current.play()
+        setCameraReady(true)
       }
       try {
         const mapResponse = await apiFetch('/api/shelves')
@@ -327,116 +343,104 @@ export default function ScanPage() {
     }
   }
 
+  const chooseFile = (selected: File | null) => {
+    setFile(selected)
+    if (selected) setMode('upload')
+  }
+
+  const primaryAction = () => {
+    if (mode === 'upload') {
+      void submit()
+    } else if (recording) {
+      void stopRecording()
+    } else {
+      void startRecording()
+    }
+  }
+
+  const statusLines = shelfEvents.length > 0
+    ? [`新しい棚を検知しました!`, '本を解析しています…']
+    : mode === 'upload'
+      ? [file?.name ?? '画像または動画を選択', file ? 'このファイルを解析します' : '右下のボタンから選択できます']
+      : import.meta.env.DEV
+        ? ['新しい棚を検知しました！', '本を解析しています…']
+        : [detecting || browserDetecting ? '棚を検知しています…' : currentShelfLabel, liveStatus]
+  const showDevCameraPreview = import.meta.env.DEV && mode === 'camera' && (!cameraReady || Boolean(error))
+
   return (
-    <div>
-      <h2 className="text-2xl font-bold text-gray-800 mb-6">棚をスキャン</h2>
+    <div className="min-h-screen bg-[#1e1e1e] md:grid md:place-items-center">
+      <div className="relative mx-auto h-[100dvh] min-h-[674px] w-full max-w-[402px] overflow-hidden bg-[#1e1e1e] p-4 md:h-[874px]">
+        <div className="relative h-full w-full overflow-hidden bg-[#292929]">
+          {mode === 'camera' ? (
+            <>
+              {showDevCameraPreview && <img src="/dev-scan-shelf.jpg" alt="" className="absolute inset-0 size-full object-cover" />}
+              <video ref={videoRef} className={`absolute inset-0 size-full object-cover ${showDevCameraPreview ? 'opacity-0' : ''}`} muted playsInline />
+            </>
+          ) : filePreview ? (
+            <img src={filePreview} alt="選択した本棚" className="absolute inset-0 size-full object-cover" />
+          ) : (
+            <div className="absolute inset-0 grid place-items-center bg-[radial-gradient(circle_at_center,#414141,#1e1e1e)] px-10 text-center text-sm text-white/60">
+              {file ? file.name : '本棚を画面に収めてください'}
+            </div>
+          )}
 
-      {/* モード切替 */}
-      <div className="flex gap-2 mb-6">
-        {(['upload', 'camera'] as const).map(m => (
-          <button
-            key={m}
-            onClick={() => { setMode(m); setFile(null) }}
-            className={`px-4 py-2 rounded-lg text-sm font-semibold border transition-colors ${
-              mode === m ? 'bg-[#1f7a5c] text-white border-[#1f7a5c]' : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'
-            }`}
-          >
-            {m === 'upload' ? 'ファイルアップロード' : 'カメラ撮影'}
+          <div className="absolute inset-0 bg-gradient-to-b from-black/20 via-transparent to-black/25" />
+
+          <button type="button" onClick={() => navigate(-1)} aria-label="戻る" className="tap-soft absolute left-7 top-6 z-10 grid size-10 place-items-center rounded-full bg-white text-[#1e1e1e]">
+            <ArrowUpLeft className="size-6" />
           </button>
-        ))}
-      </div>
 
-      {mode === 'upload' && (
-        <label className="flex flex-col items-center justify-center border-2 border-dashed border-gray-300 rounded-xl p-12 cursor-pointer hover:border-[#1f7a5c] transition-colors bg-white">
-          <span className="text-4xl mb-3">📷</span>
-          <span className="text-gray-600 font-medium">
-            {file ? file.name : '画像または動画を選択'}
-          </span>
-          <span className="text-sm text-gray-400 mt-1">JPG / PNG / MP4 / MOV</span>
-          <input
-            type="file"
-            accept="image/*,video/*"
-            className="hidden"
-            onChange={e => setFile(e.target.files?.[0] ?? null)}
-          />
-        </label>
-      )}
+          <div className="absolute bottom-[204px] left-1/2 flex h-[63px] w-[300px] -translate-x-1/2 flex-col justify-center overflow-hidden rounded-xl bg-[#1e1e1e] px-4 text-base leading-[19px] text-white shadow-[20px_8px_0_rgba(30,30,30,0.83)]">
+            <p>{statusLines[0]}</p>
+            <p className="line-clamp-1 text-white/90">{statusLines[1]}</p>
+          </div>
 
-      {mode === 'camera' && (
-        <div className="bg-black rounded-xl overflow-hidden mb-4">
-          <video ref={videoRef} className="w-full max-h-80 object-contain" muted playsInline />
+          {error && !showDevCameraPreview && (
+            <div className="absolute left-1/2 top-[104px] z-10 w-[300px] -translate-x-1/2 rounded-xl bg-red-700/90 px-4 py-3 text-sm text-white">
+              {error}
+            </div>
+          )}
+
+          {uploading && (
+            <div className="absolute inset-x-7 bottom-[164px] z-10 overflow-hidden rounded-full bg-white/35">
+              <div className="h-2 bg-[#087f5b] transition-all" style={{ width: `${Math.max(8, progress)}%` }} />
+            </div>
+          )}
+
+          <div className="absolute bottom-16 left-1/2 flex w-[300px] -translate-x-1/2 items-center justify-end gap-12">
+            <button
+              type="button"
+              onClick={primaryAction}
+              disabled={(mode === 'upload' && !file) || uploading}
+              aria-label={mode === 'upload' ? '選択したファイルを解析' : recording ? 'スキャンを終了' : 'ライブスキャンを開始'}
+              className={`tap-card grid size-[100px] place-items-center rounded-full transition disabled:opacity-50 ${recording ? 'bg-[#1e1e1e]' : 'border-[5px] border-[#1e1e1e] bg-white'}`}
+            >
+              {recording && <span className="size-11 rounded-[12px] bg-[#ff3b30]" />}
+              {mode === 'upload' && !recording && <span className="text-sm font-semibold text-[#1e1e1e]">解析</span>}
+            </button>
+
+            {!recording && (
+              <button type="button" onClick={() => fileInputRef.current?.click()} aria-label="画像または動画を選択" className="tap-card h-[61px] w-[58px] rounded-xl bg-white shadow-sm" />
+            )}
+          </div>
+
+          {recording && (
+            <button type="button" onClick={() => void cancelRecording()} className="tap-soft absolute bottom-6 left-1/2 -translate-x-1/2 text-xs text-white/75 underline">
+              キャンセル
+            </button>
+          )}
+
+          <input ref={fileInputRef} type="file" accept="image/*,video/*" className="hidden" onChange={event => chooseFile(event.target.files?.[0] ?? null)} />
           <canvas ref={canvasRef} className="hidden" />
           <canvas ref={browserCanvasRef} className="hidden" />
           <canvas ref={scanCanvasRef} className="hidden" />
           <canvas ref={captureCanvasRef} className="hidden" />
-          <div className="flex gap-3 p-4 justify-center">
-            {!recording ? (
-              <button onClick={startRecording} className="px-6 py-2 bg-red-600 text-white rounded-lg font-semibold">
-                ● ライブスキャン開始
-              </button>
-            ) : (
-              <button onClick={stopRecording} className="px-6 py-2 bg-gray-700 text-white rounded-lg font-semibold animate-pulse">
-                ■ スキャンを確定
-              </button>
-            )}
+
+          <div className="sr-only" aria-live="polite">
+            Webタグ検知: {opencvState}。評価 {scanStats.evaluated}、送信 {scanStats.sent}。検出タグ {detectedTags.map(tag => tag.tag_id).join(', ')}
           </div>
-          {recording && <button onClick={() => void cancelRecording()} className="mx-auto mb-3 block text-xs text-gray-300 underline">キャンセル（OCRしない）</button>}
-          <div className="px-4 pb-4 text-center">
-            <p className="text-sm text-white">{detecting || browserDetecting ? 'タグを読み取り中…' : liveStatus}</p>
-            <div className="mt-2 flex flex-wrap justify-center gap-2 text-xs">
-              <span className="rounded-full bg-white/15 px-2 py-1 text-white">現在: {currentShelfLabel}</span>
-              <span className={`rounded-full px-2 py-1 ${opencvState === 'ready' ? 'bg-emerald-200 text-emerald-900' : opencvState === 'fallback' ? 'bg-amber-200 text-amber-900' : 'bg-white/15 text-white'}`}>
-                Webタグ検知: {opencvState === 'ready' ? '有効' : opencvState === 'fallback' ? 'サーバーへ切替' : '準備中'}
-              </span>
-            </div>
-            {detectedTags.length > 0 && (
-              <div className="mt-2 flex flex-wrap justify-center gap-2">
-                {detectedTags.map(tag => (
-                  <span
-                    key={`${tag.tag_id}-${tag.orientation_status}`}
-                    className={`rounded-full px-2 py-1 text-xs font-semibold ${tag.orientation_status === 'mismatch' ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-800'}`}
-                  >
-                    tag {tag.tag_id}
-                  </span>
-                ))}
-              </div>
-            )}
-          </div>
-          {shelfEvents.length > 0 && (
-            <div className="mx-4 mb-3 rounded-lg bg-white/10 p-3 text-left text-xs text-white">
-              <p className="mb-2 font-semibold">検知した棚</p>
-              <div className="space-y-1.5">
-                {shelfEvents.map(event => (
-                  <div key={event.id} className="flex items-center justify-between gap-3">
-                    <span>✓ {event.label}</span>
-                    <span className="text-gray-300">{event.time}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-          <p className="px-4 pb-4 text-center text-xs text-gray-300">評価 {scanStats.evaluated} / 送信 {scanStats.sent} / スキップ: ぶれ {scanStats.skipped.blurred ?? 0}・同一 {scanStats.skipped.unchanged ?? 0}・間隔 {scanStats.skipped.rate_limited ?? 0}</p>
         </div>
-      )}
-
-      {error && <p className="text-red-600 text-sm mt-3">{error}</p>}
-
-      <button
-        disabled={!file || uploading}
-        onClick={submit}
-        className="mt-6 w-full py-3 bg-[#1f7a5c] text-white rounded-xl font-bold text-base hover:bg-[#196649] disabled:opacity-40 transition-colors"
-      >
-        {uploading ? (progress > 0 && progress < 100 ? `アップロード中… ${progress}%` : '送信中…') : '解析する'}
-      </button>
-      {uploading && progress > 0 && progress < 100 && (
-        <div className="mt-3 w-full h-2 bg-gray-200 rounded-full overflow-hidden">
-          <div className="h-full bg-[#1f7a5c] transition-all" style={{ width: `${progress}%` }} />
-        </div>
-      )}
-
-      <p className="text-xs text-gray-400 mt-3 text-center">
-        本棚にAprilTagが貼られている場合、棚IDも自動で認識されます。
-      </p>
+      </div>
     </div>
   )
 }

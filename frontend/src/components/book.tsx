@@ -1,9 +1,21 @@
-import { ExternalLink, Search, X } from 'lucide-react'
+import { ExternalLink, X } from 'lucide-react'
 import type { FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import type { Book, ShelfCandidate } from '../lib/types'
 import { confidenceLevel, formatShelfLabel, getSlot, getUnitId, shortShelfLabel, splitShelfId } from '../lib/shelf'
 import { ShelfLocationLabel, ShelfMapHighlight } from './shelf'
+
+// FigmaのMaterial Symbols「search」(filled)を移植。lucideのSearchは線画で意匠が異なるため使わない。
+function SearchIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" className={className} aria-hidden="true">
+      <path
+        d="M19.6 21L13.3 14.7C12.8 15.1 12.225 15.4167 11.575 15.65C10.925 15.8833 10.2333 16 9.5 16C7.68333 16 6.14583 15.3708 4.8875 14.1125C3.62917 12.8542 3 11.3167 3 9.5C3 7.68333 3.62917 6.14583 4.8875 4.8875C6.14583 3.62917 7.68333 3 9.5 3C11.3167 3 12.8542 3.62917 14.1125 4.8875C15.3708 6.14583 16 7.68333 16 9.5C16 10.2333 15.8833 10.925 15.65 11.575C15.4167 12.225 15.1 12.8 14.7 13.3L21 19.6L19.6 21ZM9.5 14C10.75 14 11.8125 13.5625 12.6875 12.6875C13.5625 11.8125 14 10.75 14 9.5C14 8.25 13.5625 7.1875 12.6875 6.3125C11.8125 5.4375 10.75 5 9.5 5C8.25 5 7.1875 5.4375 6.3125 6.3125C5.4375 7.1875 5 8.25 5 9.5C5 10.75 5.4375 11.8125 6.3125 12.6875C7.1875 13.5625 8.25 14 9.5 14Z"
+        fill="currentColor"
+      />
+    </svg>
+  )
+}
 
 export function SearchBar({
   value,
@@ -21,30 +33,28 @@ export function SearchBar({
     onSubmit()
   }
   return (
-    <form onSubmit={submit} className="flex gap-2">
-      <div className="relative min-w-0 flex-1">
-        <Search className="pointer-events-none absolute left-3 top-1/2 size-5 -translate-y-1/2 text-ink-faint" />
-        <input
-          value={value}
-          onChange={event => onChange(event.target.value)}
-          autoFocus={autoFocus}
-          placeholder="書名・著者・ISBN"
-          className="min-h-12 w-full rounded-lg border border-line bg-white py-3 pl-10 pr-10 text-base outline-none focus:border-primary focus:ring-2 focus:ring-primary-soft"
-        />
-        {value && (
-          <button
-            type="button"
-            aria-label="検索語を消す"
-            onClick={() => onChange('')}
-            className="absolute right-2 top-1/2 grid size-8 -translate-y-1/2 place-items-center rounded-full text-ink-muted hover:bg-zinc-100"
-          >
-            <X className="size-4" />
-          </button>
-        )}
-      </div>
-      <button type="submit" className="min-h-12 rounded-lg bg-primary px-5 text-sm font-bold text-white">
-        検索
-      </button>
+    <form
+      onSubmit={submit}
+      className="flex w-full items-center gap-2 rounded-[24px] bg-white px-[14px] py-3 shadow-[0_3px_2.9px_rgba(0,0,0,0.1)] focus-within:ring-2 focus-within:ring-primary-soft"
+    >
+      <SearchIcon className="size-6 shrink-0 text-[#087f5b]" />
+      <input
+        value={value}
+        onChange={event => onChange(event.target.value)}
+        autoFocus={autoFocus}
+        placeholder="蟹工船"
+        className="min-w-0 flex-1 border-0 bg-transparent p-0 text-base text-ink outline-none placeholder:text-black/50"
+      />
+      {value && (
+        <button
+          type="button"
+          aria-label="検索語を消す"
+          onClick={() => onChange('')}
+          className="grid size-8 shrink-0 place-items-center rounded-full text-ink-muted hover:bg-zinc-100"
+        >
+          <X className="size-4" />
+        </button>
+      )}
     </form>
   )
 }

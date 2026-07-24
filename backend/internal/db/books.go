@@ -143,6 +143,33 @@ func (s *Store) GetByID(id int) (*Book, error) {
 	return &books[0], nil
 }
 
+// FeaturedBooks はサムネイルが登録済みの本からランダムにN件返す。
+// トップページの「今週のおすすめ」用で、実在する書影のない本は対象外にする。
+func (s *Store) FeaturedBooks(limit int) ([]Book, error) {
+	if limit <= 0 {
+		limit = 6
+	}
+	rows, err := s.db.Query(`
+		SELECT b.id, b.title, COALESCE(b.authors,''), COALESCE(b.publisher,''),
+		       COALESCE(b.published_date,''), COALESCE(b.class_number,''),
+		       COALESCE(b.registration_number,''), COALESCE(b.isbn,''),
+		       bc.thumbnail, bc.info_link
+		FROM books b
+		JOIN book_covers bc ON b.id = bc.book_id
+		WHERE bc.thumbnail IS NOT NULL AND bc.thumbnail != ''
+		ORDER BY RANDOM()
+		LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	books, err := scanBooks(rows)
+	if err != nil {
+		return nil, err
+	}
+	return s.attachShelfCandidates(books)
+}
+
 func (s *Store) ShelfCandidates(bookID int, limit int) ([]ShelfCandidate, error) {
 	if limit <= 0 {
 		limit = 5

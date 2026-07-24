@@ -17,11 +17,50 @@
 body {
   margin: 0;
   font-family: system-ui, -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", "Segoe UI", sans-serif;
-  background: #fafafa;
+  background: #fff;
   color: #18181b;
 }
 
 button,
 input {
   font: inherit;
+}
+
+button {
+  -webkit-tap-highlight-color: transparent;
+}
+
+@layer components {
+  .tap-card {
+    transition: transform 160ms ease, filter 160ms ease, box-shadow 160ms ease, opacity 160ms ease;
+    touch-action: manipulation;
+  }
+
+  .tap-card:hover {
+    filter: brightness(0.98);
+  }
+
+  .tap-card:active {
+    transform: translateY(1px) scale(0.985);
+  }
+
+  .tap-card:focus-visible {
+    outline: 2px solid #087f5b;
+    outline-offset: 4px;
+  }
+
+  .tap-soft {
+    transition: transform 150ms ease, background-color 150ms ease, color 150ms ease, opacity 150ms ease;
+    touch-action: manipulation;
+  }
+
+  .tap-soft:active {
+    transform: scale(0.94);
+  }
+
+  .tap-soft:focus-visible {
+    outline: 2px solid #087f5b;
+    outline-offset: 3px;
+  }
+
 }

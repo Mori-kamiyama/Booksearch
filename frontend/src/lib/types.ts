@@ -9,6 +9,9 @@ export interface Book {
   isbn: string
   thumbnail: string | null
   info_link: string | null
+  description?: string
+  summary?: string
+  reading_time_minutes?: number
   shelf_ids?: string[]
   shelf_candidates?: ShelfCandidate[]
 }

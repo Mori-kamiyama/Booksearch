@@ -68,17 +68,17 @@ export function LibraryFloorMap({
   const side = layoutUnits.filter(unit => unit.kind === 'side')
   return (
     <div className="rounded-xl border border-line bg-white p-4 shadow-sm">
-      <div className="grid gap-3">
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+      <div className="overflow-x-auto pb-2">
+        <div className="flex min-w-max items-start gap-3">
           {base.map(unit => (
             <UnitButton key={unit.unit} unitId={unit.unit} count={unitCounts[unit.unit] ?? 0} onClick={onUnitClick} />
           ))}
-        </div>
-        <div className="grid grid-cols-4 gap-3">
           {side.map(unit => (
             <UnitButton key={unit.unit} unitId={unit.unit} count={unitCounts[unit.unit] ?? 0} onClick={onUnitClick} compact />
           ))}
         </div>
+      </div>
+      <div className="mt-3">
         <div className="rounded-lg border border-dashed border-line bg-zinc-50 py-2 text-center text-xs font-semibold text-ink-muted">
           入口
         </div>
@@ -102,9 +102,12 @@ function UnitButton({
     <button
       type="button"
       onClick={() => onClick(unitId)}
-      className={`rounded-lg border border-line bg-zinc-50 p-3 text-left hover:border-primary ${compact ? 'min-h-20' : 'min-h-28'}`}
+      className={`rounded-lg border border-line bg-zinc-50 p-2 text-left hover:border-primary ${compact ? 'w-24' : 'w-56'}`}
     >
       <p className="font-bold text-ink">{unitName(unitId)}</p>
+      <div className="mt-2 rounded border border-line bg-white p-1">
+        <ShelfMapHighlight unitId={unitId} highlight={[]} />
+      </div>
       <p className="mt-2 inline-flex rounded-full bg-primary-soft px-2 py-1 text-xs font-semibold text-primary">{count}冊</p>
     </button>
   )
@@ -135,9 +138,11 @@ export function ShelfUnitGrid({
           const row = unit.rows - rowIndex
           return Array.from({ length: unit.cols }, (_, colIndex) => {
             const displayCol = colIndex + 1
-            const col = displayColToActualCol(unit, displayCol)
-            const shelfId = shelfIdForCell(unit.unit, col, row)
-            const empty = isEmptyCell(unit, col, row)
+            // Keep the shelf ID/count in the stable displayed coordinate system,
+            // while deriving the blank shape from the physically mirrored grid.
+            const physicalCol = displayColToActualCol(unit, displayCol)
+            const shelfId = shelfIdForCell(unit.unit, displayCol, row)
+            const empty = isEmptyCell(unit, physicalCol, row)
             const count = cellCounts[shelfId] ?? 0
             return (
               <button

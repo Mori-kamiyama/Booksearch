@@ -94,6 +94,14 @@ func handler(ctx context.Context, raw json.RawMessage) (events.APIGatewayV2HTTPR
 		return scanInit(ctx, req)
 	case method == "POST" && path == "/api/scan/start":
 		return scanStart(ctx, req)
+	case method == "POST" && path == "/api/scan/sessions":
+		return liveSessionStart(ctx)
+	case method == "POST" && strings.HasPrefix(path, "/api/scan/sessions/") && strings.HasSuffix(path, "/frames"):
+		return liveSessionFrame(ctx, req, path)
+	case method == "POST" && strings.HasPrefix(path, "/api/scan/sessions/") && strings.HasSuffix(path, "/complete"):
+		return liveSessionComplete(ctx, path)
+	case method == "POST" && strings.HasPrefix(path, "/api/scan/sessions/") && strings.HasSuffix(path, "/cancel"):
+		return liveSessionCancel(ctx, path)
 	case method == "GET" && path == "/api/shelves":
 		return getShelves(ctx)
 	case method == "GET" && strings.HasPrefix(path, "/api/crops/"):
@@ -101,6 +109,123 @@ func handler(ctx context.Context, raw json.RawMessage) (events.APIGatewayV2HTTPR
 	default:
 		return errJSON(404, "not found"), nil
 	}
+}
+
+// Live sessions intentionally have no OCR side effect. Each accepted frame gets
+// a short-lived direct S3 PUT URL; completion turns all recorded keys into one
+// YOLO job. This is separate from the legacy one-file scan endpoints above.
+func liveSessionStart(ctx context.Context) (events.APIGatewayV2HTTPResponse, error) {
+	id := uuid.New().String()
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := ddbClient.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String(jobsTable), Item: map[string]ddbtypes.AttributeValue{
+		"job_id": &ddbtypes.AttributeValueMemberS{Value: id}, "status": &ddbtypes.AttributeValueMemberS{Value: "collecting"},
+		"session_type": &ddbtypes.AttributeValueMemberS{Value: "live"}, "frame_keys": &ddbtypes.AttributeValueMemberL{Value: []ddbtypes.AttributeValue{}},
+		"created_at": &ddbtypes.AttributeValueMemberS{Value: now}, "updated_at": &ddbtypes.AttributeValueMemberS{Value: now},
+	}})
+	if err != nil {
+		return errJSON(500, "ddb session: "+err.Error()), nil
+	}
+	return okJSON(201, map[string]any{"session_id": id, "frame_upload_url_endpoint": "/api/scan/sessions/" + id + "/frames", "content_type": "image/jpeg"}), nil
+}
+
+func liveSessionID(path, suffix string) string {
+	return strings.TrimSuffix(strings.TrimPrefix(path, "/api/scan/sessions/"), suffix)
+}
+func liveSessionFrame(ctx context.Context, req events.APIGatewayV2HTTPRequest, path string) (events.APIGatewayV2HTTPResponse, error) {
+	id := liveSessionID(path, "/frames")
+	var payload struct {
+		Filename string `json:"filename"`
+	}
+	if err := json.Unmarshal([]byte(decodeBody(req)), &payload); err != nil || payload.Filename == "" {
+		return errJSON(400, "expected JSON {filename}"), nil
+	}
+	key := fmt.Sprintf("live/%s/frames/%s.jpg", id, uuid.New().String())
+	presigner := s3.NewPresignClient(s3Client)
+	p, err := presigner.PresignPutObject(ctx, &s3.PutObjectInput{Bucket: aws.String(bucket), Key: aws.String(key), ContentType: aws.String("image/jpeg")}, func(o *s3.PresignOptions) { o.Expires = 15 * time.Minute })
+	if err != nil {
+		return errJSON(500, "presign: "+err.Error()), nil
+	}
+	_, err = ddbClient.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: aws.String(jobsTable), Key: map[string]ddbtypes.AttributeValue{"job_id": &ddbtypes.AttributeValueMemberS{Value: id}},
+		UpdateExpression:    aws.String("SET frame_keys = list_append(frame_keys, :k), updated_at = :u"),
+		ConditionExpression: aws.String("#s = :collecting"), ExpressionAttributeNames: map[string]string{"#s": "status"},
+		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+			":k": &ddbtypes.AttributeValueMemberL{Value: []ddbtypes.AttributeValue{&ddbtypes.AttributeValueMemberS{Value: key}}},
+			":u": &ddbtypes.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)}, ":collecting": &ddbtypes.AttributeValueMemberS{Value: "collecting"},
+		},
+	})
+	if err != nil {
+		return errJSON(500, "ddb frame: "+err.Error()), nil
+	}
+	return okJSON(200, map[string]any{"frame_id": filepath.Base(key), "upload_url": p.URL, "content_type": "image/jpeg"}), nil
+}
+func liveSessionComplete(ctx context.Context, path string) (events.APIGatewayV2HTTPResponse, error) {
+	id := liveSessionID(path, "/complete")
+	out, err := ddbClient.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String(jobsTable), Key: map[string]ddbtypes.AttributeValue{"job_id": &ddbtypes.AttributeValueMemberS{Value: id}}})
+	if err != nil || out.Item == nil {
+		return errJSON(404, "session not found"), nil
+	}
+	frames, _ := out.Item["frame_keys"].(*ddbtypes.AttributeValueMemberL)
+	if frames == nil || len(frames.Value) == 0 {
+		return errJSON(400, "no accepted frames"), nil
+	}
+	keys := make([]string, 0, len(frames.Value))
+	for _, v := range frames.Value {
+		if s, ok := v.(*ddbtypes.AttributeValueMemberS); ok {
+			if _, headErr := s3Client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(bucket), Key: aws.String(s.Value)}); headErr == nil {
+				keys = append(keys, s.Value)
+			}
+		}
+	}
+	if len(keys) == 0 {
+		return errJSON(400, "no uploaded frames"), nil
+	}
+	keyValues := make([]ddbtypes.AttributeValue, 0, len(keys))
+	for _, key := range keys {
+		keyValues = append(keyValues, &ddbtypes.AttributeValueMemberS{Value: key})
+	}
+	_, err = ddbClient.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: aws.String(jobsTable), Key: map[string]ddbtypes.AttributeValue{"job_id": &ddbtypes.AttributeValueMemberS{Value: id}},
+		UpdateExpression: aws.String("SET #s = :s, frame_keys = :keys, updated_at = :u"), ConditionExpression: aws.String("#s = :collecting"),
+		ExpressionAttributeNames: map[string]string{"#s": "status"}, ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+			":s": &ddbtypes.AttributeValueMemberS{Value: "pending"}, ":collecting": &ddbtypes.AttributeValueMemberS{Value: "collecting"},
+			":keys": &ddbtypes.AttributeValueMemberL{Value: keyValues}, ":u": &ddbtypes.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)},
+		},
+	})
+	if err != nil {
+		return errJSON(500, err.Error()), nil
+	}
+	msg, _ := json.Marshal(map[string]any{"job_id": id, "image_keys": keys})
+	if _, err = sqsClient.SendMessage(ctx, &sqs.SendMessageInput{QueueUrl: aws.String(yoloQueueURL), MessageBody: aws.String(string(msg))}); err != nil {
+		_, _ = ddbClient.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+			TableName: aws.String(jobsTable), Key: map[string]ddbtypes.AttributeValue{"job_id": &ddbtypes.AttributeValueMemberS{Value: id}},
+			UpdateExpression: aws.String("SET #s = :collecting"), ConditionExpression: aws.String("#s = :pending"),
+			ExpressionAttributeNames: map[string]string{"#s": "status"}, ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+				":collecting": &ddbtypes.AttributeValueMemberS{Value: "collecting"}, ":pending": &ddbtypes.AttributeValueMemberS{Value: "pending"},
+			},
+		})
+		return errJSON(500, err.Error()), nil
+	}
+	return okJSON(202, map[string]any{"job_id": id, "accepted_frames": len(keys)}), nil
+}
+func liveSessionCancel(ctx context.Context, path string) (events.APIGatewayV2HTTPResponse, error) {
+	id := liveSessionID(path, "/cancel")
+	out, getErr := ddbClient.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String(jobsTable), Key: map[string]ddbtypes.AttributeValue{"job_id": &ddbtypes.AttributeValueMemberS{Value: id}}})
+	if getErr != nil || out.Item == nil {
+		return errJSON(404, "session not found"), nil
+	}
+	if frames, ok := out.Item["frame_keys"].(*ddbtypes.AttributeValueMemberL); ok {
+		for _, v := range frames.Value {
+			if s, ok := v.(*ddbtypes.AttributeValueMemberS); ok {
+				_, _ = s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String(s.Value)})
+			}
+		}
+	}
+	_, err := ddbClient.UpdateItem(ctx, &dynamodb.UpdateItemInput{TableName: aws.String(jobsTable), Key: map[string]ddbtypes.AttributeValue{"job_id": &ddbtypes.AttributeValueMemberS{Value: id}}, UpdateExpression: aws.String("SET #s = :s"), ConditionExpression: aws.String("#s = :collecting"), ExpressionAttributeNames: map[string]string{"#s": "status"}, ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{":s": &ddbtypes.AttributeValueMemberS{Value: "canceled"}, ":collecting": &ddbtypes.AttributeValueMemberS{Value: "collecting"}}})
+	if err != nil {
+		return errJSON(500, err.Error()), nil
+	}
+	return okJSON(200, map[string]any{"session_id": id, "status": "canceled"}), nil
 }
 
 func parseRequest(raw json.RawMessage) (events.APIGatewayV2HTTPRequest, string, string) {

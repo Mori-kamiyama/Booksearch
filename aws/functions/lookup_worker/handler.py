@@ -268,6 +268,8 @@ def update_shelf_confidence(catalog: dict[str, Any]) -> int:
     touched: set[tuple[int, str, str]] = set()
     job_id = catalog["job_id"]
     for entry in catalog.get("entries", []):
+        if entry.get("ocr_error") == "skipped_duplicate_crop":
+            continue
         shelf_id = entry.get("shelf_id")
         if not shelf_id:
             continue
@@ -303,6 +305,7 @@ def build_catalog(job_id: str) -> dict[str, Any]:
             print(f"[lookup] known_books load failed: {e}")
 
     entries = []
+    crops_by_id = {crop.get("crop_id"): crop for crop in crops}
     if DB_PATH.exists():
         con = sqlite3.connect(f"file:{DB_PATH}?mode=ro&immutable=1", uri=True)
         con.row_factory = sqlite3.Row
@@ -318,6 +321,10 @@ def build_catalog(job_id: str) -> dict[str, Any]:
             continue
 
         crop_titles = crop.get("titles") or []
+        existing_ref = crop.get("existing_ocr_ref") or {}
+        if not crop_titles and existing_ref.get("source") == "session":
+            referenced = crops_by_id.get(existing_ref.get("crop_id")) or {}
+            crop_titles = referenced.get("titles") or []
         enriched = []
         for book in crop_titles:
             title = book.get("title")
@@ -342,6 +349,7 @@ def build_catalog(job_id: str) -> dict[str, Any]:
             "shelf_id": (crop.get("shelf") or {}).get("shelf_id") if crop.get("shelf") else None,
             "shelf_assignment": crop.get("shelf"),
             "ocr_error": crop.get("ocr_error"),
+            "existing_ocr_ref": existing_ref or None,
             "books": enriched,
         }
         entries.append(entry)

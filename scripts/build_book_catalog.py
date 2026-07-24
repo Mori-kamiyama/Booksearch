@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 import time
 from dataclasses import dataclass
@@ -26,11 +27,11 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-import detection as book_detection
-import lookup as book_lookup
-import ocr as book_ocr
-import shelf_locator
-import video as book_video
+import detection as book_detection  # noqa: E402
+import lookup as book_lookup  # noqa: E402
+import ocr as book_ocr  # noqa: E402
+import shelf_locator  # noqa: E402
+import video as book_video  # noqa: E402
 
 DEFAULT_YOLO_MODEL = "aws/functions/yolo_worker/assets/yolo_model.pt"
 DEFAULT_LIBRARY_DB = "outputs/library/library.db"
@@ -102,6 +103,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-frame-blur", type=float, default=80.0, help="フレーム全体のブレ閾値。未満はスキップ（手ぶれ対策）")
     parser.add_argument("--scene-change-threshold", type=float, default=25.0, help="前フレームとの差分閾値。未満は同じシーンとしてスキップ")
     parser.add_argument("--no-dedup", action="store_true", help="crop重複スキップを無効化")
+    parser.add_argument("--dedup-crops", action="store_true", help="画像ディレクトリでも同一セッション内のcrop重複をOCRしない")
+    parser.add_argument("--fingerprint-db", default=None, help="成功済みOCR cropの永続フィンガープリントDB")
     parser.add_argument("--max-images", type=int, default=None)
     parser.add_argument("--sleep", type=float, default=0.4, help="Gemini呼び出し間隔")
     return parser.parse_args()
@@ -226,6 +229,7 @@ def make_catalog_entry(
     google_fallback: bool,
     shelf_assignment: shelf_locator.ShelfAssignment | None = None,
     ocr_error: str | None = None,
+    existing_ocr_ref: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     enriched_books = []
     for book in books:
@@ -250,9 +254,60 @@ def make_catalog_entry(
         "shelf_id": shelf_assignment.shelf_id if shelf_assignment else None,
         "shelf_assignment": shelf_assignment.to_json() if shelf_assignment else None,
         "ocr_error": ocr_error,
+        "existing_ocr_ref": existing_ocr_ref,
         "books": enriched_books,
     }
     return entry
+
+
+def fingerprint_scope(box: Any, shelf_id: str | None) -> str | None:
+    if not shelf_id:
+        return None
+    image = cv2.imread(str(box.image_path))
+    if image is None:
+        return None
+    height, width = image.shape[:2]
+    x1, y1, x2, y2 = box.xyxy
+    normalized = (
+        round(((x1 + x2) / 2) / width * 10), round(((y1 + y2) / 2) / height * 10),
+        round((x2 - x1) / width * 10), round((y2 - y1) / height * 10),
+    )
+    return f"{shelf_id}:{':'.join(str(v) for v in normalized)}"
+
+
+def open_fingerprint_db(path: Path | None) -> sqlite3.Connection | None:
+    if path is None:
+        return None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(path, timeout=10)
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA busy_timeout=10000")
+    con.execute("""CREATE TABLE IF NOT EXISTS crop_fingerprints (
+        fingerprint_scope TEXT PRIMARY KEY, phash TEXT NOT NULL, source_job TEXT,
+        source_crop TEXT, titles_json TEXT NOT NULL, updated_at TEXT NOT NULL
+    )""")
+    return con
+
+
+def find_persistent_crop(con: sqlite3.Connection | None, scope: str | None, phash: int) -> dict[str, Any] | None:
+    if con is None or scope is None:
+        return None
+    row = con.execute("SELECT phash, source_job, source_crop, titles_json FROM crop_fingerprints WHERE fingerprint_scope = ?", [scope]).fetchone()
+    if not row or bin(phash ^ int(row[0], 16)).count("1") > 6:
+        return None
+    return {"source": "persistent", "job_id": row[1], "crop_id": row[2], "titles": json.loads(row[3])}
+
+
+def save_persistent_crop(con: sqlite3.Connection | None, scope: str | None, phash: int,
+                         source_job: str, source_crop: str, titles: list[dict[str, Any]]) -> None:
+    if con is None or scope is None:
+        return
+    con.execute("""INSERT INTO crop_fingerprints VALUES (?, ?, ?, ?, ?, datetime('now'))
+        ON CONFLICT(fingerprint_scope) DO UPDATE SET phash=excluded.phash,
+        source_job=excluded.source_job, source_crop=excluded.source_crop,
+        titles_json=excluded.titles_json, updated_at=excluded.updated_at""",
+        [scope, f"{phash:016x}", source_job, source_crop, json.dumps(titles, ensure_ascii=False)])
+    con.commit()
 
 
 def main() -> int:
@@ -263,6 +318,7 @@ def main() -> int:
     library_db_path = resolve_path(args.library_db)
     output_dir = resolve_path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    fingerprint_db = open_fingerprint_db(resolve_path(args.fingerprint_db) if args.fingerprint_db else None)
 
     if args.video:
         video_path = resolve_path(args.video)
@@ -340,8 +396,8 @@ def main() -> int:
         print(f"shelf: assigned={assigned_count} skipped={skipped_count}")
 
     # 動画モードの crop 重複スキップ用: 処理済み crop の phash を蓄積
-    seen_crop_hashes: list = []
-    is_video_mode = bool(args.video)
+    seen_crop_hashes: list[tuple[int, str, list[dict[str, Any]]]] = []
+    is_video_mode = bool(args.video) or args.dedup_crops
 
     entries = []
     for i, box in enumerate(boxes, 1):
@@ -349,27 +405,48 @@ def main() -> int:
         print(f"[{i}/{len(boxes)}] {action} {box.box_id} -> {box.crop_path.name}")
         books: list[dict[str, Any]] = []
         ocr_error = None
+        existing_ocr_ref = None
         quality = getattr(box, "quality", None)
         skip_quality = bool(quality and not quality.readable and not args.include_low_quality)
         if skip_quality:
             ocr_error = f"skipped_low_quality: {','.join(quality.reasons)}"
             print(f"  skip: {ocr_error}")
         elif not args.skip_ocr:
+            phash = None
+            scope = None
             if is_video_mode and not args.no_dedup:
                 # 動画モード: 同じ crop が別フレームで既に OCR 済みならスキップ
                 crop_img = cv2.imread(str(box.crop_path))
                 if crop_img is not None:
                     phash = book_video.crop_phash(crop_img)
-                    if book_video.is_duplicate_crop(phash, seen_crop_hashes):
+                    session_match = next((item for item in seen_crop_hashes if book_video.is_duplicate_crop(phash, [item[0]])), None)
+                    assignment = shelf_assignments.get(box.box_id)
+                    scope = fingerprint_scope(box, assignment.shelf_id if assignment else None)
+                    persistent_match = None if session_match else find_persistent_crop(fingerprint_db, scope, phash)
+                    if session_match:
                         ocr_error = "skipped_duplicate_crop"
-                        print(f"  skip: duplicate crop")
+                        books = session_match[2]
+                        existing_ocr_ref = {"source": "session", "crop_id": session_match[1]}
+                        print("  skip: duplicate crop")
+                    elif persistent_match:
+                        ocr_error = "skipped_duplicate_crop"
+                        books = persistent_match.pop("titles")
+                        existing_ocr_ref = persistent_match
+                        print("  skip: persistent duplicate crop")
                     else:
-                        seen_crop_hashes.append(phash)
+                        seen_crop_hashes.append((phash, box.box_id, books))
             if not ocr_error:
                 try:
                     books = book_ocr.gemini_title_ocr(box.crop_path, args.gemini_model)
+                    if phash is not None:
+                        if books and seen_crop_hashes and seen_crop_hashes[-1][1] == box.box_id:
+                            seen_crop_hashes[-1] = (phash, box.box_id, books)
+                            save_persistent_crop(fingerprint_db, scope, phash, output_dir.name, box.box_id, books)
+                        elif not books:
+                            seen_crop_hashes = [item for item in seen_crop_hashes if item[1] != box.box_id]
                 except Exception as exc:
                     ocr_error = str(exc)
+                    seen_crop_hashes = [item for item in seen_crop_hashes if item[1] != box.box_id]
                     print(f"  OCR error: {ocr_error}")
             time.sleep(args.sleep)
         entries.append(
@@ -381,8 +458,12 @@ def main() -> int:
                 google_fallback=args.google_fallback,
                 shelf_assignment=shelf_assignments.get(box.box_id),
                 ocr_error=ocr_error,
+                existing_ocr_ref=existing_ocr_ref,
             )
         )
+
+    if fingerprint_db is not None:
+        fingerprint_db.close()
 
     catalog = {
         "source": str(source),

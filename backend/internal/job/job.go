@@ -12,10 +12,11 @@ import (
 type Status string
 
 const (
-	StatusPending Status = "pending"
-	StatusRunning Status = "running"
-	StatusDone    Status = "done"
-	StatusFailed  Status = "failed"
+	StatusPending  Status = "pending"
+	StatusRunning  Status = "running"
+	StatusDone     Status = "done"
+	StatusFailed   Status = "failed"
+	StatusCanceled Status = "canceled"
 )
 
 type JobState struct {
@@ -62,6 +63,39 @@ func (m *Manager) Start(id, uploadPath string) {
 		}
 		_ = m.writeState(id, state)
 	}()
+}
+
+// StartFrames runs the normal catalog pipeline only after a live session is
+// explicitly confirmed. Until then frames are inert files and incur no OCR.
+func (m *Manager) StartFrames(id, framesDir string) {
+	_ = m.writeState(id, JobState{ID: id, Status: StatusRunning, CreatedAt: time.Now()})
+	go func() {
+		err := m.runFrames(id, framesDir)
+		state := JobState{ID: id, CreatedAt: time.Now(), Status: StatusDone}
+		if err != nil {
+			state.Status = StatusFailed
+			state.Error = err.Error()
+		}
+		_ = m.writeState(id, state)
+	}()
+}
+
+func (m *Manager) runFrames(id, framesDir string) error {
+	args := []string{"run", "python", "scripts/build_book_catalog.py", "--source", framesDir, "--dedup-crops", "--fingerprint-db", filepath.Join(m.JobsDir, "..", "crop_fingerprints.db"), "--output-dir", m.jobDir(id), "--model", m.Model, "--library-db", m.LibraryDB, "--catalog-name", "catalog.json"}
+	if m.TagMap != "" {
+		args = append(args, "--apriltag-map", m.TagMap)
+		if m.MaxTagDistance > 0 {
+			args = append(args, "--max-tag-distance", fmt.Sprintf("%g", m.MaxTagDistance))
+		}
+	}
+	cmd := exec.Command("uv", args...)
+	cmd.Dir = m.RepoRoot
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("live pipeline failed: %w", err)
+	}
+	return nil
 }
 
 func (m *Manager) run(id, uploadPath string) error {

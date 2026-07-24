@@ -418,6 +418,94 @@ func TestScanBadRequest(t *testing.T) {
 	}
 }
 
+func TestLiveScanSessionLifecycle(t *testing.T) {
+	env := setupTestEnv(t)
+	start, err := http.Post(env.server.URL+"/api/scan/sessions", "application/json", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer start.Body.Close()
+	if start.StatusCode != http.StatusCreated {
+		t.Fatalf("start: want 201, got %d", start.StatusCode)
+	}
+	var session map[string]any
+	json.NewDecoder(start.Body).Decode(&session)
+	id, _ := session["session_id"].(string)
+	if id == "" {
+		t.Fatal("missing session_id")
+	}
+
+	put, err := http.NewRequest(http.MethodPut, env.server.URL+"/api/scan/sessions/"+id+"/frames/frame_000001.jpg", strings.NewReader("jpeg"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	put.Header.Set("Content-Type", "image/jpeg")
+	resp, err := http.DefaultClient.Do(put)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("frame: want 201, got %d", resp.StatusCode)
+	}
+
+	cancel, err := http.Post(env.server.URL+"/api/scan/sessions/"+id+"/cancel", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancel.Body.Close()
+	if cancel.StatusCode != http.StatusOK {
+		t.Fatalf("cancel: want 200, got %d", cancel.StatusCode)
+	}
+	if _, err := os.Stat(filepath.Join(env.jobsDir, "live", id, "frames")); !os.IsNotExist(err) {
+		t.Fatalf("cancel should discard frames, stat err=%v", err)
+	}
+}
+
+func TestLiveScanCompleteCreatesOneBatchJob(t *testing.T) {
+	env := setupTestEnv(t)
+	start, err := http.Post(env.server.URL+"/api/scan/sessions", "application/json", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var session map[string]any
+	json.NewDecoder(start.Body).Decode(&session)
+	start.Body.Close()
+	id := session["session_id"].(string)
+	for _, frame := range []string{"frame_000001.jpg", "frame_000002.jpg"} {
+		req, _ := http.NewRequest(http.MethodPut, env.server.URL+"/api/scan/sessions/"+id+"/frames/"+frame, strings.NewReader("jpeg"))
+		resp, requestErr := http.DefaultClient.Do(req)
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("frame %s: got %d", frame, resp.StatusCode)
+		}
+	}
+	before, _ := os.ReadDir(env.jobsDir)
+	if len(before) != 1 || before[0].Name() != "live" {
+		t.Fatalf("frames must not create processing jobs before confirmation: %v", before)
+	}
+
+	complete, err := http.Post(env.server.URL+"/api/scan/sessions/"+id+"/complete", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer complete.Body.Close()
+	if complete.StatusCode != http.StatusAccepted {
+		t.Fatalf("complete: want 202, got %d", complete.StatusCode)
+	}
+	var result map[string]any
+	json.NewDecoder(complete.Body).Decode(&result)
+	if result["accepted_frames"] != float64(2) {
+		t.Fatalf("accepted_frames: got %v", result["accepted_frames"])
+	}
+	if result["job_id"] == "" {
+		t.Fatal("missing batch job_id")
+	}
+}
+
 func TestGetJobNotFound(t *testing.T) {
 	env := setupTestEnv(t)
 	resp, err := http.Get(env.server.URL + "/api/jobs/nonexistent-id")

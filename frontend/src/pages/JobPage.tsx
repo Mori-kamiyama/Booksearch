@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
-import { useParams, Link } from 'react-router-dom'
+import { ArrowUpLeft } from 'lucide-react'
+import { useNavigate, useParams } from 'react-router-dom'
 import { apiFetch, apiUrl } from '../lib/api'
 import { formatShelfLabel } from '../lib/shelf'
+import { fallbackCoverForTitle, figmaResultBooks } from '../data/figmaBooks'
 
 interface Candidate {
   title: string
@@ -54,9 +56,13 @@ interface JobState {
   diagnostics?: Diagnostics
   crop_total?: number | string
   ocr_done?: number | string
+  average_seconds?: number
+  detected_shelf_count?: number
+  detected_book_count?: number
 }
 
 export default function JobPage() {
+  const navigate = useNavigate()
   const { id } = useParams<{ id: string }>()
   const [job, setJob] = useState<JobState | null>(null)
   const [pollError, setPollError] = useState('')
@@ -76,73 +82,137 @@ export default function JobPage() {
           clearInterval(timer)
         }
       } catch (e) {
-        setPollError(e instanceof Error ? e.message : 'ジョブ取得に失敗しました')
+        const fallback = fallbackJob(id)
+        if (fallback) {
+          setJob(fallback)
+          setPollError('')
+          clearInterval(timer)
+        } else {
+          setPollError(e instanceof Error ? e.message : 'ジョブ取得に失敗しました')
+        }
       }
     }
-    poll()
     timer = setInterval(poll, 2000)
+    void poll()
     return () => clearInterval(timer)
   }, [id])
 
-  if (!job) return <div className="text-center py-12 text-gray-400">読み込み中…</div>
+  if (!job) return <ScanResultLoading onBack={() => navigate(-1)} />
 
   const entries = job.catalog?.entries ?? []
-  const bookCount = entries.reduce((n, e) => n + (e.books?.length ?? 0), 0)
-  const matchCount = entries.reduce(
-    (n, e) => n + (e.books?.filter(b => (b.book_lookup?.candidates?.length ?? 0) > 0).length ?? 0),
-    0
-  )
+  const bookCount = Number(job.detected_book_count ?? entries.reduce((n, e) => n + (e.books?.length ?? 0), 0))
+  const shelfIds = new Set(entries.map(entry => entry.shelf_id).filter(Boolean))
+  const shelfCount = Number(job.detected_shelf_count ?? (shelfIds.size || (entries.length > 0 ? 1 : 0)))
+  const groups = groupResultBooks(entries)
+  const processing = ['pending', 'running', 'ocr_pending', 'lookup_pending'].includes(job.status)
 
   return (
-    <div>
-      <div className="flex items-center gap-4 mb-6">
-        <Link to="/scan" className="text-sm text-gray-500 hover:text-[#1f7a5c]">← スキャンに戻る</Link>
-        <h2 className="text-2xl font-bold text-gray-800">スキャン結果</h2>
-        <StatusBadge status={job.status} />
-      </div>
+    <div className="min-h-screen bg-white">
+      <div className="relative mx-auto min-h-screen w-full max-w-[402px] overflow-hidden pb-12">
+        <button type="button" onClick={() => navigate(-1)} aria-label="戻る" className="tap-soft absolute left-7 top-6 grid size-10 place-items-center rounded-full bg-white text-[#1e1e1e]">
+          <ArrowUpLeft className="size-6" />
+        </button>
 
-      {pollError && (
-        <div className="mb-6 bg-red-50 border border-red-200 rounded-xl p-4 text-sm text-red-700">
-          {pollError}。画面を再読み込みするか、スキャンをやり直してください。
-        </div>
-      )}
+        {pollError && <p className="mx-7 mt-[82px] rounded-xl bg-red-50 p-3 text-sm text-red-700">{pollError}</p>}
 
-      {['pending', 'running', 'ocr_pending', 'lookup_pending'].includes(job.status) ? (
-        <div className="text-center py-20 text-gray-500">
-          <div className="text-4xl mb-4 animate-spin">⚙️</div>
-          <p>解析中です。しばらくお待ちください…</p>
-        </div>
-      ) : job.status === 'failed' ? (
-        <div className="bg-red-50 border border-red-200 rounded-xl p-6 text-red-700">
-          解析に失敗しました: {job.error}
-        </div>
-      ) : (
-        <>
-          {/* サマリー */}
-          <div className="grid grid-cols-3 gap-4 mb-6">
-            {[
-              { label: '検出 box', value: entries.length },
-              { label: 'OCR タイトル', value: bookCount },
-              { label: 'DB 照合', value: matchCount },
-            ].map(m => (
-              <div key={m.label} className="bg-white border border-gray-200 rounded-xl p-5 text-center">
-                <p className="text-3xl font-bold text-[#1f7a5c]">{m.value}</p>
-                <p className="text-sm text-gray-500 mt-1">{m.label}</p>
+        {processing ? (
+          <div className="flex min-h-[674px] flex-col items-center justify-center gap-6 px-7 text-center">
+            <div className="size-12 animate-spin rounded-full border-4 border-[#d9d9d9] border-t-[#087f5b]" />
+            <h1 className="text-4xl font-semibold leading-[44px] text-[#087f5b]">解析中</h1>
+            <p className="text-base leading-[19px] text-ink">棚と本を確認しています…<br />このままお待ちください</p>
+            <StatusBadge status={job.status} />
+          </div>
+        ) : job.status === 'failed' ? (
+          <div className="flex min-h-[674px] flex-col items-center justify-center gap-6 px-7 text-center">
+            <h1 className="text-4xl font-semibold leading-[44px] text-red-600">エラー</h1>
+            <p className="text-base leading-normal text-ink">解析に失敗しました。<br />{job.error || 'もう一度スキャンしてください。'}</p>
+            <button type="button" onClick={() => navigate('/scan')} className="tap-card rounded-full bg-[#087f5b] px-6 py-3 text-white">スキャンへ戻る</button>
+          </div>
+        ) : (
+          <div className="pt-[104px]">
+            <section className="flex flex-col items-center gap-7 px-7 text-center">
+              <h1 className="w-full text-4xl font-semibold leading-[44px] text-[#087f5b]">終了</h1>
+              <p className="w-full text-base leading-[19px] text-ink">スキャンありがとうございました！！</p>
+              <div className="flex w-full items-baseline justify-center gap-4 whitespace-nowrap text-ink">
+                <Metric value={shelfCount} label="棚検知" />
+                <Metric value={bookCount} label="冊検知" />
+                <p><span className="text-base">平均</span><span className="text-4xl font-semibold leading-[44px] text-[#087f5b]">{job.average_seconds ?? '—'}</span><span className="text-base">秒</span></p>
               </div>
-            ))}
+            </section>
+
+            <div className="mx-auto my-7 h-px w-64 bg-[#087f5b]" />
+
+            {groups.length > 0 ? (
+              <div className="flex flex-col gap-7">
+                {groups.map(group => (
+                  <section key={group.shelf} className="px-7">
+                    <h2 className="mb-4 text-base font-semibold leading-[19px] text-ink">{group.shelf}</h2>
+                    <div className="grid grid-cols-3 gap-x-[5px] gap-y-4">
+                      {group.books.map((book, index) => <ResultBookCard key={`${book.title}-${index}`} book={book} />)}
+                    </div>
+                  </section>
+                ))}
+              </div>
+            ) : (
+              <p className="px-7 text-center text-sm text-ink-muted">本を検出できませんでした。撮影距離を変えてもう一度お試しください。</p>
+            )}
+
+            <div className="mx-7 mt-10"><DiagnosticsPanel diag={job.diagnostics} /></div>
           </div>
+        )}
+      </div>
+    </div>
+  )
+}
 
-          <DiagnosticsPanel diag={job.diagnostics} />
+function Metric({ value, label }: { value: number; label: string }) {
+  return <p><span className="text-4xl font-semibold leading-[44px] text-[#087f5b]">{value}</span><span className="text-base">{label}</span></p>
+}
 
+interface ResultBook {
+  title: string
+  cover?: string
+}
 
-          {/* エントリ一覧 */}
-          <div className="grid gap-6">
-            {entries.map(entry => (
-              <EntryCard key={entry.box_id} entry={entry} />
-            ))}
-          </div>
-        </>
-      )}
+function groupResultBooks(entries: CatalogEntry[]): { shelf: string; books: ResultBook[] }[] {
+  const groups = new Map<string, ResultBook[]>()
+  for (const entry of entries) {
+    const shelf = devShelfLabel(entry.box_id) ?? (entry.shelf_id ? formatShelfLabel(entry.shelf_id) : '棚未判定')
+    const books = groups.get(shelf) ?? []
+    for (const book of entry.books ?? []) {
+      const top = book.book_lookup?.candidates?.[0]
+      const title = top?.title || book.title
+      books.push({ title, cover: top?.thumbnail || fallbackCoverForTitle(title) })
+    }
+    groups.set(shelf, books)
+  }
+  return [...groups.entries()].filter(([, books]) => books.length > 0).map(([shelf, books]) => ({ shelf, books }))
+}
+
+function devShelfLabel(boxId: string): string | null {
+  if (!import.meta.env.DEV) return null
+  if (boxId === 'dev-shelf-b') return '棚B'
+  if (boxId === 'dev-shelf-ab') return '棚AB'
+  return null
+}
+
+function ResultBookCard({ book }: { book: ResultBook }) {
+  return (
+    <article className="flex w-[108px] min-w-0 flex-col items-center gap-[5px] text-center">
+      {book.cover ? <img src={book.cover} alt="" className="h-[128px] max-w-[90px] object-cover" /> : <div className="h-[128px] w-[80px] bg-[#d9d9d9]" />}
+      <p className="line-clamp-2 w-full text-[11px] leading-[13px] text-ink">{book.title}</p>
+    </article>
+  )
+}
+
+function ScanResultLoading({ onBack }: { onBack: () => void }) {
+  return (
+    <div className="relative mx-auto min-h-screen w-full max-w-[402px] bg-white">
+      <button type="button" onClick={onBack} aria-label="戻る" className="tap-soft absolute left-7 top-6 grid size-10 place-items-center rounded-full bg-white"><ArrowUpLeft className="size-6" /></button>
+      <div className="flex min-h-[674px] flex-col items-center justify-center gap-6">
+        <div className="size-12 animate-spin rounded-full border-4 border-[#d9d9d9] border-t-[#087f5b]" />
+        <p className="text-base text-ink">結果を読み込んでいます…</p>
+      </div>
     </div>
   )
 }
@@ -248,6 +318,46 @@ function StatusBadge({ status }: { status: string }) {
       {label[status] ?? status}
     </span>
   )
+}
+
+function fallbackJob(id: string | undefined): JobState | null {
+  if (!import.meta.env.DEV) return null
+  const bookEntries = figmaResultBooks.slice(0, 6).map((book, index) => ({
+    title: book.title,
+    book_lookup: {
+      candidates: [{
+        title: book.title,
+        thumbnail: book.cover,
+        score: 1 - index * 0.03,
+        match_confidence: 'auto',
+      }],
+    },
+  }))
+  return {
+    job_id: id ?? 'dev',
+    status: 'done',
+    average_seconds: 30,
+    detected_shelf_count: 29,
+    detected_book_count: 103,
+    catalog: {
+      entries: [
+        {
+          box_id: 'dev-shelf-b',
+          shelf_id: 'base-01-c01-r01',
+          crop_image: '',
+          detector_confidence: 0.98,
+          books: bookEntries.slice(3, 6),
+        },
+        {
+          box_id: 'dev-shelf-ab',
+          shelf_id: 'base-02-c01-r01',
+          crop_image: '',
+          detector_confidence: 0.98,
+          books: bookEntries.slice(0, 3),
+        },
+      ],
+    },
+  }
 }
 
 function EntryCard({ entry }: { entry: CatalogEntry }) {

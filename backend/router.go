@@ -17,9 +17,14 @@ func buildRouter(h *handler.Handler) *gin.Engine {
 	{
 		api.GET("/health", h.Health)
 		api.GET("/books/search", h.SearchBooks)
+		api.GET("/books/featured", h.FeaturedBooks)
 		api.GET("/books/:id", h.GetBook)
 		api.GET("/shelf-candidates", h.ShelfCandidates)
 		api.POST("/scan", h.Scan)
+		api.POST("/scan/sessions", h.StartLiveSession)
+		api.PUT("/scan/sessions/:id/frames/:frame", h.UploadLiveFrame)
+		api.POST("/scan/sessions/:id/complete", h.CompleteLiveSession)
+		api.POST("/scan/sessions/:id/cancel", h.CancelLiveSession)
 		api.GET("/jobs/:id", h.GetJob)
 		api.GET("/shelves", h.GetShelves)
 		api.POST("/tags/detect", h.DetectTags)
@@ -32,7 +37,7 @@ func buildRouter(h *handler.Handler) *gin.Engine {
 func corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Header("Access-Control-Allow-Origin", "*")
-		c.Header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS")
 		c.Header("Access-Control-Allow-Headers", "Content-Type")
 		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)

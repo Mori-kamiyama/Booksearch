@@ -1,6 +1,17 @@
-import { AlertCircle, ArrowLeft, BookOpen, Map, Search, Upload } from 'lucide-react'
-import { Link, NavLink, useNavigate } from 'react-router-dom'
+import { AlertCircle, ArrowLeft, BookOpen, Menu, Map, Search, Upload, X } from 'lucide-react'
+import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
+import { useEffect, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { ReactNode } from 'react'
+
+export function BrandMark({ className = '' }: { className?: string }) {
+  return (
+    <span className={`inline-flex items-center gap-3 ${className}`}>
+      <img src="/figma-icons/leaf.svg" alt="" className="h-[26.5px] w-[48px]" />
+      <img src="/figma-icons/wordmark.svg" alt="ホンノキ" className="h-[30px] w-[137px]" />
+    </span>
+  )
+}
 
 export function PageHeader({ title, back = false }: { title: string; back?: boolean }) {
   const navigate = useNavigate()
@@ -108,18 +119,86 @@ export function BottomTabs() {
 }
 
 export function SiteHeader() {
+  const location = useLocation()
+  const navigate = useNavigate()
+  const isHome = location.pathname === '/'
+  const [menuOpen, setMenuOpen] = useState(false)
+
+  useEffect(() => {
+    setMenuOpen(false)
+  }, [location.pathname])
+
   return (
-    <header className="sticky top-0 z-10 border-b border-line bg-white/95 backdrop-blur">
-      <div className="mx-auto flex h-14 max-w-5xl items-center justify-between px-4">
-        <Link to="/" className="text-lg font-bold text-primary">ホンノキ</Link>
-        <nav className="hidden items-center gap-1 md:flex">
-          <TopLink to="/">さがす</TopLink>
-          <TopLink to="/map">マップ</TopLink>
-          <TopLink to="/scan">スキャン</TopLink>
-          <TopLink to="/admin/shelves">管理</TopLink>
-        </nav>
+    <header className="sticky top-0 z-10 bg-white/95 backdrop-blur">
+      <div className="mx-auto flex h-[72px] w-full items-center justify-between px-7 md:h-[88px] md:px-[39px]">
+        <div className="size-11 md:w-auto">
+          {!isHome && (
+            <>
+              <button type="button" aria-label="戻る" onClick={() => navigate(-1)} className="tap-soft grid size-11 place-items-center text-ink md:hidden">
+                <ArrowLeft className="size-6" />
+              </button>
+              <Link to="/" className="hidden md:block"><BrandMark /></Link>
+            </>
+          )}
+        </div>
+        <button type="button" aria-label="メニューを開く" aria-expanded={menuOpen} onClick={() => setMenuOpen(true)} className="tap-soft grid size-11 place-items-center rounded-full text-ink hover:bg-zinc-100 md:fixed md:right-[calc(32px-(100vw-100%))] md:top-[22px] md:z-20 md:w-[31px]">
+          <Menu className="size-6 md:h-6 md:w-[31px]" />
+        </button>
       </div>
+      {menuOpen && <MenuDrawer onClose={() => setMenuOpen(false)} />}
     </header>
+  )
+}
+
+function MenuDrawer({ onClose }: { onClose: () => void }) {
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [onClose])
+
+  const items = [
+    { to: '/', label: 'さがす' },
+    { to: '/index', label: '索引' },
+    { to: '/scan', label: 'スキャン' },
+  ]
+  const adminItems = [
+    { to: '/map', label: '図書室マップ' },
+    { to: '/admin/shelves', label: '棚の管理' },
+    { to: '/admin/tags', label: 'タグ配置' },
+  ]
+  const itemClass = ({ isActive }: { isActive: boolean }) =>
+    `flex min-h-12 items-center border-b border-line text-xl ${isActive ? 'text-[#087f5b]' : 'text-ink'}`
+
+  // ヘッダーの backdrop-blur が fixed の基準を変えるため body 直下に描画する
+  return createPortal(
+    <div className="fixed inset-0 z-30">
+      <button type="button" aria-label="メニューを閉じる" onClick={onClose} className="absolute inset-0 cursor-default bg-black/30" />
+      <nav aria-label="メインメニュー" className="absolute right-0 top-0 flex h-full w-72 max-w-[80vw] flex-col bg-white px-7 pb-8 shadow-xl">
+        <div className="flex h-[72px] items-center justify-end">
+          <button type="button" aria-label="メニューを閉じる" onClick={onClose} className="tap-soft grid size-11 place-items-center rounded-full text-ink hover:bg-zinc-100">
+            <X className="size-6" />
+          </button>
+        </div>
+        <div className="flex flex-col">
+          {items.map(item => (
+            <NavLink key={item.to} to={item.to} end={item.to === '/'} className={itemClass}>
+              {item.label}
+            </NavLink>
+          ))}
+        </div>
+        <div className="mt-auto flex flex-col gap-1 border-t border-line pt-4">
+          {adminItems.map(item => (
+            <NavLink key={item.to} to={item.to} className={({ isActive }) => `flex min-h-10 items-center text-sm ${isActive ? 'text-[#087f5b]' : 'text-ink-muted'}`}>
+              {item.label}
+            </NavLink>
+          ))}
+        </div>
+      </nav>
+    </div>,
+    document.body,
   )
 }
 
