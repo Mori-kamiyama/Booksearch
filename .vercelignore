@@ -36,8 +36,17 @@ uv.lock
 data/*
 !data/apriltag_library_map.json
 
-frontend/*
-!frontend/package.json
-!frontend/package-lock.json
-!frontend/tag-placement/
-!frontend/tag-placement/**
+frontend/.DS_Store
+frontend/.env*
+frontend/dist
+frontend/node_modules
+frontend/public
+frontend/src
+frontend/tsconfig.app.json
+frontend/tsconfig.app.tsbuildinfo
+frontend/tsconfig.json
+frontend/tsconfig.node.json
+frontend/tsconfig.node.tsbuildinfo
+frontend/vite.config.ts
+frontend/tag-placement/.DS_Store
+frontend/tag-placement/dist
