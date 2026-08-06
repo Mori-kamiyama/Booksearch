@@ -51,5 +51,13 @@ The previous DB remains recoverable at
 - local browser `/map`: all structural empty cells render in the same mirrored positions
 - local browser `/map/base-01-c01-r02`: highlight rendered at display column 13 (`x=384`)
 
-Deployment and S3 upload are separate operational actions; repository and local
-SQLite state are complete, but no live AWS deployment was performed in this change.
+## Production deployment
+
+Deployed and verified on 2026-08-06:
+
+- AWS CloudFormation stack `booksearch`: `UPDATE_COMPLETE`
+- canonical map uploaded to `assets/apriltag_library_map.json`
+- `/api/shelves`: `booksearch-library-physical-v2`, 157 tags
+- CloudFront frontend cache invalidation: completed
+- standalone placement guide: `https://booksearch-tag-placement.vercel.app`
+- API and lookup worker catalog snapshots match the rebuilt local SQLite DB

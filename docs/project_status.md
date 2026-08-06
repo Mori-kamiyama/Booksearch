@@ -194,6 +194,6 @@
 ## 2026-08-06 書影拡充
 
 - 書影付き蔵書からランダムに5冊返すAWS API `/api/books/featured` を追加し、書籍IDルートへの誤判定を修正した。
-- `outputs/library/library.db` の未登録3,141冊をISBNで走査し、Open Libraryから231冊、APIキー付きGoogle Booksから170冊を追加した。書影付きは1,061冊から1,462冊へ増加し、このDBスナップショットを`booksearch-api` Lambdaへ反映した。
+- `outputs/library/library.db` の未登録3,141冊をISBNで走査し、Open Libraryから231冊、APIキー付きGoogle Booksから595冊を追加した。書影付きは1,061冊から1,887冊へ増加し、このDBスナップショットを`booksearch-api` Lambdaへ反映した。
 - 再開可能な `scripts/fetch_missing_covers.py` を追加した。OpenBD、Open Library、Google Booksの順で未取得分のみ処理し、プロバイダ別の試行結果を`cover_fetch_attempts`へ保存する。
-- Google BooksはAPIキー未設定時のクォータが0でHTTP 429になる。有効な`GOOGLE_BOOKS_API_KEY`で取得を再開したが当日クォータへ到達したため、残り2,740冊はクォータ回復後に再実行する。国立国会図書館の書影APIは2026年3月31日に終了済みのため代替には使わない。
+- Google BooksはAPIキー未設定時のクォータが0でHTTP 429になる。有効な`GOOGLE_BOOKS_API_KEY`で取得を再開し、短期制限は1並列と指数バックオフで回避した。残り2,315冊は日次1,000件の余裕を確保しつつ翌日以降に再実行する。国立国会図書館の書影APIは2026年3月31日に終了済みのため代替には使わない。
