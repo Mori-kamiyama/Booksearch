@@ -1,19 +1,42 @@
-*
+# Keep the deployment bundle minimal without excluding the API and frontend
+# parents that must be traversed by Vercel's file collector.
+.aws-sam
+.claude
+.env
+.env.*
+.git
+.pytest_cache
+.ruff_cache
+.venv
+.vercel
+*.db
+*.key
+*.p12
+*.pem
+*.pfx
 
-!.vercelignore
-!vercel.json
-!pyproject.toml
-!requirements.txt
+A4 - 9.png
+AGENT.md
+OCR_POLARIZATION_ANALYSIS.md
+README.md
+aws
+backend
+benchmark
+data-260702
+docs
+outputs
+recovery
+runs
+scripts
+src
+tag-camera-lab
+tests
+uv.lock
 
-!api/
-!api/tags/
-!api/tags/detect.py
-!api/tags/apriltag_library_map.json
-
-!data/
+data/*
 !data/apriltag_library_map.json
 
-!frontend/
+frontend/*
 !frontend/package.json
 !frontend/package-lock.json
 !frontend/tag-placement/
