@@ -9,6 +9,7 @@ AWS_DIR="$ROOT/aws"
 
 YOLO_ASSETS="$AWS_DIR/functions/yolo_worker/assets"
 LOOKUP_ASSETS="$AWS_DIR/functions/lookup_worker/assets"
+GO_API_ASSETS="$AWS_DIR/functions/go_api"
 
 mkdir -p "$YOLO_ASSETS" "$LOOKUP_ASSETS"
 
@@ -35,6 +36,9 @@ if [[ ! -f "$LIBRARY_DB_SOURCE" ]]; then
   LIBRARY_DB_SOURCE="$ROOT/aws/functions/go_api/library.db"
 fi
 cp "$LIBRARY_DB_SOURCE" "$LOOKUP_ASSETS/library.db"
+if [[ "$LIBRARY_DB_SOURCE" != "$GO_API_ASSETS/library.db" ]]; then
+  cp "$LIBRARY_DB_SOURCE" "$GO_API_ASSETS/library.db"
+fi
 cp "$ROOT/data/known_books.json" "$LOOKUP_ASSETS/known_books.json"
 
 echo "✓ assets ready"

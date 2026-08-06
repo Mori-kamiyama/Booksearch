@@ -219,13 +219,24 @@ def google_lookup(book: sqlite3.Row, api_key: str | None, timeout: float) -> tup
     params = {"q": f"isbn:{isbn}", "maxResults": "5", "printType": "books"}
     if api_key:
         params["key"] = api_key
-    try:
-        payload = request_json(f"{GOOGLE_BOOKS_URL}?{urllib.parse.urlencode(params)}", timeout)
-        return book, google_exact_volume(payload, isbn), None, None
-    except urllib.error.HTTPError as error:
-        return book, None, error.code, f"HTTP {error.code}"
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
-        return book, None, None, str(error)
+    url = f"{GOOGLE_BOOKS_URL}?{urllib.parse.urlencode(params)}"
+    for retry_index in range(4):
+        try:
+            payload = request_json(url, timeout)
+            return book, google_exact_volume(payload, isbn), None, None
+        except urllib.error.HTTPError as error:
+            if error.code in {429, 500, 502, 503, 504} and retry_index < 3:
+                retry_after = error.headers.get("Retry-After")
+                wait_seconds = float(retry_after) if retry_after and retry_after.isdigit() else 2 ** (retry_index + 1)
+                time.sleep(wait_seconds)
+                continue
+            return book, None, error.code, f"HTTP {error.code}"
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
+            if retry_index < 3:
+                time.sleep(2 ** retry_index)
+                continue
+            return book, None, None, str(error)
+    return book, None, None, "retry exhausted"
 
 
 def fetch_google(connection: sqlite3.Connection, books: list[sqlite3.Row], timeout: float, delay: float, workers: int) -> int:
