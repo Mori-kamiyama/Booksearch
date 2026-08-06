@@ -210,6 +210,7 @@ Resources:
         - DynamoDBReadPolicy: { TableName: !Ref CropsTable }
         - DynamoDBReadPolicy: { TableName: !Ref ShelfCandidatesTable }
         - SQSSendMessagePolicy: { QueueName: !GetAtt YoloQueue.QueueName }
+        - SQSSendMessagePolicy: { QueueName: !GetAtt LookupQueue.QueueName }
       Events:
         AnyRoot:
           Type: HttpApi

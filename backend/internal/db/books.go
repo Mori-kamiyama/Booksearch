@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"math"
+	"net/url"
 	"strings"
 	"unicode"
 
@@ -72,6 +73,7 @@ type ShelfCandidateRow struct {
 	UpdatedAt    string  `json:"updated_at"`
 	CropImage    string  `json:"crop_image,omitempty"`
 	CropURL      string  `json:"crop_url,omitempty"`
+	Thumbnail    *string `json:"thumbnail,omitempty"`
 }
 
 type Store struct {
@@ -145,18 +147,31 @@ func (s *Store) GetByID(id int) (*Book, error) {
 
 // FeaturedBooks はサムネイルが登録済みの本からランダムにN件返す。
 // トップページの「今週のおすすめ」用で、実在する書影のない本は対象外にする。
+// 【一時的変更】書影の有無に関わらず、データベース内のすべての本からランダムに推薦するように変更。
 func (s *Store) FeaturedBooks(limit int) ([]Book, error) {
 	if limit <= 0 {
 		limit = 6
 	}
+	// 元のクエリ（書影のある本に限定）:
+	/*
+		rows, err := s.db.Query(`
+			SELECT b.id, b.title, COALESCE(b.authors,''), COALESCE(b.publisher,''),
+			       COALESCE(b.published_date,''), COALESCE(b.class_number,''),
+			       COALESCE(b.registration_number,''), COALESCE(b.isbn,''),
+			       bc.thumbnail, bc.info_link
+			FROM books b
+			JOIN book_covers bc ON b.id = bc.book_id
+			WHERE bc.thumbnail IS NOT NULL AND bc.thumbnail != ''
+			ORDER BY RANDOM()
+			LIMIT ?`, limit)
+	*/
 	rows, err := s.db.Query(`
 		SELECT b.id, b.title, COALESCE(b.authors,''), COALESCE(b.publisher,''),
 		       COALESCE(b.published_date,''), COALESCE(b.class_number,''),
 		       COALESCE(b.registration_number,''), COALESCE(b.isbn,''),
 		       bc.thumbnail, bc.info_link
 		FROM books b
-		JOIN book_covers bc ON b.id = bc.book_id
-		WHERE bc.thumbnail IS NOT NULL AND bc.thumbnail != ''
+		LEFT JOIN book_covers bc ON b.id = bc.book_id
 		ORDER BY RANDOM()
 		LIMIT ?`, limit)
 	if err != nil {
@@ -202,10 +217,11 @@ func (s *Store) AllShelfCandidates(limit int) ([]ShelfCandidateRow, error) {
 		limit = 500
 	}
 	rows, err := s.db.Query(`
-		SELECT bsc.book_id, b.title, bsc.shelf_id, bsc.confidence,
-		       bsc.observations, bsc.last_seen_at
+		SELECT bsc.book_id, b.title, b.isbn, bsc.shelf_id, bsc.confidence,
+		       bsc.observations, bsc.last_seen_at, bc.thumbnail
 		FROM book_shelf_candidates bsc
 		JOIN books b ON b.id = bsc.book_id
+		LEFT JOIN book_covers bc ON b.id = bc.book_id
 		ORDER BY bsc.shelf_id ASC, bsc.confidence DESC, b.title ASC
 		LIMIT ?`, limit)
 	if err != nil {
@@ -216,11 +232,15 @@ func (s *Store) AllShelfCandidates(limit int) ([]ShelfCandidateRow, error) {
 	out := []ShelfCandidateRow{}
 	for rows.Next() {
 		var row ShelfCandidateRow
+		var isbn string
 		if err := rows.Scan(
-			&row.BookID, &row.Title, &row.ShelfID, &row.Confidence,
-			&row.Observations, &row.UpdatedAt,
+			&row.BookID, &row.Title, &isbn, &row.ShelfID, &row.Confidence,
+			&row.Observations, &row.UpdatedAt, &row.Thumbnail,
 		); err != nil {
 			return nil, err
+		}
+		if row.Thumbnail == nil || *row.Thumbnail == "" {
+			row.Thumbnail = googleBooksThumbnail(isbn)
 		}
 		row.Confidence = math.Round(row.Confidence*10000) / 10000
 		if row.Observations > 0 {
@@ -249,6 +269,20 @@ func (s *Store) attachShelfCandidates(books []Book) ([]Book, error) {
 	return books, nil
 }
 
+func googleBooksThumbnail(isbn string) *string {
+	isbn = strings.Map(func(r rune) rune {
+		if r >= '0' && r <= '9' || r == 'X' || r == 'x' {
+			return r
+		}
+		return -1
+	}, isbn)
+	if isbn == "" {
+		return nil
+	}
+	thumbnail := "https://books.google.com/books/content?vid=ISBN" + url.QueryEscape(isbn) + "&printsec=frontcover&img=1&zoom=1&source=gbs_api"
+	return &thumbnail
+}
+
 func scanBooks(rows *sql.Rows) ([]Book, error) {
 	var books []Book
 	for rows.Next() {
@@ -259,6 +293,9 @@ func scanBooks(rows *sql.Rows) ([]Book, error) {
 			&b.Thumbnail, &b.InfoLink,
 		); err != nil {
 			return nil, err
+		}
+		if b.Thumbnail == nil || *b.Thumbnail == "" {
+			b.Thumbnail = googleBooksThumbnail(b.ISBN)
 		}
 		books = append(books, b)
 	}

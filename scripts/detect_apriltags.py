@@ -72,7 +72,14 @@ def detect_tags(image: np.ndarray, mapping: dict[str, Any]) -> dict[str, Any]:
     diagnostics["selected"] = best_dict
     h, w = image.shape[:2]
     if best_ids is None or len(best_ids) == 0:
-        return {"tags": [], "diagnostics": diagnostics, "image_width": w, "image_height": h}
+        return {
+            "map_id": mapping.get("map_id"),
+            "coordinate_schema_version": mapping.get("coordinate_schema_version"),
+            "tags": [],
+            "diagnostics": diagnostics,
+            "image_width": w,
+            "image_height": h,
+        }
 
     raw_ids = [int(tag_id) for tag_id in best_ids.flatten()]
     diagnostics["raw_ids"] = raw_ids
@@ -112,7 +119,14 @@ def detect_tags(image: np.ndarray, mapping: dict[str, Any]) -> dict[str, Any]:
             }
         )
 
-    return {"tags": tags, "diagnostics": diagnostics, "image_width": w, "image_height": h}
+    return {
+        "map_id": mapping.get("map_id"),
+        "coordinate_schema_version": mapping.get("coordinate_schema_version"),
+        "tags": tags,
+        "diagnostics": diagnostics,
+        "image_width": w,
+        "image_height": h,
+    }
 
 
 def describe_placement(quadrants: dict[str, str]) -> str:

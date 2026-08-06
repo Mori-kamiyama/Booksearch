@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { ErrorState } from '../components/common'
-import { getShelfCandidates } from '../lib/api'
+import { LibraryMap } from '../components/shelf'
+import { apiUrl, getShelfCandidates } from '../lib/api'
 import type { ShelfCandidate } from '../lib/types'
-import { displayColToActualCol, formatShelfLabel, getSlot, getUnit, isEmptyCell, layoutUnits, shelfIdForCell } from '../lib/shelf'
+import { formatShelfLabel, getSlot, getUnit, isDisplayCellEmpty, shelfIdForDisplayCell } from '../lib/shelf'
 import { fallbackCoverForTitle, figmaResultBooks } from '../data/figmaBooks'
+import { groupBooksForIndex } from '../lib/indexGrouping'
 
 type ViewMode = 'map' | 'list'
 
@@ -46,7 +48,7 @@ export default function IndexPage() {
 
   return (
     <div className="min-h-[calc(100vh-72px)] bg-white md:min-h-[calc(100vh-88px)]">
-      <div className="mx-auto flex w-full max-w-[402px] flex-col items-center gap-3 px-7 pb-16 pt-[42px] md:max-w-[560px] md:gap-7 md:pt-0">
+      <div className="mx-auto flex w-full max-w-[402px] flex-col items-center gap-3 px-7 pb-16 pt-[42px] md:max-w-[760px] md:gap-8 md:pt-[54px] lg:max-w-[886px]">
         <h1 className="w-full text-center text-4xl font-normal leading-normal text-ink">索引</h1>
         <ViewToggle value={view} onChange={changeView} />
         {loading && <IndexSkeleton />}
@@ -63,7 +65,7 @@ function viewModeFromParam(value: string | null): ViewMode {
 
 function ViewToggle({ value, onChange }: { value: ViewMode; onChange: (view: ViewMode) => void }) {
   return (
-    <div className="grid h-[23px] w-[136px] shrink-0 grid-cols-2 overflow-hidden rounded-full border border-[#087f5b] text-center text-xs leading-[21px]" role="tablist" aria-label="索引の表示切替">
+    <div className="grid h-[28px] w-[156px] shrink-0 grid-cols-2 overflow-hidden rounded-full border border-[#087f5b] text-center text-sm leading-[26px]" role="tablist" aria-label="索引の表示切替">
       <button type="button" role="tab" aria-selected={value === 'map'} onClick={() => onChange('map')} className={`tap-soft rounded-full ${value === 'map' ? 'bg-[#087f5b] text-white' : 'text-ink'}`}>
         Map
       </button>
@@ -75,11 +77,22 @@ function ViewToggle({ value, onChange }: { value: ViewMode; onChange: (view: Vie
 }
 
 function MapView({ candidates }: { candidates: ShelfCandidate[] }) {
-  const [selectedUnit, setSelectedUnit] = useState(() => {
-    const withBooks = layoutUnits.find(unit => candidates.some(candidate => getSlot(candidate.shelf_id)?.unit === unit.unit))
-    return withBooks?.unit ?? layoutUnits[0]?.unit ?? 'base-01'
-  })
-  const [selectedShelf, setSelectedShelf] = useState<string | null>(() => candidates[0]?.shelf_id ?? null)
+  const [selectedUnit, setSelectedUnit] = useState('base-01')
+  const [selectedShelf, setSelectedShelf] = useState<string | null>(null)
+  const initializedFromCandidates = useRef(false)
+
+  // Candidates arrive asynchronously, so initialize once after the first
+  // successful load without overwriting a location the user subsequently picks.
+  useEffect(() => {
+    if (initializedFromCandidates.current) return
+    const candidate = candidates.find(item => getSlot(item.shelf_id))
+    if (!candidate) return
+    const unitId = getSlot(candidate.shelf_id)?.unit
+    if (!unitId) return
+    setSelectedUnit(unitId)
+    setSelectedShelf(candidate.shelf_id)
+    initializedFromCandidates.current = true
+  }, [candidates])
 
   const shelfBooks = useMemo(() => {
     const scoped = candidates.filter(candidate => selectedShelf
@@ -95,10 +108,15 @@ function MapView({ candidates }: { candidates: ShelfCandidate[] }) {
 
   return (
     <>
-      <section className="flex w-full flex-col items-center gap-3">
+      <section className="flex w-full flex-col gap-4 md:gap-5">
         <h2 className="w-full text-base font-semibold leading-[19px] text-ink">MAP</h2>
-        <FloorMap selectedUnit={selectedUnit} onSelectUnit={selectUnit} />
-        <UnitCellGrid unitId={selectedUnit} selectedShelf={selectedShelf} onSelectShelf={setSelectedShelf} />
+        <div className="flex flex-col items-center gap-5 md:gap-6">
+          <LibraryMap selectedUnit={selectedUnit} onUnitClick={selectUnit} size="lg" />
+          <div className="flex w-full max-w-[560px] flex-col items-center gap-2">
+            <p className="w-full text-xs font-semibold text-ink-muted md:text-sm">棚の区画を選択</p>
+            <UnitCellGrid unitId={selectedUnit} selectedShelf={selectedShelf} onSelectShelf={setSelectedShelf} />
+          </div>
+        </div>
       </section>
 
       <section className="flex w-full flex-col gap-4">
@@ -115,38 +133,7 @@ function MapView({ candidates }: { candidates: ShelfCandidate[] }) {
   )
 }
 
-function FloorMap({ selectedUnit, onSelectUnit }: { selectedUnit: string; onSelectUnit: (unitId: string) => void }) {
-  const base = layoutUnits.filter(unit => unit.kind === 'base')
-  const side = layoutUnits.filter(unit => unit.kind === 'side')
-  return (
-    <div className="flex w-[282px] max-w-full items-stretch justify-between" aria-label="図書室のフロアマップ">
-      {base.map(unit => (
-        <div key={unit.unit} className="flex flex-col items-center gap-[2px]">
-          <button
-            type="button"
-            onClick={() => onSelectUnit(unit.unit)}
-            aria-label={unitLabel(unit.unit)}
-            aria-pressed={selectedUnit === unit.unit}
-            className={`tap-soft h-[126px] w-5 transition ${selectedUnit === unit.unit ? 'bg-[#087f5b]' : 'bg-[#d9d9d9] hover:bg-[#c4c4c4]'}`}
-          />
-          <div className="h-5 w-9 bg-[#d9d9d9]" />
-        </div>
-      ))}
-      <div className="flex flex-col justify-between">
-        {side.map(unit => (
-          <button
-            key={unit.unit}
-            type="button"
-            onClick={() => onSelectUnit(unit.unit)}
-            aria-label={unitLabel(unit.unit)}
-            aria-pressed={selectedUnit === unit.unit}
-            className={`tap-soft h-5 w-9 transition ${selectedUnit === unit.unit ? 'bg-[#087f5b]' : 'bg-[#d9d9d9] hover:bg-[#c4c4c4]'}`}
-          />
-        ))}
-      </div>
-    </div>
-  )
-}
+
 
 function UnitCellGrid({ unitId, selectedShelf, onSelectShelf }: {
   unitId: string
@@ -155,16 +142,26 @@ function UnitCellGrid({ unitId, selectedShelf, onSelectShelf }: {
 }) {
   const unit = getUnit(unitId)
   if (!unit) return null
+  const mobileCell = 18.9
+  const desktopCell = 39.4
+  const mobileGap = 3
+  const desktopGap = 4
+  const mobileWidth = unit.cols * mobileCell + (unit.cols - 1) * mobileGap
+  const desktopWidth = unit.cols * desktopCell + (unit.cols - 1) * desktopGap
   return (
-    <div className="grid w-[282px] max-w-full gap-[3px]" style={{ gridTemplateColumns: `repeat(${unit.cols}, minmax(0, 1fr))` }}>
+    <div
+      className="grid max-w-full gap-[3px] md:gap-1"
+      style={{
+        gridTemplateColumns: `repeat(${unit.cols}, minmax(0, 1fr))`,
+        width: `clamp(${mobileWidth}px, 100%, ${desktopWidth}px)`,
+      }}
+    >
       {Array.from({ length: unit.rows }, (_, rowIndex) => {
         const row = unit.rows - rowIndex
         return Array.from({ length: unit.cols }, (_, colIndex) => {
           const displayCol = colIndex + 1
-          // DB上のshelf_idは物理座標なので、ShelfMapHighlightと同じく物理座標でIDを組む
-          const physicalCol = displayColToActualCol(unit, displayCol)
-          const shelfId = shelfIdForCell(unit.unit, physicalCol, row)
-          if (isEmptyCell(unit, physicalCol, row)) {
+          const shelfId = shelfIdForDisplayCell(unit, displayCol, row)
+          if (isDisplayCellEmpty(unit, displayCol, row)) {
             return <div key={shelfId} className="aspect-square" />
           }
           const active = selectedShelf === shelfId
@@ -184,34 +181,13 @@ function UnitCellGrid({ unitId, selectedShelf, onSelectShelf }: {
   )
 }
 
-const KANA_ROWS: Array<[string, string]> = [
-  ['あ', 'あいうえおぁぃぅぇぉ'],
-  ['か', 'かきくけこがぎぐげご'],
-  ['さ', 'さしすせそざじずぜぞ'],
-  ['た', 'たちつてとだぢづでどっ'],
-  ['な', 'なにぬねの'],
-  ['は', 'はひふへほばびぶべぼぱぴぷぺぽ'],
-  ['ま', 'まみむめも'],
-  ['や', 'やゆよゃゅょ'],
-  ['ら', 'らりるれろ'],
-  ['わ', 'わをんゎ'],
-]
-const GROUP_ORDER = [...KANA_ROWS.map(([label]) => label), '英数', 'その他']
+
 
 function ListView({ candidates }: { candidates: ShelfCandidate[] }) {
   const groups = useMemo(() => {
-    const collator = new Intl.Collator('ja')
     const books = uniqueBooks(candidates)
     if (isDevFallbackCandidates(candidates)) return [{ label: 'あ', books }]
-    const sortedBooks = [...books].sort((a, b) => collator.compare(a.title, b.title))
-    const grouped = new Map<string, IndexBook[]>()
-    for (const book of sortedBooks) {
-      const key = kanaRowForTitle(book.title)
-      const list = grouped.get(key) ?? []
-      list.push(book)
-      grouped.set(key, list)
-    }
-    return GROUP_ORDER.filter(label => grouped.has(label)).map(label => ({ label, books: grouped.get(label)! }))
+    return groupBooksForIndex(books)
   }, [candidates])
 
   return (
@@ -235,13 +211,15 @@ function isDevFallbackCandidates(candidates: ShelfCandidate[]): boolean {
 function BookGrid({ books }: { books: IndexBook[] }) {
   const navigate = useNavigate()
   return (
-    <div className="grid w-full grid-cols-3 gap-x-[5px] gap-y-[13px]">
+    <div className="grid w-full grid-cols-3 gap-x-[5px] gap-y-[13px] md:grid-cols-4 md:gap-x-8 md:gap-y-7">
       {books.map(book => (
-        <button key={book.id} type="button" onClick={() => navigate(`/books/${book.id}`)} className="tap-card flex min-w-0 flex-col items-center gap-[5px] rounded-lg">
-          {book.cover
-            ? <img src={book.cover} alt="" className="h-[131px] w-[93px] bg-[#d9d9d9] object-cover" loading="lazy" />
-            : <div className="h-[131px] w-[93px] bg-[#d9d9d9]" />}
-          <span className="line-clamp-2 w-full text-center text-[10px] leading-normal text-ink">{book.title}</span>
+        <button key={book.id} type="button" onClick={() => navigate(`/books/${book.id}`)} className="tap-card flex min-w-0 flex-col items-center gap-[5px] rounded-lg md:gap-[7px]">
+          <div className="flex h-[160px] w-[93px] items-end justify-center md:h-[150px] md:w-[112px]">
+            {book.cover
+              ? <img src={book.cover} alt="" className="max-h-full max-w-full bg-[#d9d9d9] object-contain" loading="lazy" />
+              : <div className="h-[131px] w-[93px] bg-[#d9d9d9] md:h-[150px] md:w-[112px]" />}
+          </div>
+          <span className="line-clamp-2 w-full text-center text-[10px] leading-normal text-ink md:text-[11px] md:leading-[13px]">{book.title}</span>
         </button>
       ))}
     </div>
@@ -250,10 +228,10 @@ function BookGrid({ books }: { books: IndexBook[] }) {
 
 function IndexSkeleton() {
   return (
-    <div className="grid w-full grid-cols-3 gap-x-[5px] gap-y-[13px]">
-      {Array.from({ length: 6 }, (_, index) => (
-        <div key={index} className="flex flex-col items-center gap-[5px]">
-          <div className="h-[131px] w-[93px] animate-pulse bg-[#d9d9d9]" />
+    <div className="grid w-full grid-cols-3 gap-x-[5px] gap-y-[13px] md:grid-cols-4 md:gap-x-8 md:gap-y-7">
+      {Array.from({ length: 8 }, (_, index) => (
+        <div key={index} className="flex flex-col items-center gap-[5px] md:gap-[7px]">
+          <div className="h-[131px] w-[93px] animate-pulse bg-[#d9d9d9] md:h-[150px] md:w-[112px]" />
           <div className="h-3 w-16 animate-pulse rounded bg-zinc-100" />
         </div>
       ))}
@@ -271,27 +249,11 @@ function uniqueBooks(candidates: ShelfCandidate[]): IndexBook[] {
   return [...best.entries()].map(([id, candidate]) => ({
     id,
     title: candidate.title!,
-    cover: fallbackCoverForTitle(candidate.title!),
+    cover: candidate.thumbnail || (candidate.crop_url ? apiUrl(candidate.crop_url) : fallbackCoverForTitle(candidate.title!)),
   }))
 }
 
-function kanaRowForTitle(title: string): string {
-  const ch = title.trim().charAt(0)
-  if (!ch) return 'その他'
-  const code = ch.codePointAt(0) ?? 0
-  // カタカナはひらがなに寄せてから行を判定する
-  const hira = code >= 0x30a1 && code <= 0x30f6 ? String.fromCodePoint(code - 0x60) : ch
-  for (const [label, chars] of KANA_ROWS) {
-    if (chars.includes(hira)) return label
-  }
-  if (/[A-Za-z0-9０-９Ａ-Ｚａ-ｚ]/.test(ch)) return '英数'
-  return 'その他'
-}
 
-function unitLabel(unitId: string): string {
-  if (unitId.startsWith('base-')) return `入口側から${Number(unitId.slice(-2))}台目の棚`
-  return `壁側の棚${Number(unitId.slice(-2))}`
-}
 
 function fallbackIndexCandidates(): ShelfCandidate[] {
   if (!import.meta.env.DEV) return []
@@ -306,8 +268,7 @@ function fallbackIndexCandidates(): ShelfCandidate[] {
 
 function indexCandidatesForDisplay(candidates: ShelfCandidate[]): ShelfCandidate[] {
   if (!import.meta.env.DEV) return candidates
-  const coverable = candidates.filter(candidate => candidate.title && fallbackCoverForTitle(candidate.title)).length
-  return candidates.length > 0 && coverable >= 3 ? candidates : fallbackIndexCandidates()
+  return candidates.length > 0 ? candidates : fallbackIndexCandidates()
 }
 
 function withDevTimeout<T>(promise: Promise<T>): Promise<T> {

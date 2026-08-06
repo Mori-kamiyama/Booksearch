@@ -90,31 +90,35 @@ export function Skeleton({ variant }: { variant: 'card' | 'grid' | 'hero' }) {
   )
 }
 
-export function BottomTabs() {
-  const tabs = [
-    { to: '/', label: 'さがす', icon: Search },
-    { to: '/map', label: 'マップ', icon: Map },
-    { to: '/scan', label: 'スキャン', icon: Upload },
-  ]
+export function SiteFooter() {
+  const location = useLocation()
+  const isHome = location.pathname === '/'
+  const isScanFlow = location.pathname === '/scan' || location.pathname.startsWith('/jobs/')
+
+  // スキャン画面やホーム画面ではフッターを表示しない（画面全体のレイアウトを保つため）
+  if (isScanFlow || isHome) return null
+
   return (
-    <nav className="fixed inset-x-0 bottom-0 z-20 border-t border-line bg-white/95 px-3 pb-[max(0.5rem,env(safe-area-inset-bottom))] pt-2 backdrop-blur md:hidden">
-      <div className="mx-auto grid max-w-xl grid-cols-3 gap-1">
-        {tabs.map(tab => {
-          const Icon = tab.icon
-          return (
-            <NavLink
-              key={tab.to}
-              to={tab.to}
-              end={tab.to === '/'}
-              className={({ isActive }) => `flex min-h-11 flex-col items-center justify-center gap-0.5 rounded-lg text-xs font-semibold ${isActive ? 'bg-primary-soft text-primary' : 'text-ink-muted'}`}
-            >
-              <Icon className="size-5" />
-              {tab.label}
-            </NavLink>
-          )
-        })}
+    <footer className="mt-[50px] w-full border-t border-line/40 bg-zinc-50/60 py-8 text-ink-muted backdrop-blur-xl">
+      <div className="mx-auto max-w-5xl px-7 md:px-[39px]">
+        <div className="flex flex-col items-center justify-between gap-6 md:flex-row md:gap-4">
+          <div className="flex flex-col items-center gap-1 md:items-start">
+            <BrandMark className="opacity-80 scale-90 origin-left" />
+            <p className="text-xs text-ink-muted/70 mt-1">
+              どんな本でも一瞬で
+            </p>
+          </div>
+          <div className="flex flex-wrap justify-center gap-x-6 gap-y-2 text-sm font-medium">
+            <Link to="/" className="hover:text-primary transition-colors">さがす</Link>
+            <Link to="/index" className="hover:text-primary transition-colors">索引</Link>
+            <Link to="/scan" className="hover:text-primary transition-colors">スキャン</Link>
+          </div>
+        </div>
+        <div className="mt-8 border-t border-line/20 pt-6 text-center text-xs text-ink-muted/50">
+          <p>© {new Date().getFullYear()} ホンノキ. All rights reserved.</p>
+        </div>
       </div>
-    </nav>
+    </footer>
   )
 }
 
@@ -129,19 +133,21 @@ export function SiteHeader() {
   }, [location.pathname])
 
   return (
-    <header className="sticky top-0 z-10 bg-white/95 backdrop-blur">
+    <header className={`fixed left-0 top-0 w-full z-20 transition-all ${isHome ? 'bg-transparent backdrop-blur-none border-b border-transparent' : 'bg-white/60 backdrop-blur-xl border-b border-line/40'}`}>
       <div className="mx-auto flex h-[72px] w-full items-center justify-between px-7 md:h-[88px] md:px-[39px]">
-        <div className="size-11 md:w-auto">
+        <div className="size-11 md:w-auto h-auto">
           {!isHome && (
             <>
               <button type="button" aria-label="戻る" onClick={() => navigate(-1)} className="tap-soft grid size-11 place-items-center text-ink md:hidden">
                 <ArrowLeft className="size-6" />
               </button>
-              <Link to="/" className="hidden md:block"><BrandMark /></Link>
+              <Link to="/" className="hidden md:block">
+                <BrandMark />
+              </Link>
             </>
           )}
         </div>
-        <button type="button" aria-label="メニューを開く" aria-expanded={menuOpen} onClick={() => setMenuOpen(true)} className="tap-soft grid size-11 place-items-center rounded-full text-ink hover:bg-zinc-100 md:fixed md:right-[calc(32px-(100vw-100%))] md:top-[22px] md:z-20 md:w-[31px]">
+        <button type="button" aria-label="メニューを開く" aria-expanded={menuOpen} onClick={() => setMenuOpen(true)} className="tap-soft grid size-11 place-items-center rounded-full text-ink hover:bg-zinc-100 md:fixed md:right-[calc(32px-(100vw-100%))] md:top-[22px] md:z-20">
           <Menu className="size-6 md:h-6 md:w-[31px]" />
         </button>
       </div>
@@ -176,8 +182,8 @@ function MenuDrawer({ onClose }: { onClose: () => void }) {
   return createPortal(
     <div className="fixed inset-0 z-30">
       <button type="button" aria-label="メニューを閉じる" onClick={onClose} className="absolute inset-0 cursor-default bg-black/30" />
-      <nav aria-label="メインメニュー" className="absolute right-0 top-0 flex h-full w-72 max-w-[80vw] flex-col bg-white px-7 pb-8 shadow-xl">
-        <div className="flex h-[72px] items-center justify-end">
+      <nav aria-label="メインメニュー" className="absolute right-0 top-0 flex h-full w-72 max-w-[80vw] flex-col bg-white px-7 pb-8 shadow-xl md:px-8">
+        <div className="flex h-[72px] items-center justify-end md:h-[88px]">
           <button type="button" aria-label="メニューを閉じる" onClick={onClose} className="tap-soft grid size-11 place-items-center rounded-full text-ink hover:bg-zinc-100">
             <X className="size-6" />
           </button>

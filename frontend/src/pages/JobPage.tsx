@@ -50,7 +50,7 @@ interface Diagnostics {
 
 interface JobState {
   job_id: string
-  status: 'pending' | 'running' | 'ocr_pending' | 'lookup_pending' | 'no_detection' | 'no_readable_crops' | 'done' | 'failed' | 'uploading'
+  status: 'collecting' | 'processing' | 'pending' | 'running' | 'ocr_pending' | 'lookup_pending' | 'no_detection' | 'no_readable_crops' | 'done' | 'failed' | 'uploading'
   error?: string
   catalog?: Catalog
   diagnostics?: Diagnostics
@@ -104,7 +104,7 @@ export default function JobPage() {
   const shelfIds = new Set(entries.map(entry => entry.shelf_id).filter(Boolean))
   const shelfCount = Number(job.detected_shelf_count ?? (shelfIds.size || (entries.length > 0 ? 1 : 0)))
   const groups = groupResultBooks(entries)
-  const processing = ['pending', 'running', 'ocr_pending', 'lookup_pending'].includes(job.status)
+  const processing = ['collecting', 'processing', 'pending', 'running', 'ocr_pending', 'lookup_pending'].includes(job.status)
 
   return (
     <div className="min-h-screen bg-white">
@@ -199,7 +199,9 @@ function devShelfLabel(boxId: string): string | null {
 function ResultBookCard({ book }: { book: ResultBook }) {
   return (
     <article className="flex w-[108px] min-w-0 flex-col items-center gap-[5px] text-center">
-      {book.cover ? <img src={book.cover} alt="" className="h-[128px] max-w-[90px] object-cover" /> : <div className="h-[128px] w-[80px] bg-[#d9d9d9]" />}
+      <div className="flex h-[128px] w-[90px] items-end justify-center">
+        {book.cover ? <img src={book.cover} alt="" className="max-h-full max-w-full object-contain" /> : <div className="h-full w-[80px] bg-[#d9d9d9]" />}
+      </div>
       <p className="line-clamp-2 w-full text-[11px] leading-[13px] text-ink">{book.title}</p>
     </article>
   )
@@ -294,6 +296,8 @@ function cropImageUrl(raw: string | undefined): string | null {
 
 function StatusBadge({ status }: { status: string }) {
   const map: Record<string, string> = {
+    collecting: 'bg-blue-100 text-blue-800',
+    processing: 'bg-blue-100 text-blue-800',
     pending: 'bg-yellow-100 text-yellow-800',
     running: 'bg-blue-100 text-blue-800',
     ocr_pending: 'bg-blue-100 text-blue-800',
@@ -304,6 +308,8 @@ function StatusBadge({ status }: { status: string }) {
     failed: 'bg-red-100 text-red-800',
   }
   const label: Record<string, string> = {
+    collecting: '録画中',
+    processing: '最終処理中',
     pending: '待機中',
     running: '処理中',
     ocr_pending: 'OCR中',
@@ -408,11 +414,13 @@ function BookRow({ book }: { book: BookEntry }) {
   const conf = top?.match_confidence
   return (
     <div className="flex gap-3 items-start border border-gray-100 rounded-lg p-3">
-      {top?.thumbnail ? (
-        <img src={top.thumbnail} alt="" className="w-10 h-14 object-cover rounded shrink-0" />
-      ) : (
-        <div className="w-10 h-14 bg-gray-100 rounded shrink-0" />
-      )}
+      <div className="flex h-14 w-10 shrink-0 items-end justify-center">
+        {top?.thumbnail ? (
+          <img src={top.thumbnail} alt="" className="max-h-full max-w-full rounded object-contain" />
+        ) : (
+          <div className="h-full w-full rounded bg-gray-100" />
+        )}
+      </div>
       <div className="flex-1 min-w-0">
         <p className="text-sm font-semibold text-gray-800 leading-tight">
           {top?.title ?? book.title}

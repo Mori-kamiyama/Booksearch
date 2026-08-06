@@ -23,11 +23,9 @@ if [[ "$(cd "$(dirname "$YOLO_MODEL_SOURCE")" && pwd)/$(basename "$YOLO_MODEL_SO
 else
   echo "  yolo_model.pt: already in place"
 fi
-# 既存のworker用マッピングがあればそれを保持する。初回だけ、互換形式の
-# data/apriltag_shelf_map.json を配置する（旧exampleファイルには依存しない）。
-if [[ ! -f "$YOLO_ASSETS/apriltag_shelf_map.json" ]]; then
-  cp "$ROOT/data/apriltag_shelf_map.json" "$YOLO_ASSETS/apriltag_shelf_map.json"
-fi
+# Canonical 36h11 mapping. Always refresh it so a stale image asset cannot
+# silently override the placement guide used by the frontend.
+cp "$ROOT/data/apriltag_library_map.json" "$YOLO_ASSETS/apriltag_library_map.json"
 cp "$ROOT/data/known_books.json" "$YOLO_ASSETS/known_books.json"
 
 # Lookup Worker: library.db + known_books

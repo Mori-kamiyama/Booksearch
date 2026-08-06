@@ -1,69 +1,53 @@
 # AprilTag Printing Plan
 
-## Choice
+## Accepted placement
 
-Use AprilTag, not the older small test map.
-
+- Canonical source: `data/library_map.json`
 - Dictionary: `DICT_APRILTAG_36h11`
-- Tag IDs: `0..195`
-- Mapping file: `data/apriltag_library_map.json`
+- Tag IDs: `0..156`
+- Generated mapping: `data/apriltag_library_map.json`
+- Placement guide: `outputs/apriltag_library/library_tag_layout_visual.png`
 - Printable PDF: `outputs/apriltag_library/apriltag_library_sheets.pdf`
 
-`DICT_APRILTAG_25h9` only has 35 IDs, so it is too small for the full library
-layout. `DICT_APRILTAG_36h11` has enough IDs and is already supported by the
-current OpenCV-based detector.
+Tags are placed at physical grid intersections. `x` on a print label means the
+intersection between display columns `x` and `x+1`; rows are counted bottom to
+top. `TL/TR/BR/BL` are physical camera quadrants and point to canonical shelf
+IDs. This distinction matters on mirrored `base-01` through `base-03`.
 
-## Placement Rule
-
-Each tag is placed at a grid intersection, not inside a single box. The printed
-set intentionally uses a sparse layout, not every possible intersection.
-
-For example, a printed label like:
-
-```text
-tag 000  base-01  x01/y01
-```
-
-means:
-
-- base shelf unit: `base-01`
-- place the tag at the intersection between columns 1 and 2
-- place it at the intersection between rows 1 and 2
-- rows are counted from bottom to top
-- base units are counted from the entrance side
-
-The small `TL/TR/BR/BL` text on each printed tag shows which shelf slot each
-quadrant maps to.
-
-## Generated Counts
-
-- Printable tags: 196
-- Covered usable shelf slots: 368
-- Missing usable slots: 0
-- Average tag references per usable shelf slot: `2.0`
-
-The tag count is smaller than the full-intersection plan because the generator
-keeps a checkerboard-like subset of intersections and then adds only the tags
-needed to cover under-represented shelf slots.
+The sparse deterministic layout uses 157 tags and covers all 356 usable shelf
+boxes at least once.
 
 ## Regeneration
 
 ```bash
+uv run python scripts/generate_library_layout.py
 uv run python scripts/generate_apriltag_assets.py
+uv run python scripts/visualize_library_tag_layout.py
+uv run python -m unittest discover -s tests -p 'test_library_map.py'
 ```
 
-This regenerates:
+The AprilTag generator synchronizes the mapping used by the standalone guide,
+tag detector, normal frontend, and AWS YOLO Worker. `prepare_assets.sh` always
+refreshes the worker copy; it no longer preserves a stale legacy map.
 
-- `data/apriltag_library_map.json`
-- `outputs/apriltag_library/apriltag_library_print_list.json`
-- `outputs/apriltag_library/apriltag_library_sheets.pdf`
-- `outputs/apriltag_library/apriltag_library_sheet_*.png`
+## Reassigning existing observations
 
-## Recognition Use
-
-Use this map instead of the small test map:
+Changing quadrant geometry cannot be migrated from `shelf_id` alone. Re-run
+tag detection against the original shelf images, then rebuild candidates:
 
 ```bash
-uv run python scripts/build_book_catalog.py path/to/shelf.jpg \
-  --apriltag-map data/apriltag_library_map.json
+uv run python scripts/shelf_locator.py \
+  --catalog outputs/book_catalog_data_260702/catalog.json \
+  --mapping data/apriltag_library_map.json \
+  --output outputs/book_catalog_data_260702/catalog_reassigned_apriltag_canonical_v2_20260806.json \
+  --max-tag-distance 1600
+
+uv run python scripts/import_bookshelf_catalog.py \
+  --catalog outputs/book_catalog_data_260702/catalog_reassigned_apriltag_canonical_v2_20260806.json \
+  --db outputs/library/library.db \
+  --output outputs/book_catalog_data_260702/bookshelf_data_reassigned_apriltag_canonical_v2_20260806.json \
+  --replace-candidates
 ```
+
+The pre-migration SQLite backup is
+`outputs/library/library.before_library_map_v2_20260806.db`.

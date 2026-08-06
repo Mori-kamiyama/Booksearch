@@ -81,7 +81,7 @@
 | 目的 | カメラをかざすだけで棚まで誘導し、裏でスキャンに貢献させる |
 | コンテンツ | フルスクリーンカメラ / 上部に対象の書名バー / 中央に `CameraGuidanceOverlay`（タグ検出時「この棚です・右へ2列・上へ1段」矢印、未検出時「棚のタグが写るように」）/ 下部に `ScanContributionIndicator`（「撮影データは棚情報の更新に使われます」常時表示） |
 | コンポーネント | `CameraView`, `CameraGuidanceOverlay`, `ScanContributionIndicator` |
-| データ | タグ検出はブラウザ内 WASM（36h11）。誘導計算は `data/apriltag_library_map.json` の grid_intersection をクライアントに同梱。キーフレーム送信は既存 `POST /api/scan`（品質ゲート・クールダウンはサーバー側） |
+| データ | タグ検出はブラウザ内 WASM（36h11）。誘導計算は `data/apriltag_library_map.json` の physical_intersection をクライアントに同梱。キーフレーム送信は既存 `POST /api/scan`（品質ゲート・クールダウンはサーバー側） |
 | 状態 | カメラ許可待ち / 拒否（静的見取り図へフォールバック）/ タグ未検出 / 誘導中 / 到着（該当区画が画面内: 「この区画です」強調） |
 
 ### 3.4 `/map` 図書室マップ
@@ -291,7 +291,7 @@ ReviewCard       { item: ReviewItem; onResolve }   // admin用
 
 静的データとしてクライアントに同梱するもの:
 - `data/library_layout.json`（グリッド形状・空きスロット）→ ShelfMapHighlight / ShelfUnitGrid / LibraryFloorMap
-- `data/apriltag_library_map.json` の tags.grid_intersection（Phase 3 のみ）→ CameraGuidanceOverlay
+- `data/apriltag_library_map.json` の tags.physical_intersection（Phase 3 のみ）→ CameraGuidanceOverlay
 
 ---
 

@@ -5,6 +5,15 @@ export interface BrowserAprilTag {
 
 type OpenCV = any
 
+function safeDelete(resource: OpenCV): void {
+  try {
+    resource?.delete?.()
+  } catch {
+    // Some mobile WASM builds expose a destructor as a null function. Cleanup
+    // must not turn an otherwise successful tag detection into a fallback.
+  }
+}
+
 let cvPromise: Promise<OpenCV> | null = null
 
 async function loadOpenCV(): Promise<OpenCV> {
@@ -12,13 +21,18 @@ async function loadOpenCV(): Promise<OpenCV> {
     cvPromise = (async () => {
       const imported = await import('@techstark/opencv-js')
       const module = (imported as any).default ?? imported
-      if (module instanceof Promise) return module
-      if (module.Mat) return module
-      await new Promise<void>(resolve => {
-        module.onRuntimeInitialized = () => resolve()
+      const cv = module instanceof Promise ? await module : module
+      if (cv.Mat) return cv
+      await new Promise<void>((resolve, reject) => {
+        cv.onRuntimeInitialized = () => resolve()
+        cv.onAbort = (reason: unknown) => reject(new Error(`OpenCV.js aborted: ${String(reason)}`))
       })
-      return module
-    })()
+      return cv
+    })().catch(error => {
+      // A failed WASM initialization must not poison all later retries.
+      cvPromise = null
+      throw error
+    })
   }
   return cvPromise
 }
@@ -34,13 +48,23 @@ export async function detectBrowserAprilTags(canvas: HTMLCanvasElement): Promise
   const gray = new cv.Mat()
   const dictionary = cv.getPredefinedDictionary(cv.DICT_APRILTAG_36h11)
   const parameters = new cv.aruco_DetectorParameters()
-  const refine = new cv.aruco_RefineParameters()
+  // The AprilTag-specific refinement path calls a null WASM function on some
+  // mobile builds. SUBPIX is slower than NONE but broadly supported.
+  if ('cornerRefinementMethod' in parameters && cv.CORNER_REFINE_SUBPIX != null) {
+    parameters.cornerRefinementMethod = cv.CORNER_REFINE_SUBPIX
+  }
+  // Embind does not carry over the C++ default arguments. Both constructors
+  // require the full argument list in this OpenCV.js build.
+  const refine = new cv.aruco_RefineParameters(10, 3, true)
   const detector = new cv.aruco_ArucoDetector(dictionary, parameters, refine)
   const corners = new cv.MatVector()
   const ids = new cv.Mat()
 
   try {
-    cv.cvtColor(source, gray, cv.COLOR_RGBA2GRAY)
+    const channels = typeof source.channels === 'function' ? source.channels() : 4
+    if (channels === 4) cv.cvtColor(source, gray, cv.COLOR_RGBA2GRAY)
+    else if (channels === 3) cv.cvtColor(source, gray, cv.COLOR_RGB2GRAY)
+    else source.copyTo(gray)
     detector.detectMarkers(gray, corners, ids)
 
     const values = ids.data32S ?? ids.data32F ?? []
@@ -56,18 +80,18 @@ export async function detectBrowserAprilTags(canvas: HTMLCanvasElement): Promise
         ]
       }
       tags.push({ tagId: Number(values[index]), center })
-      marker.delete()
+      safeDelete(marker)
     }
     return tags
   } finally {
-    source.delete()
-    gray.delete()
-    corners.delete()
-    ids.delete()
-    dictionary.delete?.()
-    parameters.delete?.()
-    refine.delete?.()
-    detector.delete?.()
+    safeDelete(detector)
+    safeDelete(refine)
+    safeDelete(parameters)
+    safeDelete(dictionary)
+    safeDelete(ids)
+    safeDelete(corners)
+    safeDelete(gray)
+    safeDelete(source)
   }
 }
 

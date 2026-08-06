@@ -449,6 +449,16 @@ func TestLiveScanSessionLifecycle(t *testing.T) {
 		t.Fatalf("frame: want 201, got %d", resp.StatusCode)
 	}
 
+	commitBody := strings.NewReader(`{"frame_key":"frame_000001.jpg"}`)
+	commit, err := http.Post(env.server.URL+"/api/scan/sessions/"+id+"/commit-frame", "application/json", commitBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit.Body.Close()
+	if commit.StatusCode != http.StatusAccepted {
+		t.Fatalf("commit frame: want 202, got %d", commit.StatusCode)
+	}
+
 	cancel, err := http.Post(env.server.URL+"/api/scan/sessions/"+id+"/cancel", "application/json", nil)
 	if err != nil {
 		t.Fatal(err)

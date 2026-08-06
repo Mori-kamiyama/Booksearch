@@ -1,12 +1,104 @@
-import { useMemo } from 'react'
+import { Fragment, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { displayColToActualCol, formatShelfLabel, getSlot, getUnit, isEmptyCell, layoutUnits, shelfIdForCell } from '../lib/shelf'
+import { displayCell, displayPositionForShelf, formatShelfLabel, getSlot, getUnit, layoutUnits } from '../lib/shelf'
 
 export function ShelfLocationLabel({ shelfId, size }: { shelfId: string; size: 'sm' | 'lg' }) {
   return (
     <p className={size === 'lg' ? 'text-base font-bold text-ink' : 'text-sm font-semibold text-ink'}>
       {formatShelfLabel(shelfId)}
     </p>
+  )
+}
+
+type FloorMapLocation = {
+  unitId: string
+  kind: 'bar' | 'foot'
+  index: number
+}
+
+// The physical map is numbered from right to left. The tall upper shapes are
+// base shelves, and the small lower blocks are separate side shelves backed by
+// the 3 x 7 `side-*` units in library_layout.json. The two leftmost vertical
+// locations are reserved for future base shelves 5 and 6.
+const floorMapLocations: FloorMapLocation[] = [
+  { unitId: 'base-01', kind: 'bar', index: 5 },
+  { unitId: 'base-02', kind: 'bar', index: 4 },
+  { unitId: 'base-03', kind: 'bar', index: 3 },
+  { unitId: 'base-04', kind: 'bar', index: 2 },
+  { unitId: 'side-01', kind: 'foot', index: 3 },
+  { unitId: 'side-02', kind: 'foot', index: 2 },
+  { unitId: 'side-03', kind: 'foot', index: 1 },
+  { unitId: 'side-04', kind: 'foot', index: 0 },
+]
+
+const barPositions = [0, 93, 119, 212, 238, 331]
+const footPositions = [119, 192, 238, 311]
+
+/**
+ * Compact physical floor map shared by the index and book-detail pages.
+ * A shelf ID takes precedence over a selected unit so the exact book location
+ * can be called out without callers having to resolve layout data themselves.
+ */
+export function LibraryMap({
+  selectedUnit,
+  shelfId,
+  onUnitClick,
+  size = 'default',
+}: {
+  selectedUnit?: string
+  shelfId?: string
+  onUnitClick?: (unitId: string) => void
+  size?: 'default' | 'lg'
+}) {
+  const shelfUnit = getSlot(shelfId)?.unit
+  const activeUnit = shelfUnit ?? selectedUnit
+  const marker = shelfUnit ? floorMapLocations.find(location => location.unitId === shelfUnit) : undefined
+  const locationFor = (kind: FloorMapLocation['kind'], index: number) => floorMapLocations.find(location => location.kind === kind && location.index === index)
+  const renderUnit = (location: FloorMapLocation | undefined, className: string, style: { left: number }) => {
+    const active = location?.unitId === activeUnit
+    const classes = `${className} ${active ? 'bg-[#087f5b]' : 'bg-[#d9d9d9]'} ${location && onUnitClick ? 'tap-soft cursor-pointer transition hover:bg-[#c4c4c4]' : ''}`
+    if (!location || !onUnitClick) return <div className={classes} style={style} />
+    return (
+      <button
+        type="button"
+        onClick={() => onUnitClick(location.unitId)}
+        aria-label={unitName(location.unitId)}
+        aria-pressed={active}
+        className={classes}
+        style={style}
+      />
+    )
+  }
+
+  const markerLeft = marker
+    ? marker.kind === 'bar'
+      ? Math.max(0, Math.min(286, barPositions[marker.index] - 24))
+      : Math.max(0, Math.min(286, footPositions[marker.index] - 13))
+    : 0
+  const markerTop = marker?.kind === 'foot' ? 88 : 14
+
+  const frameClass = size === 'lg'
+    ? 'relative h-[151px] w-[298px] max-w-full md:h-[216px] md:w-[426px]'
+    : 'relative h-[151px] w-[298px] max-w-full md:h-[180px] md:w-[355px]'
+  const scaleClass = size === 'lg' ? 'scale-[0.84] md:scale-[1.2]' : 'scale-[0.84] md:scale-100'
+
+  return (
+    <div className={frameClass} role={onUnitClick ? 'group' : 'img'} aria-label={shelfUnit ? '本がある棚を緑色で表示' : '図書室の棚マップ'}>
+      <div className={`absolute left-0 top-0 h-[180px] w-[355px] origin-top-left ${scaleClass}`}>
+        {barPositions.map((left, index) => (
+          <Fragment key={left}>{renderUnit(locationFor('bar', index), 'absolute top-0 h-[154px] w-6', { left })}</Fragment>
+        ))}
+        {footPositions.map((left, index) => (
+          <Fragment key={left}>{renderUnit(locationFor('foot', index), 'absolute top-[156px] h-6 w-[43px]', { left })}</Fragment>
+        ))}
+        {marker && (
+          <div className="absolute h-[54px] w-[69px] bg-[#d9d9d9] px-2 pt-4 text-center text-base font-semibold text-ink" style={{ left: markerLeft, top: markerTop }}>
+            ここ！
+            <span className="absolute -bottom-3 left-1/2 size-0 -translate-x-1/2 border-x-[12px] border-t-[12px] border-x-transparent border-t-[#d9d9d9]" />
+          </div>
+        )}
+      </div>
+    </div>
   )
 }
 
@@ -32,23 +124,30 @@ export function ShelfMapHighlight({
         const row = unit.rows - rowIndex
         return Array.from({ length: unit.cols }, (_, colIndex) => {
           const displayCol = colIndex + 1
-          const col = displayColToActualCol(unit, displayCol)
-          if (isEmptyCell(unit, col, row)) return null
-          const shelfId = shelfIdForCell(unit.unit, col, row)
-          const cellId = `c${String(displayCol).padStart(2, '0')}-r${String(row).padStart(2, '0')}`
-          const active = highlights.has(cellId) || highlights.has(shelfId)
+          const position = displayCell(unit, displayCol, row)
+          const x = colIndex * (cell + gap)
+          const y = rowIndex * (cell + gap)
+          if (position.empty) {
+            return (
+              <g key={position.shelfId} aria-label="構造上の空き区画">
+                <rect x={x} y={y} width={cell} height={cell} rx={5} fill="#f4f4f5" stroke="#d4d4d8" />
+                <path d={`M ${x + 6} ${y + 6} L ${x + cell - 6} ${y + cell - 6} M ${x + cell - 6} ${y + 6} L ${x + 6} ${y + cell - 6}`} stroke="#d4d4d8" strokeWidth={1.5} />
+              </g>
+            )
+          }
+          const active = highlights.has(position.displayCellId) || highlights.has(position.shelfId)
           return (
             <rect
-              key={shelfId}
-              x={colIndex * (cell + gap)}
-              y={rowIndex * (cell + gap)}
+              key={position.shelfId}
+              x={x}
+              y={y}
               width={cell}
               height={cell}
               rx={5}
               className={active ? 'animate-pulse fill-primary' : 'fill-white'}
               stroke={active ? '#15803d' : '#d4d4d8'}
               strokeWidth={active ? 2 : 1}
-              onClick={() => onCellClick?.(shelfId)}
+              onClick={() => onCellClick?.(position.shelfId)}
             />
           )
         })
@@ -138,22 +237,18 @@ export function ShelfUnitGrid({
           const row = unit.rows - rowIndex
           return Array.from({ length: unit.cols }, (_, colIndex) => {
             const displayCol = colIndex + 1
-            // Keep the shelf ID/count in the stable displayed coordinate system,
-            // while deriving the blank shape from the physically mirrored grid.
-            const physicalCol = displayColToActualCol(unit, displayCol)
-            const shelfId = shelfIdForCell(unit.unit, displayCol, row)
-            const empty = isEmptyCell(unit, physicalCol, row)
-            const count = cellCounts[shelfId] ?? 0
+            const position = displayCell(unit, displayCol, row)
+            const count = cellCounts[position.shelfId] ?? 0
             return (
               <button
-                key={shelfId}
+                key={position.shelfId}
                 type="button"
-                disabled={empty}
-                onClick={() => onCellClick(shelfId)}
-                className={`aspect-square rounded text-[10px] font-semibold ${empty ? 'bg-zinc-100 text-zinc-300' : countTone(count)}`}
-                aria-label={formatShelfLabel(shelfId)}
+                disabled={position.empty}
+                onClick={() => onCellClick(position.shelfId)}
+                className={`aspect-square rounded text-[10px] font-semibold ${position.empty ? 'bg-zinc-100 text-zinc-300' : countTone(count)}`}
+                aria-label={formatShelfLabel(position.shelfId)}
               >
-                {empty ? '' : count || ''}
+                {position.empty ? '' : count || ''}
               </button>
             )
           })
@@ -169,10 +264,9 @@ export function FreshnessBadge({ lastSeenAt }: { lastSeenAt?: string }) {
 }
 
 export function ShelfMiniMap({ shelfId }: { shelfId: string }) {
-  const slot = getSlot(shelfId)
-  if (!slot) return null
-  const cellId = `c${String(slot.col).padStart(2, '0')}-r${String(slot.row).padStart(2, '0')}`
-  return <ShelfMapHighlight unitId={slot.unit} highlight={[cellId]} />
+  const position = displayPositionForShelf(shelfId)
+  if (!position) return null
+  return <ShelfMapHighlight unitId={position.unit.unit} highlight={[position.shelfId]} />
 }
 
 export function useGoToShelf() {

@@ -370,7 +370,7 @@ def build_catalog(job_id: str) -> dict[str, Any]:
     return jsonify(catalog)
 
 
-def process_job(job_id: str) -> None:
+def process_job(job_id: str, incremental: bool = False) -> None:
     catalog = build_catalog(job_id)
     shelf_observations_added = update_shelf_confidence(catalog)
     key = f"catalogs/{job_id}/catalog.json"
@@ -380,24 +380,40 @@ def process_job(job_id: str) -> None:
         ContentType="application/json; charset=utf-8",
     )
 
-    jobs_table.update_item(
-        Key={"job_id": job_id},
-        UpdateExpression="SET #s = :s, catalog_key = :k, updated_at = :t, shelf_observations_added = :soa",
-        ExpressionAttributeNames={"#s": "status"},
-        ExpressionAttributeValues={
-            ":s": "done", ":k": key,
-            ":t": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            ":soa": shelf_observations_added,
-        },
-    )
-    print(f"[lookup] done {job_id} -> {key}")
+    entries = catalog.get("entries", [])
+    shelf_count = len({entry.get("shelf_id") for entry in entries if entry.get("shelf_id")})
+    book_count = sum(len(entry.get("books") or []) for entry in entries)
+    if incremental:
+        jobs_table.update_item(
+            Key={"job_id": job_id},
+            UpdateExpression="SET catalog_key = :k, updated_at = :t, detected_shelf_count = :sc, "
+                             "detected_book_count = :bc ADD result_revision :one",
+            ExpressionAttributeValues={
+                ":k": key, ":t": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                ":sc": shelf_count, ":bc": book_count, ":one": 1,
+            },
+        )
+        print(f"[lookup] partial {job_id} books={book_count} -> {key}")
+    else:
+        jobs_table.update_item(
+            Key={"job_id": job_id},
+            UpdateExpression="SET #s = :s, catalog_key = :k, updated_at = :t, shelf_observations_added = :soa, "
+                             "detected_shelf_count = :sc, detected_book_count = :bc",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={
+                ":s": "done", ":k": key,
+                ":t": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                ":soa": shelf_observations_added, ":sc": shelf_count, ":bc": book_count,
+            },
+        )
+        print(f"[lookup] done {job_id} -> {key}")
 
 
 def handler(event, context):
     for rec in event.get("Records", []):
         body = json.loads(rec["body"])
         try:
-            process_job(body["job_id"])
+            process_job(body["job_id"], bool(body.get("incremental")))
         except Exception as e:
             print(f"[lookup] ERROR: {e}", file=sys.stderr)
             jobs_table.update_item(

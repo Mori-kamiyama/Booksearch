@@ -21,6 +21,19 @@ body {
   color: #18181b;
 }
 
+html.home-scroll-lock,
+body.home-scroll-lock {
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+body.home-scroll-lock {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+}
+
 button,
 input {
   font: inherit;
@@ -28,6 +41,21 @@ input {
 
 button {
   -webkit-tap-highlight-color: transparent;
+}
+
+@keyframes scan-status-popup {
+  0% { opacity: 0; transform: translate(-50%, 12px) scale(0.96); }
+  14% { opacity: 1; transform: translate(-50%, 0) scale(1.02); }
+  24%, 88% { opacity: 1; transform: translate(-50%, 0) scale(1); }
+  100% { opacity: 0.98; transform: translate(-50%, 0) scale(1); }
+}
+
+.scan-status-popup {
+  animation: scan-status-popup 2.8s ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scan-status-popup { animation: none; }
 }
 
 @layer components {

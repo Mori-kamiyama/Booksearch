@@ -7,7 +7,11 @@ interface LayoutData {
 }
 
 const data = layout as LayoutData
-const slotsById = new Map(data.slots.map(slot => [slot.shelf_id, slot]))
+const slotsById = new Map(
+  data.slots
+    .filter((slot): slot is LayoutSlot & { shelf_id: string } => Boolean(slot.shelf_id))
+    .map(slot => [slot.shelf_id, slot]),
+)
 const unitsById = new Map(data.units.map(unit => [unit.unit, unit]))
 
 export const layoutUnits = data.units
@@ -56,15 +60,13 @@ export function confidenceLevel(confidence: number): 'high' | 'mid' | 'low' {
 }
 
 export function splitShelfId(shelfId: string): { unitId: string; cellId: string; col: number; row: number } | undefined {
-  const slot = getSlot(shelfId)
-  if (!slot) return undefined
-  const unit = getUnit(slot.unit)
-  const displayCol = unit ? actualColToDisplayCol(unit, slot.col) : slot.col
+  const position = displayPositionForShelf(shelfId)
+  if (!position) return undefined
   return {
-    unitId: slot.unit,
-    cellId: `c${String(displayCol).padStart(2, '0')}-r${String(slot.row).padStart(2, '0')}`,
-    col: displayCol,
-    row: slot.row,
+    unitId: position.unit.unit,
+    cellId: position.displayCellId,
+    col: position.displayCol,
+    row: position.row,
   }
 }
 
@@ -74,4 +76,43 @@ export function shelfIdForCell(unitId: string, col: number, row: number): string
 
 export function isEmptyCell(unit: LayoutUnit, col: number, row: number): boolean {
   return unit.empty_rule?.regions.some(region => region.cols.includes(col) && region.rows.includes(row)) ?? false
+}
+
+export interface DisplayCell {
+  unit: LayoutUnit
+  displayCol: number
+  canonicalCol: number
+  row: number
+  displayCellId: string
+  shelfId: string
+  empty: boolean
+}
+
+export function displayCell(unit: LayoutUnit, displayCol: number, row: number): DisplayCell {
+  const canonicalCol = displayColToActualCol(unit, displayCol)
+  return {
+    unit,
+    displayCol,
+    canonicalCol,
+    row,
+    displayCellId: `c${String(displayCol).padStart(2, '0')}-r${String(row).padStart(2, '0')}`,
+    shelfId: shelfIdForCell(unit.unit, canonicalCol, row),
+    empty: isEmptyCell(unit, canonicalCol, row),
+  }
+}
+
+export function displayPositionForShelf(shelfId: string): DisplayCell | undefined {
+  const slot = getSlot(shelfId)
+  if (!slot) return undefined
+  const unit = getUnit(slot.unit)
+  if (!unit) return undefined
+  return displayCell(unit, actualColToDisplayCol(unit, slot.col), slot.row)
+}
+
+export function shelfIdForDisplayCell(unit: LayoutUnit, displayCol: number, row: number): string {
+  return displayCell(unit, displayCol, row).shelfId
+}
+
+export function isDisplayCellEmpty(unit: LayoutUnit, displayCol: number, row: number): boolean {
+  return displayCell(unit, displayCol, row).empty
 }

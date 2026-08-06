@@ -2,21 +2,21 @@ import { useEffect, useState } from 'react'
 import { ScanLine } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { SearchBar } from '../components/book'
-import { BrandMark } from '../components/common'
 import { fallbackCoverForTitle, featuredBooks } from '../data/figmaBooks'
 import { getFeaturedBooks } from '../lib/api'
 import type { Book } from '../lib/types'
+import { BrandMark } from '../components/common'
 
 export default function SearchPage() {
   const navigate = useNavigate()
   const [query, setQuery] = useState('')
-  const [featured, setFeatured] = useState<Book[]>([])
-  const [featuredLoading, setFeaturedLoading] = useState(true)
+  const [featured, setFeatured] = useState<Book[]>(fallbackFeaturedBooks)
+  const [featuredLoading, setFeaturedLoading] = useState(false)
 
   useEffect(() => {
     let cancelled = false
     getFeaturedBooks(5)
-      .then(books => { if (!cancelled) setFeatured(featuredBooksForDisplay(books)) })
+      .then(books => { if (!cancelled && books.length > 0) setFeatured(featuredBooksForDisplay(books)) })
       .catch(() => { if (!cancelled) setFeatured(fallbackFeaturedBooks()) })
       .finally(() => { if (!cancelled) setFeaturedLoading(false) })
     return () => { cancelled = true }
@@ -28,24 +28,22 @@ export default function SearchPage() {
   }
 
   return (
-    <div className="relative h-[calc(100svh-72px)] min-h-[620px] overflow-hidden bg-white md:h-auto md:min-h-[calc(100vh-88px)] md:overflow-x-hidden md:overflow-y-visible">
+    <div className="relative h-svh max-h-svh overflow-hidden overscroll-none bg-white">
       <img
         src="/figma-icons/book-corner-tl.svg"
         alt=""
         aria-hidden="true"
-        className="pointer-events-none absolute left-0 top-0 -z-0 h-[164px] w-[168px] select-none opacity-95 md:-left-[98px] md:-top-[133px] md:h-[376px] md:w-[384px]"
+        className="pointer-events-none absolute left-0 top-0 -z-0 hidden h-[164px] w-[168px] select-none opacity-95 md:block md:-left-[98px] md:-top-[133px] md:h-[376px] md:w-[384px]"
       />
       <img
         src="/figma-icons/book-corner-br.svg"
         alt=""
         aria-hidden="true"
-        className="pointer-events-none absolute -bottom-[122px] -right-[72px] -z-0 h-[246px] w-[234px] select-none opacity-95 md:-bottom-[63px] md:-right-[46px] md:h-[331px] md:w-[315px]"
+        className="pointer-events-none absolute -bottom-[122px] -right-[72px] -z-0 hidden h-[246px] w-[234px] select-none opacity-95 md:block md:-bottom-[63px] md:-right-[46px] md:h-[331px] md:w-[315px]"
       />
-      <div className="relative z-10 mx-auto flex h-full w-full max-w-[402px] flex-col justify-start gap-8 pt-[180px] md:min-h-[744px] md:max-w-none md:gap-[92px] md:pb-0 md:pt-0">
-        <div className="flex flex-col items-center gap-6 px-7 md:mt-[147px] md:w-[444px] md:self-center md:gap-10 md:px-0">
-          <div className="hidden md:block">
-            <BrandMark />
-          </div>
+      <div className="relative z-10 mx-auto flex h-full w-full max-w-[402px] flex-col justify-center gap-8 pb-6 pt-[72px] md:max-w-none md:justify-start md:gap-16 md:pb-0 md:pt-0">
+        <div className="flex w-full flex-col items-center gap-6 md:mt-[25vh] md:w-[444px] md:self-center md:gap-10">
+          <BrandMark />
           <h1 className="w-full text-center text-2xl font-normal leading-[29px] tracking-[0.05em] text-ink">
             どんな<span className="text-[#087f5b]">本</span>でも一瞬で
           </h1>
@@ -65,9 +63,9 @@ export default function SearchPage() {
           </div>
         )}
 
-        <div className="relative z-10 flex flex-col items-center gap-3 md:fixed md:bottom-[67px] md:right-8 md:z-10">
+        <div className="relative z-20 flex flex-col items-center gap-3 self-center md:fixed md:bottom-[67px] md:right-8 md:z-10">
           <button type="button" onClick={() => navigate('/scan')} className="tap-card flex h-[71px] w-[196px] items-center justify-center gap-4 rounded-full bg-[#087f5b] px-6 py-4 text-2xl text-white shadow-[0_10px_24px_rgba(8,127,91,0.22)] transition hover:bg-[#076b4d] md:size-[90px] md:bg-[#363636] md:p-0 md:hover:bg-[#222]" aria-label="本棚をスキャン">
-            <ScanLine className="size-9 md:size-12" strokeWidth={1.8} />
+            <ScanLine className="size-9 text-white md:size-12" strokeWidth={1.8} />
             <span className="md:hidden">スキャン</span>
           </button>
           <p className="text-center text-xs leading-[15px] text-ink md:hidden">本棚をスキャンして検索</p>
@@ -83,14 +81,16 @@ function FeaturedBookCard({ book, onClick, className = '' }: { book: Book; onCli
     <button
       type="button"
       onClick={onClick}
-      className={`tap-card flex w-[165px] shrink-0 flex-col items-center gap-2 rounded-lg text-center md:w-[114px] md:gap-[6px] ${className}`}
+      className={`tap-card flex w-[122px] shrink-0 flex-col items-center gap-2 rounded-lg text-center md:w-[114px] md:gap-[6px] ${className}`}
     >
-      {cover ? (
-        <img src={cover} alt="" className="h-[210px] w-[149px] object-cover md:h-[155px] md:w-[114px]" loading="lazy" />
-      ) : (
-        <div className="h-[210px] w-[149px] bg-[#d9d9d9] md:h-[155px] md:w-[114px]" />
-      )}
-      <p className="line-clamp-2 w-full text-center text-base leading-[19px] text-ink md:text-[11px] md:leading-[13px]">{book.title}</p>
+      <div className="flex h-[150px] w-[108px] shrink-0 items-end justify-center overflow-hidden md:h-[155px] md:w-[114px]">
+        {cover ? (
+          <img src={cover} alt="" className="block max-h-full max-w-full object-contain" loading="lazy" />
+        ) : (
+          <div className="h-full w-full bg-[#d9d9d9]" />
+        )}
+      </div>
+      <p className="line-clamp-2 min-h-[34px] w-full break-words px-1 text-center text-sm leading-[17px] text-ink md:min-h-[26px] md:px-0 md:text-[11px] md:leading-[13px]">{book.title}</p>
     </button>
   )
 }
@@ -105,7 +105,6 @@ function FeaturedBookSkeleton() {
 }
 
 function fallbackFeaturedBooks(): Book[] {
-  if (!import.meta.env.DEV) return []
   return featuredBooks.map((book, index) => ({
     id: -(index + 1),
     title: book.title,
@@ -123,6 +122,8 @@ function fallbackFeaturedBooks(): Book[] {
 
 function featuredBooksForDisplay(books: Book[]): Book[] {
   if (!import.meta.env.DEV) return books
-  const withCovers = books.filter(book => fallbackCoverForTitle(book.title))
-  return withCovers.length >= 3 ? books : fallbackFeaturedBooks()
+  // 一時的に開発環境でもAPIから取得したランダムな本を表示するように変更
+  // もしデータベースから取得できた本が1件以上あれば、それをそのまま返します
+  if (books.length > 0) return books
+  return fallbackFeaturedBooks()
 }

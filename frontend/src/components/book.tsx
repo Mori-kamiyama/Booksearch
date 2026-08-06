@@ -106,11 +106,15 @@ export function BookHero({ book }: { book: Book }) {
 }
 
 function BookCover({ book, size }: { book: Book; size: 'sm' | 'lg' }) {
-  const cls = size === 'lg' ? 'h-32 w-24' : 'h-20 w-14'
+  const stageCls = size === 'lg' ? 'h-32 w-24' : 'h-20 w-14'
   if (book.thumbnail) {
-    return <img src={book.thumbnail} alt="" className={`${cls} shrink-0 rounded-lg border border-line object-cover bg-zinc-100`} loading="lazy" />
+    return (
+      <div className={`${stageCls} flex shrink-0 items-end justify-center`}>
+        <img src={book.thumbnail} alt="" className="max-h-full max-w-full rounded-lg border border-line bg-zinc-100 object-contain" loading="lazy" />
+      </div>
+    )
   }
-  return <div className={`${cls} grid shrink-0 place-items-center rounded-lg border border-line bg-zinc-100 text-center text-xs text-ink-faint`}>No<br />cover</div>
+  return <div className={`${stageCls} grid shrink-0 place-items-center rounded-lg border border-line bg-zinc-100 text-center text-xs text-ink-faint`}>No<br />cover</div>
 }
 
 export function ShelfChip({ shelfId, confidence }: { shelfId: string; confidence: number }) {

@@ -33,6 +33,7 @@ var (
 	jobsTable            string
 	shelfCandidatesTable string
 	yoloQueueURL         string
+	lookupQueueURL       string
 	s3Client             *s3.Client
 	ddbClient            *dynamodb.Client
 	sqsClient            *sqs.Client
@@ -46,6 +47,7 @@ func init() {
 	jobsTable = os.Getenv("JOBS_TABLE")
 	shelfCandidatesTable = os.Getenv("SHELF_CANDIDATES_TABLE")
 	yoloQueueURL = os.Getenv("YOLO_QUEUE_URL")
+	lookupQueueURL = os.Getenv("LOOKUP_QUEUE_URL")
 	staticAssets = os.Getenv("LAMBDA_TASK_ROOT")
 
 	cfg, err := awsconfig.LoadDefaultConfig(context.Background())
@@ -82,6 +84,8 @@ func handler(ctx context.Context, raw json.RawMessage) (events.APIGatewayV2HTTPR
 		return okJSON(200, map[string]any{"status": "ok", "time": time.Now().Unix()}), nil
 	case method == "GET" && path == "/api/books/search":
 		return searchBooks(ctx, req)
+	case method == "GET" && path == "/api/books/featured":
+		return featuredBooks(ctx, req)
 	case method == "GET" && path == "/api/shelf-candidates":
 		return listShelfCandidates(ctx)
 	case method == "GET" && strings.HasPrefix(path, "/api/books/"):
@@ -98,6 +102,8 @@ func handler(ctx context.Context, raw json.RawMessage) (events.APIGatewayV2HTTPR
 		return liveSessionStart(ctx)
 	case method == "POST" && strings.HasPrefix(path, "/api/scan/sessions/") && strings.HasSuffix(path, "/frames"):
 		return liveSessionFrame(ctx, req, path)
+	case method == "POST" && strings.HasPrefix(path, "/api/scan/sessions/") && strings.HasSuffix(path, "/commit-frame"):
+		return liveSessionFrameCommit(ctx, req, path)
 	case method == "POST" && strings.HasPrefix(path, "/api/scan/sessions/") && strings.HasSuffix(path, "/complete"):
 		return liveSessionComplete(ctx, path)
 	case method == "POST" && strings.HasPrefix(path, "/api/scan/sessions/") && strings.HasSuffix(path, "/cancel"):
@@ -111,15 +117,16 @@ func handler(ctx context.Context, raw json.RawMessage) (events.APIGatewayV2HTTPR
 	}
 }
 
-// Live sessions intentionally have no OCR side effect. Each accepted frame gets
-// a short-lived direct S3 PUT URL; completion turns all recorded keys into one
-// YOLO job. This is separate from the legacy one-file scan endpoints above.
+// Live sessions process each committed frame while the camera is still running.
+// Completion only closes the session and waits for the already queued work.
 func liveSessionStart(ctx context.Context) (events.APIGatewayV2HTTPResponse, error) {
 	id := uuid.New().String()
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err := ddbClient.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String(jobsTable), Item: map[string]ddbtypes.AttributeValue{
 		"job_id": &ddbtypes.AttributeValueMemberS{Value: id}, "status": &ddbtypes.AttributeValueMemberS{Value: "collecting"},
 		"session_type": &ddbtypes.AttributeValueMemberS{Value: "live"}, "frame_keys": &ddbtypes.AttributeValueMemberL{Value: []ddbtypes.AttributeValue{}},
+		"accepted_frames": &ddbtypes.AttributeValueMemberN{Value: "0"}, "processed_frames": &ddbtypes.AttributeValueMemberN{Value: "0"},
+		"crop_total": &ddbtypes.AttributeValueMemberN{Value: "0"}, "ocr_total": &ddbtypes.AttributeValueMemberN{Value: "0"}, "ocr_done": &ddbtypes.AttributeValueMemberN{Value: "0"},
 		"created_at": &ddbtypes.AttributeValueMemberS{Value: now}, "updated_at": &ddbtypes.AttributeValueMemberS{Value: now},
 	}})
 	if err != nil {
@@ -157,7 +164,54 @@ func liveSessionFrame(ctx context.Context, req events.APIGatewayV2HTTPRequest, p
 	if err != nil {
 		return errJSON(500, "ddb frame: "+err.Error()), nil
 	}
-	return okJSON(200, map[string]any{"frame_id": filepath.Base(key), "upload_url": p.URL, "content_type": "image/jpeg"}), nil
+	return okJSON(200, map[string]any{"frame_id": filepath.Base(key), "frame_key": key, "upload_url": p.URL, "content_type": "image/jpeg"}), nil
+}
+
+func liveSessionFrameCommit(ctx context.Context, req events.APIGatewayV2HTTPRequest, path string) (events.APIGatewayV2HTTPResponse, error) {
+	id := liveSessionID(path, "/commit-frame")
+	var payload struct {
+		FrameKey string `json:"frame_key"`
+	}
+	if err := json.Unmarshal([]byte(decodeBody(req)), &payload); err != nil || payload.FrameKey == "" {
+		return errJSON(400, "expected JSON {frame_key}"), nil
+	}
+	prefix := "live/" + id + "/frames/"
+	if !strings.HasPrefix(payload.FrameKey, prefix) || strings.Contains(strings.TrimPrefix(payload.FrameKey, prefix), "/") {
+		return errJSON(400, "invalid frame_key"), nil
+	}
+	if _, err := s3Client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(bucket), Key: aws.String(payload.FrameKey)}); err != nil {
+		return errJSON(409, "frame upload is not visible yet"), nil
+	}
+
+	keySet := &ddbtypes.AttributeValueMemberSS{Value: []string{payload.FrameKey}}
+	_, err := ddbClient.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: aws.String(jobsTable), Key: map[string]ddbtypes.AttributeValue{"job_id": &ddbtypes.AttributeValueMemberS{Value: id}},
+		UpdateExpression:         aws.String("SET updated_at = :u ADD committed_frame_keys :keys, accepted_frames :one"),
+		ConditionExpression:      aws.String("#s = :collecting AND (attribute_not_exists(committed_frame_keys) OR NOT contains(committed_frame_keys, :key))"),
+		ExpressionAttributeNames: map[string]string{"#s": "status"},
+		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+			":keys": keySet, ":key": &ddbtypes.AttributeValueMemberS{Value: payload.FrameKey},
+			":one": &ddbtypes.AttributeValueMemberN{Value: "1"}, ":collecting": &ddbtypes.AttributeValueMemberS{Value: "collecting"},
+			":u": &ddbtypes.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)},
+		},
+	})
+	if err != nil {
+		if strings.Contains(err.Error(), "ConditionalCheckFailedException") {
+			return okJSON(200, map[string]any{"session_id": id, "frame_key": payload.FrameKey, "status": "already_committed"}), nil
+		}
+		return errJSON(500, "commit frame: "+err.Error()), nil
+	}
+
+	msg, _ := json.Marshal(map[string]any{"job_id": id, "image_keys": []string{payload.FrameKey}, "incremental": true})
+	if _, err := sqsClient.SendMessage(ctx, &sqs.SendMessageInput{QueueUrl: aws.String(yoloQueueURL), MessageBody: aws.String(string(msg))}); err != nil {
+		_, _ = ddbClient.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+			TableName: aws.String(jobsTable), Key: map[string]ddbtypes.AttributeValue{"job_id": &ddbtypes.AttributeValueMemberS{Value: id}},
+			UpdateExpression:          aws.String("ADD accepted_frames :minusOne DELETE committed_frame_keys :keys"),
+			ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{":keys": keySet, ":minusOne": &ddbtypes.AttributeValueMemberN{Value: "-1"}},
+		})
+		return errJSON(500, "queue frame: "+err.Error()), nil
+	}
+	return okJSON(202, map[string]any{"session_id": id, "frame_key": payload.FrameKey, "status": "processing"}), nil
 }
 func liveSessionComplete(ctx context.Context, path string) (events.APIGatewayV2HTTPResponse, error) {
 	id := liveSessionID(path, "/complete")
@@ -165,48 +219,69 @@ func liveSessionComplete(ctx context.Context, path string) (events.APIGatewayV2H
 	if err != nil || out.Item == nil {
 		return errJSON(404, "session not found"), nil
 	}
-	frames, _ := out.Item["frame_keys"].(*ddbtypes.AttributeValueMemberL)
-	if frames == nil || len(frames.Value) == 0 {
+	committed, _ := out.Item["committed_frame_keys"].(*ddbtypes.AttributeValueMemberSS)
+	if committed == nil || len(committed.Value) == 0 {
 		return errJSON(400, "no accepted frames"), nil
-	}
-	keys := make([]string, 0, len(frames.Value))
-	for _, v := range frames.Value {
-		if s, ok := v.(*ddbtypes.AttributeValueMemberS); ok {
-			if _, headErr := s3Client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(bucket), Key: aws.String(s.Value)}); headErr == nil {
-				keys = append(keys, s.Value)
-			}
-		}
-	}
-	if len(keys) == 0 {
-		return errJSON(400, "no uploaded frames"), nil
-	}
-	keyValues := make([]ddbtypes.AttributeValue, 0, len(keys))
-	for _, key := range keys {
-		keyValues = append(keyValues, &ddbtypes.AttributeValueMemberS{Value: key})
 	}
 	_, err = ddbClient.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(jobsTable), Key: map[string]ddbtypes.AttributeValue{"job_id": &ddbtypes.AttributeValueMemberS{Value: id}},
-		UpdateExpression: aws.String("SET #s = :s, frame_keys = :keys, updated_at = :u"), ConditionExpression: aws.String("#s = :collecting"),
+		UpdateExpression: aws.String("SET #s = :s, scan_closed = :closed, updated_at = :u"), ConditionExpression: aws.String("#s = :collecting"),
 		ExpressionAttributeNames: map[string]string{"#s": "status"}, ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":s": &ddbtypes.AttributeValueMemberS{Value: "pending"}, ":collecting": &ddbtypes.AttributeValueMemberS{Value: "collecting"},
-			":keys": &ddbtypes.AttributeValueMemberL{Value: keyValues}, ":u": &ddbtypes.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)},
+			":s": &ddbtypes.AttributeValueMemberS{Value: "processing"}, ":collecting": &ddbtypes.AttributeValueMemberS{Value: "collecting"},
+			":closed": &ddbtypes.AttributeValueMemberBOOL{Value: true}, ":u": &ddbtypes.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)},
 		},
 	})
 	if err != nil {
 		return errJSON(500, err.Error()), nil
 	}
-	msg, _ := json.Marshal(map[string]any{"job_id": id, "image_keys": keys})
-	if _, err = sqsClient.SendMessage(ctx, &sqs.SendMessageInput{QueueUrl: aws.String(yoloQueueURL), MessageBody: aws.String(string(msg))}); err != nil {
+	if liveWorkFinished(out.Item) {
+		if err := queueFinalLookup(ctx, id); err != nil {
+			return errJSON(500, err.Error()), nil
+		}
+	}
+	return okJSON(202, map[string]any{"job_id": id, "accepted_frames": len(committed.Value)}), nil
+}
+
+func numberAttribute(item map[string]ddbtypes.AttributeValue, key string) int {
+	if n, ok := item[key].(*ddbtypes.AttributeValueMemberN); ok {
+		value, _ := strconv.Atoi(n.Value)
+		return value
+	}
+	return 0
+}
+
+func liveWorkFinished(item map[string]ddbtypes.AttributeValue) bool {
+	return numberAttribute(item, "processed_frames") >= numberAttribute(item, "accepted_frames") &&
+		numberAttribute(item, "ocr_done") >= numberAttribute(item, "ocr_total")
+}
+
+func queueFinalLookup(ctx context.Context, id string) error {
+	_, err := ddbClient.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: aws.String(jobsTable), Key: map[string]ddbtypes.AttributeValue{"job_id": &ddbtypes.AttributeValueMemberS{Value: id}},
+		UpdateExpression:         aws.String("SET final_lookup_queued = :yes, #s = :pending"),
+		ConditionExpression:      aws.String("attribute_not_exists(final_lookup_queued)"),
+		ExpressionAttributeNames: map[string]string{"#s": "status"},
+		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+			":yes": &ddbtypes.AttributeValueMemberBOOL{Value: true}, ":pending": &ddbtypes.AttributeValueMemberS{Value: "lookup_pending"},
+		},
+	})
+	if err != nil {
+		if strings.Contains(err.Error(), "ConditionalCheckFailedException") {
+			return nil
+		}
+		return fmt.Errorf("finalize live session: %w", err)
+	}
+	msg, _ := json.Marshal(map[string]any{"job_id": id, "incremental": false})
+	if _, err := sqsClient.SendMessage(ctx, &sqs.SendMessageInput{QueueUrl: aws.String(lookupQueueURL), MessageBody: aws.String(string(msg))}); err != nil {
 		_, _ = ddbClient.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 			TableName: aws.String(jobsTable), Key: map[string]ddbtypes.AttributeValue{"job_id": &ddbtypes.AttributeValueMemberS{Value: id}},
-			UpdateExpression: aws.String("SET #s = :collecting"), ConditionExpression: aws.String("#s = :pending"),
-			ExpressionAttributeNames: map[string]string{"#s": "status"}, ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-				":collecting": &ddbtypes.AttributeValueMemberS{Value: "collecting"}, ":pending": &ddbtypes.AttributeValueMemberS{Value: "pending"},
-			},
+			UpdateExpression:          aws.String("SET #s = :processing REMOVE final_lookup_queued"),
+			ExpressionAttributeNames:  map[string]string{"#s": "status"},
+			ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{":processing": &ddbtypes.AttributeValueMemberS{Value: "processing"}},
 		})
-		return errJSON(500, err.Error()), nil
+		return fmt.Errorf("queue final lookup: %w", err)
 	}
-	return okJSON(202, map[string]any{"job_id": id, "accepted_frames": len(keys)}), nil
+	return nil
 }
 func liveSessionCancel(ctx context.Context, path string) (events.APIGatewayV2HTTPResponse, error) {
 	id := liveSessionID(path, "/cancel")
@@ -316,6 +391,25 @@ func searchBooks(ctx context.Context, req events.APIGatewayV2HTTPRequest) (event
 	attachShelfCandidates(ctx, books)
 	attachCoverCache(ctx, books)
 	return okJSON(200, map[string]any{"books": books, "query": q}), nil
+}
+
+// ---- /api/books/featured ----
+func featuredBooks(ctx context.Context, req events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {
+	limit := 5
+	if value := req.QueryStringParameters["limit"]; value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	if bookStore == nil {
+		return errJSON(503, "library DB not available"), nil
+	}
+	books, err := bookStore.Featured(limit)
+	if err != nil {
+		return errJSON(500, err.Error()), nil
+	}
+	attachShelfCandidates(ctx, books)
+	return okJSON(200, map[string]any{"books": books}), nil
 }
 
 // ---- /api/books/{id} ----
@@ -877,8 +971,18 @@ func getJob(ctx context.Context, req events.APIGatewayV2HTTPRequest) (events.API
 		}
 	}
 
-	// status=done なら catalog.json を S3 から取って返す
-	if status, _ := resp["status"].(string); status == "done" {
+	// Live scan writes a partial catalog while status=collecting/processing.
+	// Return it as soon as catalog_key exists so the camera UI can update.
+	if key, _ := resp["catalog_key"].(string); key != "" {
+		obj, err := s3Client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
+		if err == nil {
+			defer obj.Body.Close()
+			var catalog any
+			if err := json.NewDecoder(obj.Body).Decode(&catalog); err == nil {
+				resp["catalog"] = catalog
+			}
+		}
+	} else if status, _ := resp["status"].(string); status == "done" {
 		key := fmt.Sprintf("catalogs/%s/catalog.json", id)
 		obj, err := s3Client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
 		if err == nil {
@@ -942,7 +1046,7 @@ func getCrop(ctx context.Context, rawPath string) (events.APIGatewayV2HTTPRespon
 
 // ---- GET /api/shelves ----
 func getShelves(ctx context.Context) (events.APIGatewayV2HTTPResponse, error) {
-	key := "assets/apriltag_shelf_map.json"
+	key := "assets/apriltag_library_map.json"
 	obj, err := s3Client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
 	if err != nil {
 		return okJSON(200, map[string]any{"shelves": []any{}}), nil

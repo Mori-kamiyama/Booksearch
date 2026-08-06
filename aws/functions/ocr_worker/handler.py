@@ -112,8 +112,43 @@ def gemini_ocr(image_bytes: bytes, mime: str) -> list[dict[str, Any]]:
     return parse_titles(response.text or "")
 
 
+def queue_final_lookup_if_ready(job_id: str, item: dict[str, Any]) -> None:
+    if not item.get("scan_closed"):
+        return
+    if int(item.get("processed_frames", 0)) < int(item.get("accepted_frames", 0)):
+        return
+    if int(item.get("ocr_done", 0)) < int(item.get("ocr_total", 0)):
+        return
+    try:
+        jobs_table.update_item(
+            Key={"job_id": job_id},
+            UpdateExpression="SET final_lookup_queued = :yes, #s = :pending",
+            ConditionExpression="attribute_not_exists(final_lookup_queued)",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={":yes": True, ":pending": "lookup_pending"},
+        )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return
+        raise
+    try:
+        sqs.send_message(
+            QueueUrl=LOOKUP_QUEUE_URL,
+            MessageBody=json.dumps({"job_id": job_id, "incremental": False}),
+        )
+    except Exception:
+        jobs_table.update_item(
+            Key={"job_id": job_id},
+            UpdateExpression="SET #s = :processing REMOVE final_lookup_queued",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={":processing": "processing"},
+        )
+        raise
+
+
 def process_one(job_id: str, crop_id: str, crop_key: str,
-                fingerprint_scope: str | None = None, phash: str | None = None) -> None:
+                fingerprint_scope: str | None = None, phash: str | None = None,
+                incremental: bool = False) -> None:
     print(f"[ocr] job_id={job_id} crop_id={crop_id}")
     obj = s3.get_object(Bucket=BUCKET, Key=crop_key)
     raw = obj["Body"].read()
@@ -176,7 +211,15 @@ def process_one(job_id: str, crop_id: str, crop_key: str,
         )
     )
     print(f"[ocr] progress {done}/{total}")
-    if total > 0 and done >= total:
+    if incremental:
+        # Each completed crop refreshes the partial catalog. SQS coalesces the
+        # work naturally, while the catalog write remains idempotent.
+        sqs.send_message(
+            QueueUrl=LOOKUP_QUEUE_URL,
+            MessageBody=json.dumps({"job_id": job_id, "incremental": True}),
+        )
+        queue_final_lookup_if_ready(job_id, item)
+    elif total > 0 and done >= total:
         # 最後の OCR が lookup_queue に投入
         sqs.send_message(
             QueueUrl=LOOKUP_QUEUE_URL,
@@ -195,6 +238,6 @@ def handler(event, context):
         body = json.loads(rec["body"])
         process_one(
             body["job_id"], body["crop_id"], body["crop_key"],
-            body.get("fingerprint_scope"), body.get("phash"),
+            body.get("fingerprint_scope"), body.get("phash"), bool(body.get("incremental")),
         )
     return {"ok": True}

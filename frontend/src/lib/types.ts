@@ -26,6 +26,7 @@ export interface ShelfCandidate {
   updated_at?: string
   avg_score?: number
   crop_url?: string
+  thumbnail?: string | null
 }
 
 export interface Job {
@@ -52,8 +53,8 @@ export interface LayoutUnit {
 
 export interface LayoutSlot {
   slot_id: string
-  shelf_id: string
-  recognition_code: string
+  shelf_id: string | null
+  recognition_code: string | null
   kind: 'base' | 'side'
   unit: string
   unit_index_from_entrance?: number

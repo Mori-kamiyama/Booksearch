@@ -39,6 +39,12 @@ aws/.aws-sam/
 .nvimlog
 .DS_Store
 .vercel
+.env
+.env.local
+.env.*.local
+*.key
+*.p12
+*.pfx
 
 # Vite local overrides
 frontend/.env.development.local

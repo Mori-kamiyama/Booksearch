@@ -69,6 +69,10 @@ func TestSearch_ByTitle(t *testing.T) {
 	if books[0].Title != "Go言語プログラミング" {
 		t.Errorf("wrong title: %q", books[0].Title)
 	}
+	wantThumbnail := "https://books.google.com/books/content?vid=ISBN9781234567890&printsec=frontcover&img=1&zoom=1&source=gbs_api"
+	if books[0].Thumbnail == nil || *books[0].Thumbnail != wantThumbnail {
+		t.Errorf("thumbnail: got %v, want %q", books[0].Thumbnail, wantThumbnail)
+	}
 }
 
 func TestSearch_AttachesShelfCandidates(t *testing.T) {

@@ -23,6 +23,7 @@ func buildRouter(h *handler.Handler) *gin.Engine {
 		api.POST("/scan", h.Scan)
 		api.POST("/scan/sessions", h.StartLiveSession)
 		api.PUT("/scan/sessions/:id/frames/:frame", h.UploadLiveFrame)
+		api.POST("/scan/sessions/:id/commit-frame", h.CommitLiveFrame)
 		api.POST("/scan/sessions/:id/complete", h.CompleteLiveSession)
 		api.POST("/scan/sessions/:id/cancel", h.CancelLiveSession)
 		api.GET("/jobs/:id", h.GetJob)

@@ -1,19 +1,19 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
+  "map_id": "booksearch-library-physical-v2",
   "coordinate_convention": {
-    "base_units": "4 parallel bookshelf units counted from the entrance side",
-    "base_cols": "1..13 counted from the entrance side",
-    "rows": "1..7 counted bottom to top",
-    "side_bookshelves": "4 side bookshelf units, each a 3 x 7 grid"
+    "canonical_cols": "Shelf IDs use stable canonical columns",
+    "display_cols": "Physical left-to-right columns; mirrored units reverse canonical columns",
+    "rows": "1..7 counted bottom to top"
   },
   "units": [
     {
       "unit": "base-01",
       "kind": "base",
       "unit_index_from_entrance": 1,
-      "mirrored": true,
       "cols": 13,
       "rows": 7,
+      "mirrored": true,
       "empty_rule": {
         "regions": [
           {
@@ -38,9 +38,9 @@
       "unit": "base-02",
       "kind": "base",
       "unit_index_from_entrance": 2,
-      "mirrored": true,
       "cols": 13,
       "rows": 7,
+      "mirrored": true,
       "empty_rule": {
         "regions": [
           {
@@ -65,9 +65,9 @@
       "unit": "base-03",
       "kind": "base",
       "unit_index_from_entrance": 3,
-      "mirrored": true,
       "cols": 13,
       "rows": 7,
+      "mirrored": true,
       "empty_rule": {
         "regions": [
           {
@@ -94,6 +94,7 @@
       "unit_index_from_entrance": 4,
       "cols": 13,
       "rows": 7,
+      "mirrored": false,
       "empty_rule": {
         "regions": [
           {
@@ -133,6 +134,7 @@
       "unit_index": 1,
       "cols": 3,
       "rows": 7,
+      "mirrored": false,
       "empty_rule": null
     },
     {
@@ -141,6 +143,7 @@
       "unit_index": 2,
       "cols": 3,
       "rows": 7,
+      "mirrored": false,
       "empty_rule": null
     },
     {
@@ -149,6 +152,7 @@
       "unit_index": 3,
       "cols": 3,
       "rows": 7,
+      "mirrored": false,
       "empty_rule": null
     },
     {
@@ -157,6 +161,7 @@
       "unit_index": 4,
       "cols": 3,
       "rows": 7,
+      "mirrored": false,
       "empty_rule": null
     }
   ],

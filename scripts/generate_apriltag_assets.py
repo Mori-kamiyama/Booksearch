@@ -1,4 +1,4 @@
-"""Generate AprilTag mapping and printable tag sheets for the library layout.
+"""Generate AprilTag mapping and printable sheets from the canonical map.
 
 Usage:
   uv run python scripts/generate_apriltag_assets.py
@@ -15,13 +15,18 @@ from typing import Any
 import cv2
 from PIL import Image, ImageDraw, ImageFont
 
+from generate_library_layout import build_layout, load_source
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_LAYOUT = REPO_ROOT / "data" / "library_layout.json"
+DEFAULT_SOURCE = REPO_ROOT / "data" / "library_map.json"
 DEFAULT_MAP = REPO_ROOT / "data" / "apriltag_library_map.json"
 DEFAULT_PRINT_DIR = REPO_ROOT / "outputs" / "apriltag_library"
-
-DICTIONARY_NAME = "DICT_APRILTAG_36h11"
+SYNC_MAP_OUTPUTS = (
+    REPO_ROOT / "api" / "tags" / "apriltag_library_map.json",
+    REPO_ROOT / "frontend" / "tag-placement" / "public" / "apriltag_library_map.json",
+    REPO_ROOT / "aws" / "functions" / "yolo_worker" / "assets" / "apriltag_library_map.json",
+)
 
 PRINT_DPI = 300
 A4_PX = (2480, 3508)  # 300dpi
@@ -33,10 +38,6 @@ TAG_SIZE_PX = TAG_TILE_PX - 2 * TAG_QUIET_PX  # 黒パターン本体のサイ�
 SHEET_MARGIN = 100
 SHEET_COLS = 4
 SHEET_ROWS = 5
-
-
-def load_layout(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def load_slots(layout: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -55,25 +56,12 @@ def units(layout: dict[str, Any]) -> list[dict[str, Any]]:
     return layout["units"]
 
 
-def load_slots_from_path(path: Path) -> dict[str, dict[str, Any]]:
-    layout = json.loads(path.read_text(encoding="utf-8"))
-    return {slot["slot_id"]: slot for slot in layout["slots"]}
-
-
 def shelf_id(slots: dict[str, dict[str, Any]], unit: str, col: int, row: int) -> str | None:
     slot_id = f"{unit}-c{col:02d}-r{row:02d}"
     slot = slots.get(slot_id)
     if not slot or slot["status"] != "usable":
         return None
     return slot["shelf_id"]
-
-
-def mirror_col(unit_cfg: dict[str, Any], col: int) -> int:
-    # タグの担当棚は、反転前の基準座標で決める。`mirrored` は実物の
-    # 見え方・タグの貼付位置のための属性であり、ここでは使わない。
-    if unit_cfg.get("tag_mapping_mirrored", False):
-        return int(unit_cfg["cols"]) + 1 - col
-    return col
 
 
 def quadrant_map_for_intersection(
@@ -83,13 +71,11 @@ def quadrant_map_for_intersection(
     y: int,
 ) -> dict[str, str]:
     unit = unit_cfg["unit"]
-    left = mirror_col(unit_cfg, x)
-    right = mirror_col(unit_cfg, x + 1)
     quadrants = {
-        "top_left": shelf_id(slots, unit, left, y + 1),
-        "top_right": shelf_id(slots, unit, right, y + 1),
-        "bottom_right": shelf_id(slots, unit, right, y),
-        "bottom_left": shelf_id(slots, unit, left, y),
+        "top_left": shelf_id(slots, unit, x, y + 1),
+        "top_right": shelf_id(slots, unit, x + 1, y + 1),
+        "bottom_right": shelf_id(slots, unit, x + 1, y),
+        "bottom_left": shelf_id(slots, unit, x, y),
     }
     return {name: sid for name, sid in quadrants.items() if sid}
 
@@ -148,7 +134,7 @@ def select_sparse_intersections(
     return selected
 
 
-def build_mapping(layout: dict[str, Any], slots: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def build_mapping(source: dict[str, Any], layout: dict[str, Any], slots: dict[str, dict[str, Any]]) -> dict[str, Any]:
     tags: dict[str, Any] = {}
     print_list: list[dict[str, Any]] = []
     candidates = candidate_intersections(layout, slots)
@@ -158,29 +144,46 @@ def build_mapping(layout: dict[str, Any], slots: dict[str, dict[str, Any]]) -> d
     for tag_id, candidate in enumerate(selected):
         unit = candidate["unit"]
         unit_cfg = units_by_id[unit]
-        # 1〜3台目は、初期図（3列・空白4列・6列）を左右反転した実物へ
-        # 貼られている。タグIDと担当棚は初期図のまま、物理交点だけを反転する。
+        # Quadrants always use canonical shelf IDs. Only the physical/display
+        # intersection is mirrored, matching the placement PNG.
         x = int(unit_cfg["cols"]) - int(candidate["x"]) if unit_cfg.get("mirrored", False) else candidate["x"]
         y = candidate["y"]
-        quadrants = candidate["quadrants"]
+        canonical_quadrants = candidate["quadrants"]
+        if unit_cfg.get("mirrored", False):
+            # The tag stays upright in the physical guide, so camera-left must
+            # point to the shelf physically left of the tag after mirroring.
+            mirrored_names = {
+                "top_left": "top_right",
+                "top_right": "top_left",
+                "bottom_right": "bottom_left",
+                "bottom_left": "bottom_right",
+            }
+            quadrants = {
+                physical_name: canonical_quadrants[canonical_name]
+                for physical_name, canonical_name in mirrored_names.items()
+                if canonical_name in canonical_quadrants
+            }
+        else:
+            quadrants = canonical_quadrants
         tags[str(tag_id)] = {
             "unit": unit,
-            "grid_intersection": {"between_cols": [x, x + 1], "between_rows": [y, y + 1]},
-            "expected_angle_deg": 0,
-            "angle_tolerance_deg": 35,
+            "physical_intersection": {"between_display_cols": [x, x + 1], "between_rows": [y, y + 1]},
+            "expected_angle_deg": source["tag_expected_angle_deg"],
+            "angle_tolerance_deg": source["tag_angle_tolerance_deg"],
             "quadrants": quadrants,
         }
         print_list.append({"tag_id": tag_id, "unit": unit, "x": x, "y": y, "quadrants": quadrants})
 
     return {
-        "schema_version": 1,
-        "dictionary": DICTIONARY_NAME,
-        "auto_distance_scale": 1.25,
-        "placement": "For mirrored units, tag IDs are placed at the horizontally mirrored intersection of the initial diagram.",
-        "tag_position_transform": "mirror_horizontal for units marked mirrored",
+        "schema_version": 2,
+        "map_id": source["map_id"],
+        "coordinate_schema_version": 2,
+        "dictionary": source["tag_dictionary"],
+        "auto_distance_scale": source["tag_auto_distance_scale"],
+        "placement": "physical_intersection uses display coordinates; quadrants use canonical shelf IDs.",
         "selection": {
-            "strategy": "sparse checkerboard intersections plus greedy single-coverage fill",
-            "coverage": "every usable shelf slot covered by at least one tag",
+            "strategy": source["tag_selection"]["strategy"],
+            "coverage": source["tag_selection"]["coverage"],
         },
         "tags": tags,
         "_print_list": print_list,
@@ -244,7 +247,7 @@ def draw_tag_cell(
     draw.rectangle((x0, y0, x0 + cell_w - 1, y0 + cell_h - 1), outline=(210, 210, 210), width=2)
 
 
-def write_print_sheets(print_list: list[dict[str, Any]], output_dir: Path) -> list[Path]:
+def write_print_sheets(print_list: list[dict[str, Any]], output_dir: Path, dictionary_name: str) -> list[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     for old_path in output_dir.glob("apriltag_library_sheet_*.png"):
         old_path.unlink()
@@ -252,7 +255,7 @@ def write_print_sheets(print_list: list[dict[str, Any]], output_dir: Path) -> li
     if old_pdf.exists():
         old_pdf.unlink()
 
-    dictionary = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, DICTIONARY_NAME))
+    dictionary = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, dictionary_name))
     pages: list[Image.Image] = []
     cell_w = (A4_PX[0] - SHEET_MARGIN * 2) // SHEET_COLS
     cell_h = (A4_PX[1] - SHEET_MARGIN * 2) // SHEET_ROWS
@@ -282,26 +285,34 @@ def write_print_sheets(print_list: list[dict[str, Any]], output_dir: Path) -> li
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--layout", default=str(DEFAULT_LAYOUT))
+    parser.add_argument("--source", default=str(DEFAULT_SOURCE))
     parser.add_argument("--map-output", default=str(DEFAULT_MAP))
     parser.add_argument("--print-dir", default=str(DEFAULT_PRINT_DIR))
+    parser.add_argument("--no-sync-consumers", action="store_true")
     args = parser.parse_args()
 
-    layout = load_layout(Path(args.layout))
+    source = load_source(Path(args.source))
+    layout = build_layout(source)
     slots = load_slots(layout)
-    mapping = build_mapping(layout, slots)
+    mapping = build_mapping(source, layout, slots)
     print_list = mapping.pop("_print_list")
 
     map_output = Path(args.map_output)
-    map_output.parent.mkdir(parents=True, exist_ok=True)
-    map_output.write_text(json.dumps(mapping, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    serialized_mapping = json.dumps(mapping, ensure_ascii=False, indent=2) + "\n"
+    outputs = [map_output]
+    if not args.no_sync_consumers:
+        outputs.extend(SYNC_MAP_OUTPUTS)
+    for output in outputs:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(serialized_mapping, encoding="utf-8")
 
     print_list_path = Path(args.print_dir) / "apriltag_library_print_list.json"
     print_list_path.parent.mkdir(parents=True, exist_ok=True)
     print_list_path.write_text(json.dumps(print_list, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-    page_paths = write_print_sheets(print_list, Path(args.print_dir))
-    print(f"wrote {map_output}")
+    page_paths = write_print_sheets(print_list, Path(args.print_dir), source["tag_dictionary"])
+    for output in outputs:
+        print(f"wrote {output}")
     print(f"wrote {print_list_path}")
     print(f"tags: {len(mapping['tags'])}")
     print(f"print files: {len(page_paths)}")

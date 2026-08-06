@@ -58,8 +58,8 @@ export default function SearchResultsPage() {
         )}
         {!loading && !error && books.length > 0 && (
           <>
-            <p className="mt-6 text-right text-base leading-[19px] text-ink md:mt-[11px]">{books.length}件ヒット</p>
-            <div className="mt-6 grid grid-cols-2 gap-x-2 gap-y-[19px] md:mt-[11px] md:grid-cols-5 md:gap-x-[30px] md:gap-y-[30px]">
+            <p className="mt-[32px] text-right text-base leading-[19px] text-ink">{books.length}件ヒット</p>
+            <div className="mt-[32px] grid grid-cols-2 gap-x-2 gap-y-[19px] md:mt-[28px] md:grid-cols-5 md:gap-x-[30px] md:gap-y-[30px]">
               {books.map(book => (
                 <SearchResultCard key={book.id} book={book} onOpen={() => navigate(`/books/${book.id}?q=${encodeURIComponent(sourceQuery)}`)} />
               ))}
@@ -75,7 +75,9 @@ function SearchResultCard({ book, onOpen }: { book: Book; onOpen: () => void }) 
   const cover = book.thumbnail || fallbackCoverForTitle(book.title)
   return (
     <button type="button" onClick={onOpen} className="tap-card flex min-w-0 flex-col items-center gap-2 rounded-lg text-center">
-      {cover ? <img src={cover} alt="" className="h-[199px] w-[141px] bg-[#d9d9d9] object-cover md:h-[208px] md:w-[153px]" loading="lazy" /> : <div className="h-[199px] w-[141px] bg-[#d9d9d9] md:h-[208px] md:w-[153px]" />}
+      <div className="flex h-[199px] w-[141px] items-end justify-center md:h-[208px] md:w-[153px]">
+        {cover ? <img src={cover} alt="" className="max-h-full max-w-full bg-[#d9d9d9] object-contain" loading="lazy" /> : <div className="h-full w-full bg-[#d9d9d9]" />}
+      </div>
       <span className="line-clamp-2 w-full text-base leading-normal text-ink md:text-[15px]">{book.title}</span>
     </button>
   )

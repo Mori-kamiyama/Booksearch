@@ -1,4 +1,4 @@
-"""Generate the library shelf layout JSON.
+"""Generate the compatibility shelf-layout JSON from the canonical map.
 
 Usage:
   uv run python scripts/generate_library_layout.py
@@ -14,112 +14,84 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUT = REPO_ROOT / "data" / "library_layout.json"
-BASE_UNITS = 4
-SIDE_UNITS = 4
-
-# base ユニットの空白区画。最大の 4列×5段。
-BASE_EMPTY_LARGE = {"cols": [4, 5, 6, 7], "rows": [1, 2, 3, 4, 5]}
-# 2つ目の区画は 4列×3段で、上端(row5)を1つ目の空白と揃える。
-BASE_EMPTY_SMALL = {"cols": [10, 11, 12, 13], "rows": [3, 4, 5]}
+DEFAULT_SOURCE = REPO_ROOT / "data" / "library_map.json"
+SYNC_LAYOUT_OUTPUTS = (
+    REPO_ROOT / "frontend" / "src" / "data" / "library_layout.json",
+)
 
 
-def empty_regions_for_unit(unit: int) -> list[dict[str, Any]]:
-    # base-01〜03 は最大の 4×5 区画のみ。base-04 のみ小区画も空白。
-    if unit == 4:
-        return [BASE_EMPTY_LARGE, BASE_EMPTY_SMALL]
-    return [BASE_EMPTY_LARGE]
+def load_source(path: Path = DEFAULT_SOURCE) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
-def is_base_empty(unit: int, col: int, row: int) -> bool:
+def compatibility_regions(unit: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {"cols": region["canonical_cols"], "rows": region["rows"]}
+        for region in unit.get("empty_regions", [])
+    ]
+
+
+def is_empty(unit: dict[str, Any], col: int, row: int) -> bool:
     return any(
-        col in region["cols"] and row in region["rows"]
-        for region in empty_regions_for_unit(unit)
+        col in region["canonical_cols"] and row in region["rows"]
+        for region in unit.get("empty_regions", [])
     )
 
 
-def base_slot(unit: int, col: int, row: int) -> dict[str, Any]:
-    is_empty = is_base_empty(unit, col, row)
-    shelf_id = f"base-{unit:02d}-c{col:02d}-r{row:02d}"
+def slot_for(unit: dict[str, Any], col: int, row: int) -> dict[str, Any]:
+    empty = is_empty(unit, col, row)
+    unit_id = unit["unit"]
+    shelf_id = f"{unit_id}-c{col:02d}-r{row:02d}"
+    if unit["kind"] == "base":
+        label = f"入口側から{unit['unit_index_from_entrance']}台目 {col}列目 下から{row}段目"
+    else:
+        label = f"サイド本棚{unit['unit_index']}台目 {col}列目 下から{row}段目"
     return {
         "slot_id": shelf_id,
-        "shelf_id": shelf_id if not is_empty else None,
-        "recognition_code": shelf_id if not is_empty else None,
-        "kind": "base",
-        "unit": f"base-{unit:02d}",
-        "unit_index_from_entrance": unit,
+        "shelf_id": shelf_id if not empty else None,
+        "recognition_code": shelf_id if not empty else None,
+        "kind": unit["kind"],
+        "unit": unit_id,
+        **({"unit_index_from_entrance": unit["unit_index_from_entrance"]} if unit["kind"] == "base" else {"unit_index": unit["unit_index"]}),
         "col": col,
         "row": row,
-        "status": "empty" if is_empty else "usable",
-        "label_ja": f"入口側から{unit}台目 {col}列目 下から{row}段目",
+        "status": "empty" if empty else "usable",
+        "label_ja": label,
     }
 
 
-def side_slot(unit: int, col: int, row: int) -> dict[str, Any]:
-    shelf_id = f"side-{unit:02d}-c{col:02d}-r{row:02d}"
-    return {
-        "slot_id": shelf_id,
-        "shelf_id": shelf_id,
-        "recognition_code": shelf_id,
-        "kind": "side",
-        "unit": f"side-{unit:02d}",
-        "unit_index": unit,
-        "col": col,
-        "row": row,
-        "status": "usable",
-        "label_ja": f"サイド本棚{unit}台目 {col}列目 下から{row}段目",
-    }
-
-
-def build_layout() -> dict[str, Any]:
+def build_layout(source: dict[str, Any] | None = None) -> dict[str, Any]:
+    source = source or load_source()
     slots: list[dict[str, Any]] = []
-    for unit in range(1, BASE_UNITS + 1):
-        for col in range(1, 14):
-            for row in range(1, 8):
-                slots.append(base_slot(unit, col, row))
-
-    for unit in range(1, SIDE_UNITS + 1):
-        for col in range(1, 4):
-            for row in range(1, 8):
-                slots.append(side_slot(unit, col, row))
+    for unit in source["units"]:
+        for col in range(1, int(unit["cols"]) + 1):
+            for row in range(1, int(unit["rows"]) + 1):
+                slots.append(slot_for(unit, col, row))
 
     usable_slots = [slot for slot in slots if slot["status"] == "usable"]
     empty_slots = [slot for slot in slots if slot["status"] == "empty"]
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
+        "map_id": source["map_id"],
         "coordinate_convention": {
-            "base_units": "4 parallel bookshelf units counted from the entrance side",
-            "base_cols": "1..13 counted from the entrance side",
+            "canonical_cols": "Shelf IDs use stable canonical columns",
+            "display_cols": "Physical left-to-right columns; mirrored units reverse canonical columns",
             "rows": "1..7 counted bottom to top",
-            "side_bookshelves": "4 side bookshelf units, each a 3 x 7 grid",
         },
         "units": [
             {
-                "unit": f"base-{unit:02d}",
-                "kind": "base",
-                "unit_index_from_entrance": unit,
-                "cols": 13,
-                "rows": 7,
-                "empty_rule": {"regions": empty_regions_for_unit(unit)},
+                **{key: value for key, value in unit.items() if key not in {"display_mirrored", "empty_regions"}},
+                "mirrored": bool(unit.get("display_mirrored", False)),
+                "empty_rule": {"regions": compatibility_regions(unit)} if unit.get("empty_regions") else None,
             }
-            for unit in range(1, BASE_UNITS + 1)
-        ]
-        + [
-            {
-                "unit": f"side-{unit:02d}",
-                "kind": "side",
-                "unit_index": unit,
-                "cols": 3,
-                "rows": 7,
-                "empty_rule": None,
-            }
-            for unit in range(1, SIDE_UNITS + 1)
+            for unit in source["units"]
         ],
         "counts": {
             "total_slots_including_empty": len(slots),
             "usable_slots": len(usable_slots),
             "empty_slots": len(empty_slots),
-            "base_slots_including_empty": BASE_UNITS * 13 * 7,
+            "base_slots_including_empty": sum(1 for slot in slots if slot["kind"] == "base"),
             "base_usable_slots": sum(1 for slot in usable_slots if slot["kind"] == "base"),
             "base_empty_slots": sum(1 for slot in empty_slots if slot["kind"] == "base"),
             "side_usable_slots": sum(1 for slot in usable_slots if slot["kind"] == "side"),
@@ -130,17 +102,21 @@ def build_layout() -> dict[str, Any]:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--source", default=str(DEFAULT_SOURCE))
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT))
+    parser.add_argument("--no-sync-consumers", action="store_true")
     args = parser.parse_args()
 
     output = Path(args.output)
-    layout = build_layout()
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(
-        json.dumps(layout, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    print(f"wrote {output}")
+    layout = build_layout(load_source(Path(args.source)))
+    serialized_layout = json.dumps(layout, ensure_ascii=False, indent=2) + "\n"
+    outputs = [output]
+    if not args.no_sync_consumers:
+        outputs.extend(SYNC_LAYOUT_OUTPUTS)
+    for destination in outputs:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(serialized_layout, encoding="utf-8")
+        print(f"wrote {destination}")
     print(json.dumps(layout["counts"], ensure_ascii=False, indent=2))
 
 

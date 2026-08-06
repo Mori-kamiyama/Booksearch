@@ -201,7 +201,7 @@ aws/
     │   ├── requirements.txt
     │   └── assets/            # prepare_assets.sh が生成
     │       ├── yolo_model.pt
-    │       ├── apriltag_shelf_map.json
+    │       ├── apriltag_library_map.json
     │       └── known_books.json
     ├── ocr_worker/            # Python zip Lambda
     │   ├── handler.py         # Gemini OCR + ATOMIC INCR

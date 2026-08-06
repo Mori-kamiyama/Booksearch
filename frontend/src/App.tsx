@@ -1,4 +1,5 @@
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom'
+import { useEffect } from 'react'
 import SearchPage from './pages/SearchPage'
 import SearchResultsPage from './pages/SearchResultsPage'
 import ScanPage from './pages/ScanPage'
@@ -9,7 +10,7 @@ import BookDetailPage from './pages/BookDetailPage'
 import IndexPage from './pages/IndexPage'
 import MapPage from './pages/MapPage'
 import ShelfDetailPage from './pages/ShelfDetailPage'
-import { BottomTabs, SiteHeader } from './components/common'
+import { SiteFooter, SiteHeader } from './components/common'
 
 export default function App() {
   return (
@@ -23,11 +24,22 @@ function AppShell() {
   const { pathname } = useLocation()
   const isScanFlow = pathname === '/scan' || pathname.startsWith('/jobs/')
   const usesFigmaLayout = pathname === '/' || pathname === '/search' || pathname === '/index' || pathname.startsWith('/books/') || isScanFlow
+  const isHome = pathname === '/'
+  const needsHeaderPadding = !isScanFlow && !isHome
+
+  useEffect(() => {
+    document.documentElement.classList.toggle('home-scroll-lock', isHome)
+    document.body.classList.toggle('home-scroll-lock', isHome)
+    return () => {
+      document.documentElement.classList.remove('home-scroll-lock')
+      document.body.classList.remove('home-scroll-lock')
+    }
+  }, [isHome])
 
   return (
-    <div className={`min-h-screen ${usesFigmaLayout ? 'bg-white' : 'bg-surface pb-20 md:pb-0'}`}>
+    <div className={`min-h-screen flex flex-col ${usesFigmaLayout ? 'bg-white' : 'bg-surface'} ${isHome ? 'h-svh overflow-hidden' : ''}`}>
       {!isScanFlow && <SiteHeader />}
-      <main className={usesFigmaLayout ? 'w-full' : 'mx-auto w-full max-w-5xl px-4 py-6'}>
+      <main className={`flex-grow ${usesFigmaLayout ? 'w-full' : 'mx-auto w-full max-w-5xl px-4 pb-6'} ${isHome ? 'h-svh overflow-hidden' : ''} ${needsHeaderPadding ? (usesFigmaLayout ? 'pt-[72px] md:pt-[88px]' : 'pt-[96px] md:pt-[120px]') : ''}`}>
         <Routes>
           <Route path="/" element={<SearchPage />} />
           <Route path="/search" element={<SearchResultsPage />} />
@@ -43,7 +55,7 @@ function AppShell() {
           <Route path="/tag-placement" element={<Navigate to="/admin/tags" replace />} />
         </Routes>
       </main>
-      {!usesFigmaLayout && <BottomTabs />}
+      {!isScanFlow && <SiteFooter />}
     </div>
   )
 }

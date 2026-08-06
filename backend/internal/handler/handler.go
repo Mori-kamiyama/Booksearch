@@ -261,6 +261,31 @@ func (h *Handler) UploadLiveFrame(c *gin.Context) {
 	c.JSON(201, gin.H{"frame_id": frame})
 }
 
+// CommitLiveFrame mirrors the AWS live-session contract. Local development
+// keeps the uploaded frame ready for the batch pipeline started on complete;
+// production enqueues it for incremental YOLO/OCR processing at this point.
+func (h *Handler) CommitLiveFrame(c *gin.Context) {
+	id := c.Param("id")
+	s, err := h.readLiveSession(id)
+	if err != nil || s.Status != "collecting" {
+		c.JSON(404, gin.H{"error": "live session not collecting"})
+		return
+	}
+	var payload struct {
+		FrameKey string `json:"frame_key"`
+	}
+	if err := c.ShouldBindJSON(&payload); err != nil || payload.FrameKey == "" {
+		c.JSON(400, gin.H{"error": "frame_key is required"})
+		return
+	}
+	frame := filepath.Base(payload.FrameKey)
+	if _, err := os.Stat(filepath.Join(h.JobsDir, "live", id, "frames", frame)); err != nil {
+		c.JSON(409, gin.H{"error": "frame upload is not visible yet"})
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"session_id": id, "frame_key": frame, "status": "ready"})
+}
+
 func (h *Handler) CompleteLiveSession(c *gin.Context) {
 	id := c.Param("id")
 	s, err := h.readLiveSession(id)

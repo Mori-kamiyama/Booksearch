@@ -1,10 +1,13 @@
-import { useCallback, useEffect, useState, useRef } from 'react'
-import { ArrowUpLeft } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useState, useRef } from 'react'
+import { ArrowLeft } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { apiFetch, apiUrl } from '../lib/api'
 import { frameMetrics, shouldSendFrame, type FrameSkipReason } from '../lib/liveFrameGate'
-import { detectBrowserAprilTags } from '../lib/browserAprilTag'
+import { detectBrowserAprilTags, isBrowserAprilTagReady } from '../lib/browserAprilTag'
 import { StableTagTracker } from '../lib/stableTagTracker'
+import { cameraAccessErrorMessage } from '../lib/cameraAccess'
+import embeddedShelfMap from '../../../data/apriltag_library_map.json'
+import { fallbackCoverForTitle } from '../data/figmaBooks'
 
 interface LiveDetectedTag {
   tag_id: number
@@ -14,10 +17,12 @@ interface LiveDetectedTag {
 }
 
 interface LiveDetectResponse {
+  map_id?: string
   tags: LiveDetectedTag[]
 }
 
 interface ShelfTagMap {
+  map_id?: string
   tags?: Record<string, { unit?: string; quadrants?: Record<string, string> }>
 }
 
@@ -25,6 +30,47 @@ interface ShelfEvent {
   id: string
   label: string
   time: string
+}
+
+interface TrackedTag {
+  tagId: number
+  label: string
+  firstSeenAt: number
+  lastSeenAt: number
+}
+
+interface LiveCatalogCandidate {
+  title?: string
+  thumbnail?: string
+  library_db_id?: number
+  match_confidence?: string
+}
+
+interface LiveCatalog {
+  entries?: Array<{
+    shelf_id?: string | null
+    books?: Array<{
+      title?: string
+      book_lookup?: { candidates?: LiveCatalogCandidate[] }
+    }>
+  }>
+}
+
+interface LiveJobState {
+  job_id: string
+  status: string
+  accepted_frames?: number
+  processed_frames?: number
+  crop_total?: number
+  ocr_total?: number
+  ocr_done?: number
+  catalog?: LiveCatalog
+}
+
+interface ShelfAnnouncement {
+  id: number
+  title: string
+  detail: string
 }
 
 export default function ScanPage() {
@@ -38,6 +84,13 @@ export default function ScanPage() {
   const videoRef = useRef<HTMLVideoElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [recording, setRecording] = useState(false)
+  const [cameraStarting, setCameraStarting] = useState(false)
+  const [stopping, setStopping] = useState(false)
+  const [liveJobId, setLiveJobId] = useState('')
+  const [completedJobId, setCompletedJobId] = useState('')
+  const [liveJob, setLiveJob] = useState<LiveJobState | null>(null)
+  const [lastQualityIssue, setLastQualityIssue] = useState<{ reason: 'blurred' | 'glare'; at: number } | null>(null)
+  const [shelfAnnouncement, setShelfAnnouncement] = useState<ShelfAnnouncement | null>(null)
   const [cameraReady, setCameraReady] = useState(false)
   const [detecting, setDetecting] = useState(false)
   const [browserDetecting, setBrowserDetecting] = useState(false)
@@ -46,15 +99,22 @@ export default function ScanPage() {
   const [detectedTags, setDetectedTags] = useState<LiveDetectedTag[]>([])
   const [currentShelfLabel, setCurrentShelfLabel] = useState('棚を探しています')
   const [shelfEvents, setShelfEvents] = useState<ShelfEvent[]>([])
-  const [shelfTagMap, setShelfTagMap] = useState<ShelfTagMap>({})
+  const [trackedTags, setTrackedTags] = useState<TrackedTag[]>([])
+  const [activeTagIds, setActiveTagIds] = useState<number[]>([])
+  const [shelfTagMap, setShelfTagMap] = useState<ShelfTagMap>(embeddedShelfMap as ShelfTagMap)
+  const shelfTagMapRef = useRef<ShelfTagMap>({})
   const streamRef = useRef<MediaStream | null>(null)
+  const cameraRequestRef = useRef(0)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const browserCanvasRef = useRef<HTMLCanvasElement>(null)
   const detectTimerRef = useRef<number | null>(null)
   const browserDetectTimerRef = useRef<number | null>(null)
   const detectingRef = useRef(false)
   const browserDetectingRef = useRef(false)
-  const stableTagTrackerRef = useRef(new StableTagTracker(3))
+  const browserDetectionActiveRef = useRef(false)
+  const trackingEnabledRef = useRef(false)
+  const stableTagTrackerRef = useRef(new StableTagTracker(2))
+  const announcedTagSetsRef = useRef(new Set<string>())
   const scanCanvasRef = useRef<HTMLCanvasElement>(null)
   const captureCanvasRef = useRef<HTMLCanvasElement>(null)
   const scanAnimationRef = useRef<number | null>(null)
@@ -67,6 +127,39 @@ export default function ScanPage() {
   const navigate = useNavigate()
 
   useEffect(() => {
+    if (!shelfAnnouncement) return
+    const timer = window.setTimeout(() => setShelfAnnouncement(current => current?.id === shelfAnnouncement.id ? null : current), 2800)
+    return () => window.clearTimeout(timer)
+  }, [shelfAnnouncement])
+
+  useEffect(() => {
+    if (!liveJobId) return
+    let cancelled = false
+    let timer: number | null = null
+    const poll = async () => {
+      let finished = false
+      try {
+        const response = await apiFetch(`/api/jobs/${liveJobId}`)
+        if (response.ok && !cancelled) {
+          const data = await response.json() as LiveJobState
+          setLiveJob(data)
+          finished = ['done', 'failed', 'no_detection', 'no_readable_crops'].includes(data.status)
+        }
+      } catch {
+        // The local backend creates its batch job only at completion. AWS uses
+        // the session ID immediately, so a local 404 while recording is normal.
+      } finally {
+        if (!cancelled && !finished) timer = window.setTimeout(() => void poll(), 650)
+      }
+    }
+    void poll()
+    return () => {
+      cancelled = true
+      if (timer != null) window.clearTimeout(timer)
+    }
+  }, [liveJobId])
+
+  useEffect(() => {
     if (!file?.type.startsWith('image/')) {
       setFilePreview('')
       return
@@ -76,7 +169,67 @@ export default function ScanPage() {
     return () => URL.revokeObjectURL(preview)
   }, [file])
 
+  useEffect(() => {
+    shelfTagMapRef.current = shelfTagMap
+  }, [shelfTagMap])
+
+  const trackDetectedTags = useCallback((tagIds: number[]) => {
+    const normalized = [...new Set(tagIds)].sort((a, b) => a - b)
+    setActiveTagIds(normalized)
+
+    if (normalized.length === 0) {
+      stableTagTrackerRef.current.update([])
+      return
+    }
+
+    const now = Date.now()
+    const activePrimary = shelfTagMapRef.current.tags?.[String(normalized[0])]
+    const activeLabel = activePrimary?.unit
+      ? `${activePrimary.unit}（tag ${normalized.join(', ')}）`
+      : `tag ${normalized.join(', ')}`
+    setCurrentShelfLabel(activeLabel)
+    setTrackedTags(previous => {
+      const byId = new Map(previous.map(tag => [tag.tagId, tag]))
+      for (const tagId of normalized) {
+        const existing = byId.get(tagId)
+        const unit = shelfTagMapRef.current.tags?.[String(tagId)]?.unit
+        byId.set(tagId, {
+          tagId,
+          label: unit ?? `tag ${tagId}`,
+          firstSeenAt: existing?.firstSeenAt ?? now,
+          lastSeenAt: now,
+        })
+      }
+      return [...byId.values()].sort((a, b) => b.lastSeenAt - a.lastSeenAt)
+    })
+
+    const event = stableTagTrackerRef.current.update(normalized)
+    if (!event) return
+
+    const primary = shelfTagMapRef.current.tags?.[String(event.tagIds[0])]
+    const label = primary?.unit
+      ? `${primary.unit}（tag ${event.tagIds.join(', ')}）`
+      : `tag ${event.tagIds.join(', ')}`
+    const isNewShelf = !announcedTagSetsRef.current.has(event.key)
+    setCurrentShelfLabel(label)
+
+    if (isNewShelf) {
+      announcedTagSetsRef.current.add(event.key)
+      const time = new Date().toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+      setShelfEvents(events => [{ id: event.key, label, time }, ...events].slice(0, 6))
+      setLiveStatus(`新しい棚を検知しました。${label}を記録しました。`)
+      setShelfAnnouncement({
+        id: now,
+        title: '新しい棚を検知しました！',
+        detail: `${label}は確認済みです。次の棚へ移動してください。`,
+      })
+    } else {
+      setLiveStatus(`認識済みの棚を追跡中です。${label}`)
+    }
+  }, [])
+
   const detectFrame = useCallback(async () => {
+    if (!trackingEnabledRef.current) return
     if (detectingRef.current) return
     const video = videoRef.current
     const canvas = canvasRef.current
@@ -99,26 +252,38 @@ export default function ScanPage() {
       form.append('image', blob, 'live-scan-frame.jpg')
       const response = await apiFetch('/api/tags/detect', { method: 'POST', body: form })
       if (!response.ok) throw new Error(await response.text())
+      if (!trackingEnabledRef.current) return
       const data = (await response.json()) as LiveDetectResponse
+      if (data.map_id && data.map_id !== shelfTagMapRef.current.map_id) {
+        throw new Error(`配置データの版が一致しません: ${data.map_id}`)
+      }
       const tags = data.tags ?? []
       setDetectedTags(tags)
       const usable = tags.find(tag => tag.mapped && tag.orientation_status !== 'mismatch')
-      if (usable) {
-        setLiveStatus(`tag ${usable.tag_id} を認識中。${usable.placement ?? '棚の位置を確認できます。'}`)
-      } else if (tags.length > 0) {
-        setLiveStatus(`tag ${tags.map(tag => tag.tag_id).join(', ')} を検出しました。向きか配置表を確認してください。`)
-      } else {
-        setLiveStatus('タグを探しています。棚のタグを画面中央に写してください。')
+      if (!browserDetectionActiveRef.current) {
+        if (usable) {
+          setLiveStatus(`tag ${usable.tag_id} を認識中。${usable.placement ?? '棚の位置を確認できます。'}`)
+        } else if (tags.length > 0) {
+          setLiveStatus(`tag ${tags.map(tag => tag.tag_id).join(', ')} を検出しました。向きか配置表を確認してください。`)
+        } else {
+          setLiveStatus('タグを探しています。棚のタグを画面中央に写してください。')
+        }
+        trackDetectedTags(tags
+          .filter(tag => tag.mapped && tag.orientation_status !== 'mismatch')
+          .map(tag => tag.tag_id))
       }
     } catch (detectionError) {
-      setLiveStatus(`ライブ検出に失敗しました: ${detectionError instanceof Error ? detectionError.message : String(detectionError)}`)
+      if (!browserDetectionActiveRef.current) {
+        setLiveStatus(`ライブ検出に失敗しました: ${detectionError instanceof Error ? detectionError.message : String(detectionError)}`)
+      }
     } finally {
       detectingRef.current = false
       setDetecting(false)
     }
-  }, [])
+  }, [trackDetectedTags])
 
   const detectBrowserFrame = useCallback(async () => {
+    if (!trackingEnabledRef.current) return
     if (browserDetectingRef.current) return
     const video = videoRef.current
     const canvas = browserCanvasRef.current
@@ -127,40 +292,40 @@ export default function ScanPage() {
     browserDetectingRef.current = true
     setBrowserDetecting(true)
     try {
-      const width = Math.min(960, video.videoWidth)
+      const width = Math.min(1280, video.videoWidth)
       canvas.width = width
       canvas.height = Math.round((width / video.videoWidth) * video.videoHeight)
       const context = canvas.getContext('2d')
       if (!context) return
       context.drawImage(video, 0, 0, canvas.width, canvas.height)
       const tags = await detectBrowserAprilTags(canvas)
+      if (!trackingEnabledRef.current) return
       setOpencvState('ready')
-      const event = stableTagTrackerRef.current.update(tags.map(tag => tag.tagId))
-      if (!event) return
+      browserDetectionActiveRef.current = true
+      if (tags.length > 0) {
+        setLiveStatus(`tag ${tags.map(tag => tag.tagId).join(', ')} を追跡しています…`)
+      } else {
+        setLiveStatus('次の棚を探しています。カメラをゆっくり動かしてください。')
+      }
+      trackDetectedTags(tags.map(tag => tag.tagId))
 
-      const primary = shelfTagMap.tags?.[String(event.tagIds[0])]
-      const label = primary?.unit
-        ? `${primary.unit}（tag ${event.tagIds.join(', ')}）`
-        : `tag ${event.tagIds.join(', ')}`
-      const time = new Date().toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-      setCurrentShelfLabel(label)
-      setShelfEvents(events => [{ id: `${event.key}-${Date.now()}`, label, time }, ...events].slice(0, 6))
-      setLiveStatus(`新しい棚を検知しました。${label}を確認しています…`)
-
-      // Browser detection is the low-latency trigger. Ask the backend for the
-      // authoritative orientation/quadrant/shelf assignment on this frame.
-      void detectFrame()
+      // Browser detection is usable on its own. The backend remains an
+      // optional authoritative orientation/quadrant/shelf assignment pass.
+      if (tags.length > 0) void detectFrame()
     } catch (browserError) {
       setOpencvState('fallback')
-      setLiveStatus(`ブラウザ検知を利用できないため、サーバー検知を使用中です。`)
-      if (browserError instanceof Error) console.warn(browserError)
+      browserDetectionActiveRef.current = false
+      const detail = browserError instanceof Error ? browserError.message : String(browserError)
+      setLiveStatus(`ブラウザ検知を利用できないため、サーバー検知を使用中です。${detail}`)
+      console.warn('browser AprilTag detection failed', browserError)
     } finally {
       browserDetectingRef.current = false
       setBrowserDetecting(false)
     }
-  }, [detectFrame, shelfTagMap])
+  }, [detectFrame, trackDetectedTags])
 
-  const stopCamera = useCallback(() => {
+  const stopTagDetection = useCallback(() => {
+    trackingEnabledRef.current = false
     if (detectTimerRef.current != null) {
       window.clearInterval(detectTimerRef.current)
       detectTimerRef.current = null
@@ -169,6 +334,13 @@ export default function ScanPage() {
       window.clearInterval(browserDetectTimerRef.current)
       browserDetectTimerRef.current = null
     }
+    setActiveTagIds([])
+    browserDetectionActiveRef.current = false
+  }, [])
+
+  const stopCamera = useCallback(() => {
+    cameraRequestRef.current += 1
+    stopTagDetection()
     streamRef.current?.getTracks().forEach(track => track.stop())
     streamRef.current = null
     if (videoRef.current) videoRef.current.srcObject = null
@@ -180,46 +352,61 @@ export default function ScanPage() {
     if (abandoned) void apiFetch(`/api/scan/sessions/${abandoned.id}/cancel`, { method: 'POST' })
     setRecording(false)
     setCameraReady(false)
-  }, [])
+  }, [stopTagDetection])
 
-  const startCamera = useCallback(async () => {
+  const startCamera = useCallback(async (): Promise<boolean> => {
+    const requestId = cameraRequestRef.current + 1
+    cameraRequestRef.current = requestId
+    setCameraStarting(true)
     try {
       setError('')
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
+      setLiveStatus('カメラを起動しています…')
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error('このブラウザではカメラを利用できません。')
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: 'environment' },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+        },
+        audio: false,
+      })
+      if (requestId !== cameraRequestRef.current) {
+        stream.getTracks().forEach(track => track.stop())
+        return false
+      }
+
       streamRef.current = stream
       if (videoRef.current) {
         videoRef.current.srcObject = stream
         await videoRef.current.play()
+        if (requestId !== cameraRequestRef.current) return false
         setCameraReady(true)
       }
-      try {
-        const mapResponse = await apiFetch('/api/shelves')
-        if (mapResponse.ok) setShelfTagMap(await mapResponse.json() as ShelfTagMap)
-      } catch {
-        setShelfTagMap({})
-      }
-      setOpencvState('loading')
-      setCurrentShelfLabel('棚を探しています')
-      setShelfEvents([])
-      setLiveStatus('タグを探しています。棚のタグを画面中央に写してください。')
-      await detectFrame()
-      void detectBrowserFrame()
-      detectTimerRef.current = window.setInterval(() => void detectFrame(), 1600)
-      browserDetectTimerRef.current = window.setInterval(() => void detectBrowserFrame(), 450)
-    } catch {
-      setError('カメラにアクセスできませんでした。')
+      setCurrentShelfLabel('スキャン待機中')
+      setLiveStatus('中央のボタンを押すと、棚の連続読み取りを開始します。')
+      return true
+    } catch (cameraError) {
+      if (requestId !== cameraRequestRef.current) return false
+      setError(cameraAccessErrorMessage(cameraError))
       stopCamera()
+      return false
+    } finally {
+      setCameraStarting(false)
     }
-  }, [detectBrowserFrame, detectFrame, stopCamera])
+  }, [stopCamera])
 
   useEffect(() => {
     if (mode !== 'camera') {
       stopCamera()
       return
     }
-    void startCamera()
+
+    setCurrentShelfLabel('カメラを開始してください')
+    setLiveStatus('中央のボタンを押すと、カメラ許可を確認してスキャンを開始します。')
     return stopCamera
-  }, [mode, startCamera, stopCamera])
+  }, [mode, stopCamera])
 
   const stopFrameLoop = () => {
     if (scanAnimationRef.current != null) cancelAnimationFrame(scanAnimationRef.current)
@@ -233,10 +420,31 @@ export default function ScanPage() {
       if (!res.ok) throw new Error(await res.text())
       const session = await res.json() as { session_id: string; frame_upload_url_template?: string; frame_upload_url_endpoint?: string }
       sessionRef.current = { id: session.session_id, template: session.frame_upload_url_template ?? session.frame_upload_url_endpoint ?? '' }
+      setLiveJobId(session.session_id)
+      setCompletedJobId('')
+      setLiveJob(null)
+      setStopping(false)
+      setLastQualityIssue(null)
       frameNumberRef.current = 0; lastEvaluationRef.current = 0
       scanGateRef.current = { lastSentAt: 0 }
       setScanStats({ evaluated: 0, sent: 0, skipped: {} })
+      stableTagTrackerRef.current.reset()
+      announcedTagSetsRef.current.clear()
+      setTrackedTags([])
+      setActiveTagIds([])
+      setShelfEvents([])
+      setCurrentShelfLabel('棚を探しています')
+      setLiveStatus('タグを探しています。カメラをゆっくり動かしてください。')
+      setOpencvState('loading')
+      trackingEnabledRef.current = true
       setRecording(true)
+      void isBrowserAprilTagReady().catch(() => setOpencvState('fallback'))
+      // Recording, browser/WASM tag detection, and server fallback run as
+      // independent loops after the user explicitly starts the scan.
+      void detectFrame()
+      void detectBrowserFrame()
+      detectTimerRef.current = window.setInterval(() => void detectFrame(), 1600)
+      browserDetectTimerRef.current = window.setInterval(() => void detectBrowserFrame(), 650)
       const loop = (now: number) => {
         if (!sessionRef.current) return
         if (now - lastEvaluationRef.current >= 1000 / 15) {
@@ -250,7 +458,10 @@ export default function ScanPage() {
               const evaluated = frameMetrics(ctx.getImageData(0, 0, canvas.width, canvas.height), scanGateRef.current.previous)
               const reason = shouldSendFrame(evaluated.metrics, now, scanGateRef.current)
               scanGateRef.current.previous = evaluated.sample
-              if (reason) setScanStats(s => ({ ...s, evaluated: s.evaluated + 1, skipped: { ...s.skipped, [reason]: (s.skipped[reason] ?? 0) + 1 } }))
+              if (reason) {
+                setScanStats(s => ({ ...s, evaluated: s.evaluated + 1, skipped: { ...s.skipped, [reason]: (s.skipped[reason] ?? 0) + 1 } }))
+                if (reason === 'blurred' || reason === 'glare') setLastQualityIssue({ reason, at: Date.now() })
+              }
               else {
                 scanGateRef.current.lastSentAt = now
                 const frame = `frame_${String(++frameNumberRef.current).padStart(6, '0')}.jpg`
@@ -265,13 +476,22 @@ export default function ScanPage() {
                   const activeSession = sessionRef.current
                   const upload = (async () => {
                     let url = activeSession.template.replace('{frame_id}', frame)
+                    let frameKey = frame
                     if (!activeSession.template.includes('{frame_id}')) {
                       const init = await apiFetch(activeSession.template, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ filename: frame }) })
                       if (!init.ok) throw new Error(`frame init ${init.status}`)
-                      url = (await init.json() as { upload_url: string }).upload_url
+                      const initialized = await init.json() as { upload_url: string; frame_key?: string }
+                      url = initialized.upload_url
+                      frameKey = initialized.frame_key ?? frame
                     }
                     const put = await fetch(apiUrl(url), { method: 'PUT', headers: { 'Content-Type': 'image/jpeg' }, body: blob })
                     if (!put.ok) throw new Error(`frame upload ${put.status}`)
+                    const commit = await apiFetch(`/api/scan/sessions/${activeSession.id}/commit-frame`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ frame_key: frameKey }),
+                    })
+                    if (!commit.ok) throw new Error(`frame commit ${commit.status}`)
                     setScanStats(s => ({ ...s, evaluated: s.evaluated + 1, sent: s.sent + 1 }))
                   })().catch(e => setError(`候補フレームの保存に失敗しました: ${String(e)}`))
                   pendingUploadsRef.current.add(upload)
@@ -288,7 +508,7 @@ export default function ScanPage() {
   }
 
   const stopRecording = async () => {
-    const session = sessionRef.current; stopFrameLoop(); setRecording(false)
+    const session = sessionRef.current; stopFrameLoop(); stopTagDetection(); setRecording(false); setStopping(true)
     if (!session) return
     try {
       await Promise.all([...pendingUploadsRef.current])
@@ -296,15 +516,28 @@ export default function ScanPage() {
       if (!res.ok) throw new Error(await res.text())
       const data = await res.json() as { job_id: string }
       sessionRef.current = null
-      navigate(`/jobs/${data.job_id}`)
+      setLiveJobId(data.job_id)
+      setCompletedJobId(data.job_id)
+      setLiveStatus('録画を終了しました。リザルトから認識結果を確認できます。')
     } catch (e) {
       setRecording(true)
       setError(`スキャン確定に失敗しました。再確定またはキャンセルできます: ${String(e)}`)
+    } finally {
+      setStopping(false)
     }
   }
 
   const cancelRecording = async () => {
-    const session = sessionRef.current; stopFrameLoop(); setRecording(false); sessionRef.current = null
+    const session = sessionRef.current; stopFrameLoop(); stopTagDetection(); setRecording(false); sessionRef.current = null
+    stableTagTrackerRef.current.reset()
+    announcedTagSetsRef.current.clear()
+    setTrackedTags([])
+    setShelfEvents([])
+    setCurrentShelfLabel('スキャン待機中')
+    setLiveStatus('中央のボタンを押すと、棚の連続読み取りを開始します。')
+    setLiveJobId('')
+    setLiveJob(null)
+    setCompletedJobId('')
     if (session) await apiFetch(`/api/scan/sessions/${session.id}/cancel`, { method: 'POST' })
   }
 
@@ -348,33 +581,82 @@ export default function ScanPage() {
     if (selected) setMode('upload')
   }
 
-  const primaryAction = () => {
+  const primaryAction = async () => {
     if (mode === 'upload') {
       void submit()
+    } else if (completedJobId) {
+      navigate(`/jobs/${completedJobId}`)
     } else if (recording) {
       void stopRecording()
+    } else if (!cameraReady) {
+      const started = await startCamera()
+      if (started) await startRecording()
     } else {
       void startRecording()
     }
   }
 
-  const statusLines = shelfEvents.length > 0
-    ? [`新しい棚を検知しました!`, '本を解析しています…']
-    : mode === 'upload'
-      ? [file?.name ?? '画像または動画を選択', file ? 'このファイルを解析します' : '右下のボタンから選択できます']
-      : import.meta.env.DEV
-        ? ['新しい棚を検知しました！', '本を解析しています…']
-        : [detecting || browserDetecting ? '棚を検知しています…' : currentShelfLabel, liveStatus]
-  const showDevCameraPreview = import.meta.env.DEV && mode === 'camera' && (!cameraReady || Boolean(error))
+  const liveBooks = useMemo(() => {
+    const books: Array<{ key: string; title: string; cover?: string; shelf?: string | null }> = []
+    const seen = new Set<string>()
+    for (const entry of liveJob?.catalog?.entries ?? []) {
+      for (const book of entry.books ?? []) {
+        const candidate = book.book_lookup?.candidates?.[0]
+        const title = candidate?.title || book.title
+        if (!title) continue
+        const key = String(candidate?.library_db_id ?? title.trim().toLocaleLowerCase('ja-JP'))
+        if (seen.has(key)) continue
+        seen.add(key)
+        books.push({ key, title, cover: candidate?.thumbnail || fallbackCoverForTitle(title), shelf: entry.shelf_id })
+      }
+    }
+    return books
+  }, [liveJob])
+  const processedFrames = Number(liveJob?.processed_frames ?? 0)
+  const cropTotal = Number(liveJob?.crop_total ?? 0)
+  const ocrTotal = Number(liveJob?.ocr_total ?? 0)
+  const ocrDone = Number(liveJob?.ocr_done ?? 0)
+  const recentQualityIssue = lastQualityIssue && Date.now() - lastQualityIssue.at < 1800 ? lastQualityIssue.reason : null
+  const statusLines = mode === 'upload'
+    ? [file?.name ?? '画像または動画を選択', file ? 'このファイルを解析します' : '右下のボタンから選択できます']
+    : shelfAnnouncement
+      ? [shelfAnnouncement.title, shelfAnnouncement.detail]
+      : completedJobId
+        ? ['録画を終了しました', 'リザルトから認識結果を確認できます。']
+        : recentQualityIssue === 'blurred'
+          ? ['画像がぶれています', '1秒止めてください。']
+          : recentQualityIssue === 'glare'
+            ? ['光が反射しています', '角度を変えてください。']
+            : cropTotal > 0 && ocrDone < ocrTotal
+              ? ['本を検出しました', 'タイトルを照合中…']
+              : processedFrames >= 3 && cropTotal === 0
+                ? ['背表紙が小さいようです', '少し近づいてください。']
+                : activeTagIds.length > 0
+                  ? [currentShelfLabel, '本棚を確認しています…']
+                  : trackedTags.length > 0
+                    ? ['次の棚を探しています', `${trackedTags.length}個の棚を確認済みです。カメラを動かしてください。`]
+                    : [detecting || browserDetecting ? '棚を検知しています…' : currentShelfLabel, liveStatus]
+  const visibleTrackedTags = trackedTags.slice(0, 4)
 
   return (
     <div className="min-h-screen bg-[#1e1e1e] md:grid md:place-items-center">
-      <div className="relative mx-auto h-[100dvh] min-h-[674px] w-full max-w-[402px] overflow-hidden bg-[#1e1e1e] p-4 md:h-[874px]">
+      <div className="relative h-[100dvh] min-h-[674px] w-full overflow-hidden bg-[#1e1e1e] p-0">
         <div className="relative h-full w-full overflow-hidden bg-[#292929]">
           {mode === 'camera' ? (
             <>
-              {showDevCameraPreview && <img src="/dev-scan-shelf.jpg" alt="" className="absolute inset-0 size-full object-cover" />}
-              <video ref={videoRef} className={`absolute inset-0 size-full object-cover ${showDevCameraPreview ? 'opacity-0' : ''}`} muted playsInline />
+              <video
+                ref={videoRef}
+                className="absolute inset-0 size-full object-cover"
+                autoPlay
+                muted
+                playsInline
+                onLoadedData={() => setCameraReady(true)}
+              />
+              {!cameraReady && !error && (
+                <div className="absolute inset-0 grid place-items-center bg-black/45 text-center text-sm text-white/85">
+                  <p>{cameraStarting ? 'カメラを起動しています…' : '中央のボタンを押してカメラを開始してください'}</p>
+                </div>
+              )}
             </>
           ) : filePreview ? (
             <img src={filePreview} alt="選択した本棚" className="absolute inset-0 size-full object-cover" />
@@ -387,15 +669,19 @@ export default function ScanPage() {
           <div className="absolute inset-0 bg-gradient-to-b from-black/20 via-transparent to-black/25" />
 
           <button type="button" onClick={() => navigate(-1)} aria-label="戻る" className="tap-soft absolute left-7 top-6 z-10 grid size-10 place-items-center rounded-full bg-white text-[#1e1e1e]">
-            <ArrowUpLeft className="size-6" />
+            <ArrowLeft className="size-6" />
           </button>
 
-          <div className="absolute bottom-[204px] left-1/2 flex h-[63px] w-[300px] -translate-x-1/2 flex-col justify-center overflow-hidden rounded-xl bg-[#1e1e1e] px-4 text-base leading-[19px] text-white shadow-[20px_8px_0_rgba(30,30,30,0.83)]">
+          <div
+            key={shelfAnnouncement?.id ?? `guide-${statusLines[0]}`}
+            className={`absolute bottom-[204px] left-1/2 z-20 flex min-h-[63px] w-[calc(100%-56px)] max-w-[560px] -translate-x-1/2 flex-col justify-center rounded-xl bg-[#1e1e1e] px-4 py-3 text-base leading-[19px] text-white shadow-[20px_8px_0_rgba(30,30,30,0.83)] ${shelfAnnouncement ? 'scan-status-popup' : ''}`}
+            aria-live="assertive"
+          >
             <p>{statusLines[0]}</p>
-            <p className="line-clamp-1 text-white/90">{statusLines[1]}</p>
+            <p className="text-white/90">{statusLines[1]}</p>
           </div>
 
-          {error && !showDevCameraPreview && (
+          {error && (
             <div className="absolute left-1/2 top-[104px] z-10 w-[300px] -translate-x-1/2 rounded-xl bg-red-700/90 px-4 py-3 text-sm text-white">
               {error}
             </div>
@@ -407,24 +693,77 @@ export default function ScanPage() {
             </div>
           )}
 
-          <div className="absolute bottom-16 left-1/2 flex w-[300px] -translate-x-1/2 items-center justify-end gap-12">
+          {mode === 'camera' && liveBooks.length > 0 && (
+            <section className="absolute inset-x-7 bottom-[286px] z-10 mx-auto max-w-[560px] rounded-2xl bg-black/65 px-4 py-3 text-white shadow-lg backdrop-blur-md" aria-label="見つかった本">
+              <div className="mb-2 flex items-center justify-between text-sm font-semibold">
+                <span>見つかった本</span>
+                <span>{liveBooks.length}冊</span>
+              </div>
+              <div className="flex gap-3 overflow-x-auto pb-1">
+                {liveBooks.slice(0, 8).map(book => (
+                  <article key={book.key} className="flex w-[72px] shrink-0 flex-col gap-1">
+                    <div className="flex h-16 items-end justify-center rounded-md bg-white/10">
+                      {book.cover
+                        ? <img src={book.cover} alt="" className="max-h-16 max-w-[48px] object-contain" />
+                        : <div className="h-14 w-10 rounded-sm bg-white/25" />}
+                    </div>
+                    <p className="line-clamp-2 text-[10px] leading-3 text-white/95">{book.title}</p>
+                  </article>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {mode === 'camera' && trackedTags.length > 0 && liveBooks.length === 0 && (
+            <div className="absolute inset-x-7 bottom-[286px] z-10 mx-auto max-w-[560px]" aria-live="polite">
+              <div className="mb-2 flex items-center justify-between text-xs font-medium text-white drop-shadow">
+                <span>認識済みタグ</span>
+                <span>{trackedTags.length}件</span>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {visibleTrackedTags.map(tag => {
+                  const active = activeTagIds.includes(tag.tagId)
+                  return (
+                    <span
+                      key={tag.tagId}
+                      className={`max-w-[180px] truncate rounded-full border px-3 py-1.5 text-xs font-semibold shadow-sm backdrop-blur-md transition-colors ${active ? 'border-[#7ee2bd] bg-[#087f5b] text-white' : 'border-white/45 bg-black/55 text-white/90'}`}
+                    >
+                      {active ? '追跡中' : '認識済み'} · {tag.label}
+                    </span>
+                  )
+                })}
+                {trackedTags.length > visibleTrackedTags.length && (
+                  <span className="rounded-full border border-white/35 bg-black/55 px-3 py-1.5 text-xs font-semibold text-white/90 backdrop-blur-md">
+                    +{trackedTags.length - visibleTrackedTags.length}
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
+
+          <div className={`absolute bottom-16 left-1/2 flex -translate-x-1/2 items-center ${recording || stopping || completedJobId ? 'w-auto justify-center' : 'w-[300px] justify-end gap-12'}`}>
             <button
               type="button"
-              onClick={primaryAction}
-              disabled={(mode === 'upload' && !file) || uploading}
-              aria-label={mode === 'upload' ? '選択したファイルを解析' : recording ? 'スキャンを終了' : 'ライブスキャンを開始'}
-              className={`tap-card grid size-[100px] place-items-center rounded-full transition disabled:opacity-50 ${recording ? 'bg-[#1e1e1e]' : 'border-[5px] border-[#1e1e1e] bg-white'}`}
+              onClick={() => void primaryAction()}
+              disabled={(mode === 'upload' && !file) || uploading || stopping || cameraStarting}
+              aria-label={completedJobId ? 'リザルトを見る' : mode === 'upload' ? '選択したファイルを解析' : recording ? 'スキャンを終了' : cameraReady ? 'ライブスキャンを開始' : 'カメラを開始してライブスキャンを開始'}
+              className={`tap-card grid place-items-center disabled:opacity-50 ${completedJobId ? 'h-16 min-w-[196px] rounded-full bg-[#087f5b] px-8 text-xl font-semibold text-white shadow-xl' : 'size-[100px]'}`}
             >
-              {recording && <span className="size-11 rounded-[12px] bg-[#ff3b30]" />}
-              {mode === 'upload' && !recording && <span className="text-sm font-semibold text-[#1e1e1e]">解析</span>}
+              {completedJobId ? 'リザルト' : (
+                <span
+                  className={`grid place-items-center text-sm font-semibold text-[#1e1e1e] transition-all duration-200 ease-out ${recording || stopping ? 'size-12 rounded-[13px] bg-[#ff3b30] text-transparent' : 'size-[90px] rounded-full bg-white'}`}
+                >
+                  {mode === 'upload' && !recording ? '解析' : null}
+                </span>
+              )}
             </button>
 
-            {!recording && (
+            {!recording && !completedJobId && (
               <button type="button" onClick={() => fileInputRef.current?.click()} aria-label="画像または動画を選択" className="tap-card h-[61px] w-[58px] rounded-xl bg-white shadow-sm" />
             )}
           </div>
 
-          {recording && (
+          {recording && !stopping && (
             <button type="button" onClick={() => void cancelRecording()} className="tap-soft absolute bottom-6 left-1/2 -translate-x-1/2 text-xs text-white/75 underline">
               キャンセル
             </button>

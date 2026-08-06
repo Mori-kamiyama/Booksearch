@@ -128,8 +128,12 @@ def build_bookshelf_data(
         )
 
     bookshelf = {
-        "schema_version": 1,
+        "schema_version": 2,
         "source_catalog": catalog.get("source"),
+        "shelf_mapping": {
+            "map_id": (catalog.get("shelf_mapping") or {}).get("map_id"),
+            "coordinate_schema_version": (catalog.get("shelf_mapping") or {}).get("coordinate_schema_version"),
+        },
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "min_score": min_score,
         "summary": {

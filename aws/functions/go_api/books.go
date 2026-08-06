@@ -103,6 +103,30 @@ func (s *BookStore) Search(query string, limit int) ([]Book, error) {
 	return scanBooks(rows)
 }
 
+func (s *BookStore) Featured(limit int) ([]Book, error) {
+	if limit <= 0 {
+		limit = 5
+	}
+	if limit > 20 {
+		limit = 20
+	}
+	rows, err := s.db.Query(`
+		SELECT b.id, b.title, COALESCE(b.authors,''), COALESCE(b.publisher,''),
+		       COALESCE(b.published_date,''), COALESCE(b.class_number,''),
+		       COALESCE(b.registration_number,''), COALESCE(b.isbn,''),
+		       bc.thumbnail, bc.info_link
+		FROM books b
+		JOIN book_covers bc ON b.id = bc.book_id
+		WHERE bc.thumbnail IS NOT NULL AND bc.thumbnail != ''
+		ORDER BY RANDOM()
+		LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanBooks(rows)
+}
+
 func (s *BookStore) GetByID(id int) (*Book, error) {
 	rows, err := s.db.Query(`
 		SELECT b.id, b.title, COALESCE(b.authors,''), COALESCE(b.publisher,''),

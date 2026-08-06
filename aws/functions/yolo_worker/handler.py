@@ -21,12 +21,14 @@ import math
 import os
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import boto3
 import cv2
 import numpy as np
+from botocore.exceptions import ClientError
 from ultralytics import YOLO
 
 BUCKET = os.environ["BUCKET"]
@@ -36,9 +38,10 @@ FINGERPRINTS_TABLE = os.environ.get("CROP_FINGERPRINTS_TABLE")
 OCR_QUEUE_URL = os.environ["OCR_QUEUE_URL"]
 LOOKUP_QUEUE_URL = os.environ["LOOKUP_QUEUE_URL"]
 TASK_ROOT = os.environ.get("LAMBDA_TASK_ROOT", ".")
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 
 MODEL_PATH = Path(TASK_ROOT) / "assets" / "yolo_model.pt"
-APRILTAG_MAP_PATH = Path(TASK_ROOT) / "assets" / "apriltag_shelf_map.json"
+APRILTAG_MAP_PATH = Path(TASK_ROOT) / "assets" / "apriltag_library_map.json"
 
 # YOLO はコンテナの warm 再利用でロードしっぱなしにする
 _yolo_model: YOLO | None = None
@@ -223,14 +226,19 @@ def assign_shelf(box_xyxy, tags, mapping, max_distance=None):
         return None
     votes.sort(key=lambda v: v["distance_px"])
     unique = {v["shelf_id"] for v in votes}
+    provenance = {
+        "map_id": mapping.get("map_id"),
+        "coordinate_schema_version": mapping.get("coordinate_schema_version"),
+    }
     if len(unique) == 1:
-        return {"shelf_id": votes[0]["shelf_id"], "status": "assigned", "votes": votes}
+        return {"shelf_id": votes[0]["shelf_id"], "status": "assigned", "votes": votes, **provenance}
     return {
         "shelf_id": votes[0]["shelf_id"],
         "status": "assigned",
         "reason": "nearest_of_conflicting_votes",
         "conflicting_shelf_ids": sorted(unique),
         "votes": votes,
+        **provenance,
     }
 
 
@@ -289,10 +297,12 @@ def persistent_duplicate(scope: str | None, phash: int) -> dict[str, Any] | None
 
 
 def process_frame(job_id: str, image_key: str, frame_index: int,
-                  seen_hashes: list[tuple[int, str]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+                  seen_hashes: list[tuple[int, str]], local_path: str | None = None
+                  ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     print(f"[yolo] job_id={job_id} image_key={image_key}")
-    local_image = f"/tmp/{job_id}_{frame_index:04d}{Path(image_key).suffix or '.jpg'}"
-    s3.download_file(BUCKET, image_key, local_image)
+    local_image = local_path or f"/tmp/{job_id}_{frame_index:04d}{Path(image_key).suffix or '.jpg'}"
+    if local_path is None:
+        s3.download_file(BUCKET, image_key, local_image)
     img = cv2.imread(local_image)
     if img is None:
         raise RuntimeError(f"unreadable image: {image_key}")
@@ -379,16 +389,104 @@ def process_frame(job_id: str, image_key: str, frame_index: int,
     return crop_records, {"image_key": image_key, "width": width, "height": height, "apriltag": tag_diag}
 
 
-def process_job(job_id: str, image_keys: list[str]) -> None:
+def extract_video_frames(video_path: str, job_id: str) -> list[str]:
+    """Extract a bounded, time-spaced set of JPEG frames from an uploaded video."""
+    interval = max(0.1, float(os.environ.get("VIDEO_FRAME_INTERVAL_SEC", "0.5")))
+    max_frames = max(1, int(os.environ.get("VIDEO_MAX_FRAMES", "120")))
+    capture = cv2.VideoCapture(video_path)
+    if not capture.isOpened():
+        raise RuntimeError(f"unreadable video: {video_path}")
+
+    frames: list[str] = []
+    next_sample = 0.0
+    frame_number = 0
+    try:
+        while len(frames) < max_frames:
+            ok, image = capture.read()
+            if not ok:
+                break
+            fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+            timestamp = frame_number / fps if fps > 0 else float(capture.get(cv2.CAP_PROP_POS_MSEC) or 0.0) / 1000.0
+            if timestamp + 1e-6 >= next_sample:
+                frame_path = f"/tmp/{job_id}_video_{len(frames) + 1:04d}.jpg"
+                if not cv2.imwrite(frame_path, image, [int(cv2.IMWRITE_JPEG_QUALITY), 92]):
+                    raise RuntimeError(f"failed to write video frame: {frame_path}")
+                frames.append(frame_path)
+                next_sample = timestamp + interval
+            frame_number += 1
+    finally:
+        capture.release()
+
+    if not frames:
+        raise RuntimeError(f"video contains no readable frames: {video_path}")
+    print(f"[yolo] extracted {len(frames)} video frames from {video_path}")
+    return frames
+
+
+def queue_final_lookup_if_ready(job_id: str, item: dict[str, Any]) -> None:
+    if not item.get("scan_closed"):
+        return
+    if int(item.get("processed_frames", 0)) < int(item.get("accepted_frames", 0)):
+        return
+    if int(item.get("ocr_done", 0)) < int(item.get("ocr_total", 0)):
+        return
+    try:
+        jobs_table.update_item(
+            Key={"job_id": job_id},
+            UpdateExpression="SET final_lookup_queued = :yes, #s = :pending",
+            ConditionExpression="attribute_not_exists(final_lookup_queued)",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={":yes": True, ":pending": "lookup_pending"},
+        )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return
+        raise
+    try:
+        sqs.send_message(
+            QueueUrl=LOOKUP_QUEUE_URL,
+            MessageBody=json.dumps({"job_id": job_id, "incremental": False}),
+        )
+    except Exception:
+        jobs_table.update_item(
+            Key={"job_id": job_id},
+            UpdateExpression="SET #s = :processing REMOVE final_lookup_queued",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={":processing": "processing"},
+        )
+        raise
+
+
+def process_job(job_id: str, image_keys: list[str], incremental: bool = False) -> None:
     if not image_keys:
         raise RuntimeError("image_keys is empty")
+    if incremental:
+        existing_job = jobs_table.get_item(Key={"job_id": job_id}).get("Item") or {}
+        if image_keys[0] in (existing_job.get("processed_frame_keys") or set()):
+            print(f"[yolo] frame already processed {job_id}/{image_keys[0]}")
+            return
     crop_records: list[dict[str, Any]] = []
     frame_diagnostics = []
     seen_hashes: list[tuple[int, str]] = []
     for index, image_key in enumerate(image_keys, 1):
-        records, diagnostics = process_frame(job_id, image_key, index, seen_hashes)
-        crop_records.extend(records)
-        frame_diagnostics.append(diagnostics)
+        suffix = Path(image_key).suffix.lower()
+        if suffix in VIDEO_EXTENSIONS:
+            video_path = f"/tmp/{job_id}_{index:04d}{suffix}"
+            s3.download_file(BUCKET, image_key, video_path)
+            frame_paths = extract_video_frames(video_path, job_id)
+            try:
+                for frame_index, frame_path in enumerate(frame_paths, index):
+                    records, diagnostics = process_frame(job_id, image_key, frame_index, seen_hashes, frame_path)
+                    crop_records.extend(records)
+                    frame_diagnostics.append(diagnostics)
+            finally:
+                Path(video_path).unlink(missing_ok=True)
+                for frame_path in frame_paths:
+                    Path(frame_path).unlink(missing_ok=True)
+        else:
+            records, diagnostics = process_frame(job_id, image_key, index, seen_hashes)
+            crop_records.extend(records)
+            frame_diagnostics.append(diagnostics)
 
     ocr_records = [r for r in crop_records if r["status"] == "ocr_pending"]
     duplicate_count = sum(r["status"] == "skipped_duplicate_crop" for r in crop_records)
@@ -405,21 +503,45 @@ def process_job(job_id: str, image_keys: list[str]) -> None:
     }
     first_frame = frame_diagnostics[0]
     terminal_without_ocr = "no_detection" if not crop_records else "no_readable_crops"
-    jobs_table.update_item(
-        Key={"job_id": job_id},
-        UpdateExpression="SET #s = :s, crop_total = :n, ocr_total = :ot, ocr_done = :z, "
-                         "image_width = :w, image_height = :h, #d = :d",
-        ExpressionAttributeNames={"#s": "status", "#d": "diagnostics"},
-        ExpressionAttributeValues={
-            ":s": "ocr_pending" if ocr_records else terminal_without_ocr,
-            ":n": len(crop_records),
-            ":ot": len(ocr_records),
-            ":z": 0,
-            ":w": first_frame["width"],
-            ":h": first_frame["height"],
-            ":d": ddb_safe(diag),
-        },
-    )
+    if incremental:
+        frame_key = image_keys[0]
+        try:
+            updated = jobs_table.update_item(
+                Key={"job_id": job_id},
+                UpdateExpression="SET image_width = :w, image_height = :h, latest_diagnostics = :d, updated_at = :u "
+                                 "ADD processed_frame_keys :frame, processed_frames :one, crop_total :n, ocr_total :ot",
+                ConditionExpression="attribute_not_exists(processed_frame_keys) OR NOT contains(processed_frame_keys, :frame_key)",
+                ExpressionAttributeValues={
+                    ":frame": {frame_key}, ":frame_key": frame_key, ":one": 1,
+                    ":n": len(crop_records), ":ot": len(ocr_records),
+                    ":w": first_frame["width"], ":h": first_frame["height"],
+                    ":d": ddb_safe(diag), ":u": datetime.now(timezone.utc).isoformat(),
+                },
+                ReturnValues="ALL_NEW",
+            )
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                print(f"[yolo] frame already processed {job_id}/{frame_key}")
+                return
+            raise
+        job_item = updated.get("Attributes", {})
+    else:
+        jobs_table.update_item(
+            Key={"job_id": job_id},
+            UpdateExpression="SET #s = :s, crop_total = :n, ocr_total = :ot, ocr_done = :z, "
+                             "image_width = :w, image_height = :h, #d = :d",
+            ExpressionAttributeNames={"#s": "status", "#d": "diagnostics"},
+            ExpressionAttributeValues={
+                ":s": "ocr_pending" if ocr_records else terminal_without_ocr,
+                ":n": len(crop_records),
+                ":ot": len(ocr_records),
+                ":z": 0,
+                ":w": first_frame["width"],
+                ":h": first_frame["height"],
+                ":d": ddb_safe(diag),
+            },
+        )
+        job_item = {}
 
     for rec in ocr_records:
         sqs.send_message(
@@ -427,13 +549,19 @@ def process_job(job_id: str, image_keys: list[str]) -> None:
             MessageBody=json.dumps({
                 "job_id": job_id, "crop_id": rec["crop_id"], "crop_key": rec["crop_key"],
                 "fingerprint_scope": rec.get("fingerprint_scope"), "phash": rec.get("phash"),
+                "incremental": incremental,
             }),
         )
-    if not ocr_records:
+    if incremental:
+        # Cached titles and zero-detection frames still need to refresh the
+        # partial catalog/progress visible in the camera UI.
         sqs.send_message(
             QueueUrl=LOOKUP_QUEUE_URL,
-            MessageBody=json.dumps({"job_id": job_id}),
+            MessageBody=json.dumps({"job_id": job_id, "incremental": True}),
         )
+        queue_final_lookup_if_ready(job_id, job_item)
+    elif not ocr_records:
+        sqs.send_message(QueueUrl=LOOKUP_QUEUE_URL, MessageBody=json.dumps({"job_id": job_id}))
 
 
 def ddb_safe(item):
@@ -455,7 +583,7 @@ def handler(event, context):
         body = json.loads(rec["body"])
         try:
             image_keys = body.get("image_keys") or [body["image_key"]]
-            process_job(body["job_id"], image_keys)
+            process_job(body["job_id"], image_keys, bool(body.get("incremental")))
         except Exception as e:
             print(f"[yolo] ERROR: {e}", file=sys.stderr)
             try:
