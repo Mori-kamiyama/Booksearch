@@ -49,6 +49,22 @@ func (h *Handler) SearchBooks(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"books": books, "query": q})
 }
 
+func (h *Handler) FeaturedBooks(c *gin.Context) {
+	limit := 6
+	if l, err := strconv.Atoi(c.Query("limit")); err == nil && l > 0 {
+		limit = l
+	}
+	books, err := h.Store.FeaturedBooks(limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if books == nil {
+		books = []db.Book{}
+	}
+	c.JSON(http.StatusOK, gin.H{"books": books})
+}
+
 func (h *Handler) GetBook(c *gin.Context) {
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
@@ -172,6 +188,140 @@ func (h *Handler) Scan(c *gin.Context) {
 
 	h.Jobs.Start(id, uploadPath)
 	c.JSON(http.StatusAccepted, gin.H{"job_id": id})
+}
+
+type liveSession struct {
+	ID         string    `json:"id"`
+	CreatedAt  time.Time `json:"created_at"`
+	FrameCount int       `json:"frame_count"`
+	Status     string    `json:"status"`
+}
+
+func (h *Handler) liveSessionPath(id string) string {
+	return filepath.Join(h.JobsDir, "live", id, "session.json")
+}
+func (h *Handler) writeLiveSession(s liveSession) error {
+	raw, err := json.Marshal(s)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(h.liveSessionPath(s.ID), raw, 0o644)
+}
+func (h *Handler) readLiveSession(id string) (*liveSession, error) {
+	raw, err := os.ReadFile(h.liveSessionPath(id))
+	if err != nil {
+		return nil, err
+	}
+	var s liveSession
+	return &s, json.Unmarshal(raw, &s)
+}
+
+func (h *Handler) StartLiveSession(c *gin.Context) {
+	id := uuid.New().String()
+	dir := filepath.Join(h.JobsDir, "live", id, "frames")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	s := liveSession{ID: id, CreatedAt: time.Now(), Status: "collecting"}
+	if err := h.writeLiveSession(s); err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(201, gin.H{"session_id": id, "frame_upload_url_template": "/api/scan/sessions/" + id + "/frames/{frame_id}", "content_type": "image/jpeg"})
+}
+
+func (h *Handler) UploadLiveFrame(c *gin.Context) {
+	id, frame := c.Param("id"), filepath.Base(c.Param("frame"))
+	s, err := h.readLiveSession(id)
+	if err != nil || s.Status != "collecting" {
+		c.JSON(404, gin.H{"error": "live session not collecting"})
+		return
+	}
+	if !strings.HasSuffix(strings.ToLower(frame), ".jpg") {
+		c.JSON(400, gin.H{"error": "JPEG frames only"})
+		return
+	}
+	path := filepath.Join(h.JobsDir, "live", id, "frames", frame)
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 8<<20)
+	out, err := os.Create(path)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	defer out.Close()
+	n, err := io.Copy(out, c.Request.Body)
+	if err != nil || n == 0 {
+		c.JSON(400, gin.H{"error": "empty frame"})
+		return
+	}
+	entries, _ := os.ReadDir(filepath.Join(h.JobsDir, "live", id, "frames"))
+	s.FrameCount = len(entries)
+	_ = h.writeLiveSession(*s)
+	c.JSON(201, gin.H{"frame_id": frame})
+}
+
+// CommitLiveFrame mirrors the AWS live-session contract. Local development
+// keeps the uploaded frame ready for the batch pipeline started on complete;
+// production enqueues it for incremental YOLO/OCR processing at this point.
+func (h *Handler) CommitLiveFrame(c *gin.Context) {
+	id := c.Param("id")
+	s, err := h.readLiveSession(id)
+	if err != nil || s.Status != "collecting" {
+		c.JSON(404, gin.H{"error": "live session not collecting"})
+		return
+	}
+	var payload struct {
+		FrameKey string `json:"frame_key"`
+	}
+	if err := c.ShouldBindJSON(&payload); err != nil || payload.FrameKey == "" {
+		c.JSON(400, gin.H{"error": "frame_key is required"})
+		return
+	}
+	frame := filepath.Base(payload.FrameKey)
+	if _, err := os.Stat(filepath.Join(h.JobsDir, "live", id, "frames", frame)); err != nil {
+		c.JSON(409, gin.H{"error": "frame upload is not visible yet"})
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"session_id": id, "frame_key": frame, "status": "ready"})
+}
+
+func (h *Handler) CompleteLiveSession(c *gin.Context) {
+	id := c.Param("id")
+	s, err := h.readLiveSession(id)
+	if err != nil || s.Status != "collecting" {
+		c.JSON(404, gin.H{"error": "live session not collecting"})
+		return
+	}
+	framesDir := filepath.Join(h.JobsDir, "live", id, "frames")
+	entries, readErr := os.ReadDir(framesDir)
+	if readErr != nil || len(entries) == 0 {
+		c.JSON(400, gin.H{"error": "no accepted frames"})
+		return
+	}
+	s.FrameCount = len(entries)
+	jobID := uuid.New().String()
+	if err := h.Jobs.Create(jobID); err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	s.Status = "confirmed"
+	_ = h.writeLiveSession(*s)
+	h.Jobs.StartFrames(jobID, framesDir)
+	c.JSON(http.StatusAccepted, gin.H{"job_id": jobID, "accepted_frames": s.FrameCount})
+}
+
+func (h *Handler) CancelLiveSession(c *gin.Context) {
+	id := c.Param("id")
+	s, err := h.readLiveSession(id)
+	if err != nil || s.Status != "collecting" {
+		c.JSON(404, gin.H{"error": "live session not collecting"})
+		return
+	}
+	s.Status = "canceled"
+	_ = h.writeLiveSession(*s)
+	_ = os.RemoveAll(filepath.Join(h.JobsDir, "live", id, "frames"))
+	c.JSON(200, gin.H{"session_id": id, "status": "canceled"})
 }
 
 func (h *Handler) GetJob(c *gin.Context) {

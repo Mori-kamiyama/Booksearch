@@ -65,8 +65,8 @@ def slot_lookup(layout: dict[str, Any]) -> dict[tuple[str, int, int], dict[str, 
 def tag_lookup(tag_map: dict[str, Any]) -> dict[tuple[str, int, int], int]:
     out = {}
     for tag_id, cfg in tag_map["tags"].items():
-        inter = cfg["grid_intersection"]
-        out[(cfg["unit"], inter["between_cols"][0], inter["between_rows"][0])] = int(tag_id)
+        inter = cfg["physical_intersection"]
+        out[(cfg["unit"], inter["between_display_cols"][0], inter["between_rows"][0])] = int(tag_id)
     return out
 
 

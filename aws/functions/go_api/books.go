@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"strings"
 	"unicode"
 
@@ -61,7 +62,22 @@ type ShelfCandidate struct {
 	Observations int     `json:"observations"`
 	AvgScore     float64 `json:"avg_score"`
 	Title        string  `json:"title,omitempty"`
+	TitleReading string  `json:"title_reading,omitempty"`
+	Thumbnail    *string `json:"thumbnail,omitempty"`
 	UpdatedAt    string  `json:"updated_at,omitempty"`
+}
+
+type BookIndexEntry struct {
+	Title        string
+	TitleReading string
+	Thumbnail    *string
+}
+
+type BookIndexBook struct {
+	ID           int     `json:"id"`
+	Title        string  `json:"title"`
+	TitleReading string  `json:"title_reading"`
+	Thumbnail    *string `json:"thumbnail"`
 }
 
 type BookStore struct {
@@ -103,6 +119,30 @@ func (s *BookStore) Search(query string, limit int) ([]Book, error) {
 	return scanBooks(rows)
 }
 
+func (s *BookStore) Featured(limit int) ([]Book, error) {
+	if limit <= 0 {
+		limit = 5
+	}
+	if limit > 20 {
+		limit = 20
+	}
+	rows, err := s.db.Query(`
+		SELECT b.id, b.title, COALESCE(b.authors,''), COALESCE(b.publisher,''),
+		       COALESCE(b.published_date,''), COALESCE(b.class_number,''),
+		       COALESCE(b.registration_number,''), COALESCE(b.isbn,''),
+		       bc.thumbnail, bc.info_link
+		FROM books b
+		JOIN book_covers bc ON b.id = bc.book_id
+		WHERE bc.thumbnail IS NOT NULL AND bc.thumbnail != ''
+		ORDER BY RANDOM()
+		LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanBooks(rows)
+}
+
 func (s *BookStore) GetByID(id int) (*Book, error) {
 	rows, err := s.db.Query(`
 		SELECT b.id, b.title, COALESCE(b.authors,''), COALESCE(b.publisher,''),
@@ -122,6 +162,73 @@ func (s *BookStore) GetByID(id int) (*Book, error) {
 		return nil, err
 	}
 	return &books[0], nil
+}
+
+func (s *BookStore) IndexEntries(ids []int) (map[int]BookIndexEntry, error) {
+	entries := make(map[int]BookIndexEntry)
+	unique := make([]int, 0, len(ids))
+	seen := make(map[int]struct{}, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		unique = append(unique, id)
+	}
+	if len(unique) == 0 {
+		return entries, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(unique)), ",")
+	args := make([]any, len(unique))
+	for index, id := range unique {
+		args[index] = id
+	}
+	rows, err := s.db.Query(fmt.Sprintf(`
+		SELECT b.id, b.title, bc.thumbnail
+		FROM books b
+		LEFT JOIN book_covers bc ON bc.book_id = b.id
+		WHERE b.id IN (%s)`, placeholders), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int
+		var entry BookIndexEntry
+		if err := rows.Scan(&id, &entry.Title, &entry.Thumbnail); err != nil {
+			return nil, err
+		}
+		entry.TitleReading = titleReading(entry.Title)
+		entries[id] = entry
+	}
+	return entries, rows.Err()
+}
+
+func (s *BookStore) AllIndexBooks() ([]BookIndexBook, error) {
+	rows, err := s.db.Query(`
+		SELECT b.id, b.title, bc.thumbnail
+		FROM books b
+		LEFT JOIN book_covers bc ON bc.book_id = b.id
+		WHERE b.title IS NOT NULL AND b.title != ''
+		ORDER BY b.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	books := make([]BookIndexBook, 0, 4096)
+	for rows.Next() {
+		var book BookIndexBook
+		if err := rows.Scan(&book.ID, &book.Title, &book.Thumbnail); err != nil {
+			return nil, err
+		}
+		book.TitleReading = titleReading(book.Title)
+		books = append(books, book)
+	}
+	return books, rows.Err()
 }
 
 func scanBooks(rows *sql.Rows) ([]Book, error) {

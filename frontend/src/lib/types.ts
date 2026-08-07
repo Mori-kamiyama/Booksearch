@@ -9,6 +9,9 @@ export interface Book {
   isbn: string
   thumbnail: string | null
   info_link: string | null
+  description?: string
+  summary?: string
+  reading_time_minutes?: number
   shelf_ids?: string[]
   shelf_candidates?: ShelfCandidate[]
 }
@@ -16,6 +19,7 @@ export interface Book {
 export interface ShelfCandidate {
   book_id?: number
   title?: string
+  title_reading?: string
   shelf_id: string
   confidence: number
   observations: number
@@ -23,6 +27,7 @@ export interface ShelfCandidate {
   updated_at?: string
   avg_score?: number
   crop_url?: string
+  thumbnail?: string | null
 }
 
 export interface Job {
@@ -49,8 +54,8 @@ export interface LayoutUnit {
 
 export interface LayoutSlot {
   slot_id: string
-  shelf_id: string
-  recognition_code: string
+  shelf_id: string | null
+  recognition_code: string | null
   kind: 'base' | 'side'
   unit: string
   unit_index_from_entrance?: number

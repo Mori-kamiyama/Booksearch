@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Camera, CameraOff, ChevronLeft, ChevronRight, MapPin, RotateCcw } from 'lucide-react'
 import { apiFetch } from '../lib/api'
+import embeddedShelfMap from '../../../data/apriltag_library_map.json'
 
 type Quadrant = 'top_left' | 'top_right' | 'bottom_right' | 'bottom_left'
 
@@ -11,9 +12,12 @@ interface TagConfig {
 }
 
 interface ShelfMap {
+  map_id?: string
   dictionary?: string
   tags?: Record<string, TagConfig>
 }
+
+const canonicalShelfMap = embeddedShelfMap as ShelfMap
 
 interface DetectedTag {
   tag_id: number
@@ -25,6 +29,7 @@ interface DetectedTag {
 }
 
 interface DetectResponse {
+  map_id?: string
   tags: DetectedTag[]
   diagnostics?: {
     selected?: string
@@ -42,10 +47,7 @@ const quadrantLabels: Record<Quadrant, string> = {
 const quadrantOrder: Quadrant[] = ['top_left', 'top_right', 'bottom_left', 'bottom_right']
 
 export default function TagPlacementPage() {
-  const [shelfMap, setShelfMap] = useState<ShelfMap | null>(null)
-  const [selectedTag, setSelectedTag] = useState('')
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState('')
+  const [selectedTag, setSelectedTag] = useState(Object.keys(canonicalShelfMap.tags ?? {}).sort(compareTagID)[0] ?? '')
   const [cameraActive, setCameraActive] = useState(false)
   const [detecting, setDetecting] = useState(false)
   const [cameraError, setCameraError] = useState('')
@@ -58,23 +60,8 @@ export default function TagPlacementPage() {
   const intervalRef = useRef<number | null>(null)
   const detectingRef = useRef(false)
 
-  useEffect(() => {
-    apiFetch('/api/shelves')
-      .then(async res => {
-        if (!res.ok) throw new Error(`api ${res.status}`)
-        return (await res.json()) as ShelfMap
-      })
-      .then(data => {
-        setShelfMap(data)
-        const firstTag = Object.keys(data.tags ?? {}).sort(compareTagID)[0] ?? ''
-        setSelectedTag(firstTag)
-      })
-      .catch(() => setError('タグ配置データを読み込めませんでした。'))
-      .finally(() => setLoading(false))
-  }, [])
-
-  const tagIDs = useMemo(() => Object.keys(shelfMap?.tags ?? {}).sort(compareTagID), [shelfMap])
-  const tag = selectedTag ? shelfMap?.tags?.[selectedTag] : undefined
+  const tagIDs = useMemo(() => Object.keys(canonicalShelfMap.tags ?? {}).sort(compareTagID), [])
+  const tag = selectedTag ? canonicalShelfMap.tags?.[selectedTag] : undefined
   const placement = tag ? describePlacement(tag) : ''
 
   const detectFrame = useCallback(async () => {
@@ -103,6 +90,9 @@ export default function TagPlacementPage() {
       const res = await apiFetch('/api/tags/detect', { method: 'POST', body: form })
       if (!res.ok) throw new Error(await res.text())
       const data = (await res.json()) as DetectResponse
+      if (data.map_id && data.map_id !== canonicalShelfMap.map_id) {
+        throw new Error(`配置データの版が一致しません: ${data.map_id}`)
+      }
       setDetectedTags(data.tags ?? [])
 
       const usable = (data.tags ?? []).find(t => t.mapped && t.orientation_status !== 'mismatch' && tagIDs.includes(String(t.tag_id)))
@@ -207,11 +197,7 @@ export default function TagPlacementPage() {
         </div>
       </div>
 
-      {loading ? (
-        <div className="text-center text-gray-500 py-12">読み込み中...</div>
-      ) : error ? (
-        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-red-700">{error}</div>
-      ) : tag ? (
+      {tag ? (
         <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_340px]">
           <section className="bg-white border border-gray-200 rounded-lg overflow-hidden">
             <div className="border-b border-gray-100 px-5 py-4 flex items-center justify-between gap-3">

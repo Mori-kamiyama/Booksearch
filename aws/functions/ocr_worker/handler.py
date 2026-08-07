@@ -19,13 +19,18 @@ import sys
 from typing import Any
 
 import boto3
+from botocore.exceptions import ClientError
 
 BUCKET = os.environ["BUCKET"]
 JOBS_TABLE = os.environ["JOBS_TABLE"]
 CROPS_TABLE = os.environ["CROPS_TABLE"]
+FINGERPRINTS_TABLE = os.environ.get("CROP_FINGERPRINTS_TABLE")
 LOOKUP_QUEUE_URL = os.environ["LOOKUP_QUEUE_URL"]
 SECRET_ARN = os.environ["SECRET_GEMINI_ARN"]
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite-preview")
+# Must match the OcrQueue RedrivePolicy so the last attempt is recognized
+# before the message is moved to the DLQ.
+MAX_RECEIVE_COUNT = int(os.environ.get("OCR_MAX_RECEIVE_COUNT", "3"))
 
 s3 = boto3.client("s3")
 sqs = boto3.client("sqs")
@@ -33,6 +38,7 @@ sm = boto3.client("secretsmanager")
 ddb = boto3.resource("dynamodb")
 jobs_table = ddb.Table(JOBS_TABLE)
 crops_table = ddb.Table(CROPS_TABLE)
+fingerprints_table = ddb.Table(FINGERPRINTS_TABLE) if FINGERPRINTS_TABLE else None
 
 _gemini_key: str | None = None
 
@@ -109,7 +115,43 @@ def gemini_ocr(image_bytes: bytes, mime: str) -> list[dict[str, Any]]:
     return parse_titles(response.text or "")
 
 
-def process_one(job_id: str, crop_id: str, crop_key: str) -> None:
+def queue_final_lookup_if_ready(job_id: str, item: dict[str, Any]) -> None:
+    if not item.get("scan_closed"):
+        return
+    if int(item.get("processed_frames", 0)) < int(item.get("accepted_frames", 0)):
+        return
+    if int(item.get("ocr_done", 0)) < int(item.get("ocr_total", 0)):
+        return
+    try:
+        jobs_table.update_item(
+            Key={"job_id": job_id},
+            UpdateExpression="SET final_lookup_queued = :yes, #s = :pending",
+            ConditionExpression="attribute_not_exists(final_lookup_queued)",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={":yes": True, ":pending": "lookup_pending"},
+        )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return
+        raise
+    try:
+        sqs.send_message(
+            QueueUrl=LOOKUP_QUEUE_URL,
+            MessageBody=json.dumps({"job_id": job_id, "incremental": False}),
+        )
+    except Exception:
+        jobs_table.update_item(
+            Key={"job_id": job_id},
+            UpdateExpression="SET #s = :processing REMOVE final_lookup_queued",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={":processing": "processing"},
+        )
+        raise
+
+
+def process_one(job_id: str, crop_id: str, crop_key: str,
+                fingerprint_scope: str | None = None, phash: str | None = None,
+                incremental: bool = False) -> None:
     print(f"[ocr] job_id={job_id} crop_id={crop_id}")
     obj = s3.get_object(Bucket=BUCKET, Key=crop_key)
     raw = obj["Body"].read()
@@ -129,12 +171,31 @@ def process_one(job_id: str, crop_id: str, crop_key: str) -> None:
     if error:
         update_expr += ", ocr_error = :e"
         eav[":e"] = error
-    crops_table.update_item(
-        Key={"job_id": job_id, "crop_id": crop_id},
-        UpdateExpression=update_expr,
-        ExpressionAttributeNames=ean,
-        ExpressionAttributeValues=eav,
-    )
+    try:
+        crops_table.update_item(
+            Key={"job_id": job_id, "crop_id": crop_id},
+            UpdateExpression=update_expr,
+            ConditionExpression="#s = :pending",
+            ExpressionAttributeNames=ean,
+            ExpressionAttributeValues={**eav, ":pending": "ocr_pending"},
+        )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            print(f"[ocr] already completed {job_id}/{crop_id}")
+            return
+        raise
+
+    # Only successful OCR becomes reusable persistent truth. Failed/empty OCR is
+    # deliberately retried by a later scan instead of suppressing future cost.
+    if not error and titles and fingerprint_scope and phash and fingerprints_table:
+        fingerprints_table.put_item(Item={
+            "fingerprint_scope": fingerprint_scope,
+            "phash": phash,
+            "job_id": job_id,
+            "crop_id": crop_id,
+            "crop_key": crop_key,
+            "titles": titles,
+        })
 
     # ATOMIC INCR jobs.ocr_done
     out = jobs_table.update_item(
@@ -143,7 +204,10 @@ def process_one(job_id: str, crop_id: str, crop_key: str) -> None:
         ExpressionAttributeValues={":one": 1},
         ReturnValues="ALL_NEW",
     )
-    item = out.get("Attributes", {})
+    advance_after_crop(job_id, out.get("Attributes", {}), incremental)
+
+
+def advance_after_crop(job_id: str, item: dict[str, Any], incremental: bool) -> None:
     done = int(item.get("ocr_done", 0))
     diagnostics = item.get("diagnostics") or {}
     total = int(
@@ -153,7 +217,15 @@ def process_one(job_id: str, crop_id: str, crop_key: str) -> None:
         )
     )
     print(f"[ocr] progress {done}/{total}")
-    if total > 0 and done >= total:
+    if incremental:
+        # Each completed crop refreshes the partial catalog. SQS coalesces the
+        # work naturally, while the catalog write remains idempotent.
+        sqs.send_message(
+            QueueUrl=LOOKUP_QUEUE_URL,
+            MessageBody=json.dumps({"job_id": job_id, "incremental": True}),
+        )
+        queue_final_lookup_if_ready(job_id, item)
+    elif total > 0 and done >= total:
         # 最後の OCR が lookup_queue に投入
         sqs.send_message(
             QueueUrl=LOOKUP_QUEUE_URL,
@@ -167,8 +239,48 @@ def process_one(job_id: str, crop_id: str, crop_key: str) -> None:
         )
 
 
+def abandon_crop(job_id: str, crop_id: str, reason: str, incremental: bool) -> None:
+    """Give up on one crop without stalling the job.
+
+    ocr_done must reach ocr_total for the job to ever leave `processing`, so a
+    crop that exhausted its SQS attempts is recorded as failed and counted.
+    """
+    print(f"[ocr] abandoning crop {job_id}/{crop_id}: {reason}", file=sys.stderr)
+    try:
+        crops_table.update_item(
+            Key={"job_id": job_id, "crop_id": crop_id},
+            UpdateExpression="SET #s = :s, ocr_error = :e",
+            ConditionExpression="#s = :pending",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={":s": "ocr_done", ":e": reason, ":pending": "ocr_pending"},
+        )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            # Already counted by a successful attempt; nothing to advance.
+            return
+        raise
+    out = jobs_table.update_item(
+        Key={"job_id": job_id},
+        UpdateExpression="ADD ocr_done :one",
+        ExpressionAttributeValues={":one": 1},
+        ReturnValues="ALL_NEW",
+    )
+    advance_after_crop(job_id, out.get("Attributes", {}), incremental)
+
+
 def handler(event, context):
     for rec in event.get("Records", []):
         body = json.loads(rec["body"])
-        process_one(body["job_id"], body["crop_id"], body["crop_key"])
+        incremental = bool(body.get("incremental"))
+        try:
+            process_one(
+                body["job_id"], body["crop_id"], body["crop_key"],
+                body.get("fingerprint_scope"), body.get("phash"), incremental,
+            )
+        except Exception as e:
+            print(f"[ocr] ERROR: {e}", file=sys.stderr)
+            receive_count = int(rec.get("attributes", {}).get("ApproximateReceiveCount", "1"))
+            if receive_count < MAX_RECEIVE_COUNT:
+                raise
+            abandon_crop(body["job_id"], body["crop_id"], str(e), incremental)
     return {"ok": True}

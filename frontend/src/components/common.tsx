@@ -1,6 +1,25 @@
-import { AlertCircle, ArrowLeft, BookOpen, Map, Search, Upload } from 'lucide-react'
-import { Link, NavLink, useNavigate } from 'react-router-dom'
+import { AlertCircle, ArrowLeft, BookOpen, Menu, Map, Search, Upload, X } from 'lucide-react'
+import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
+import { useEffect, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { ReactNode } from 'react'
+
+export function BrandMark({ className = '' }: { className?: string }) {
+  return (
+    <span className={`inline-flex items-center gap-3 ${className}`}>
+      <img src="/figma-icons/leaf.svg" alt="" className="h-[26.5px] w-[48px]" />
+      <img src="/figma-icons/wordmark.svg" alt="ホンノキ" className="h-[30px] w-[137px]" />
+    </span>
+  )
+}
+
+export function RakutenCredit({ className = '' }: { className?: string }) {
+  return (
+    <div className={className}>
+      <a href="https://developers.rakuten.com/" target="_blank">Supported by Rakuten Developers</a>
+    </div>
+  )
+}
 
 export function PageHeader({ title, back = false }: { title: string; back?: boolean }) {
   const navigate = useNavigate()
@@ -79,47 +98,122 @@ export function Skeleton({ variant }: { variant: 'card' | 'grid' | 'hero' }) {
   )
 }
 
-export function BottomTabs() {
-  const tabs = [
-    { to: '/', label: 'さがす', icon: Search },
-    { to: '/map', label: 'マップ', icon: Map },
-    { to: '/scan', label: 'スキャン', icon: Upload },
-  ]
+export function SiteFooter() {
+  const location = useLocation()
+  const isHome = location.pathname === '/'
+  const isScanFlow = location.pathname === '/scan' || location.pathname.startsWith('/jobs/')
+
+  // スキャン画面やホーム画面ではフッターを表示しない（画面全体のレイアウトを保つため）
+  if (isScanFlow || isHome) return null
+
   return (
-    <nav className="fixed inset-x-0 bottom-0 z-20 border-t border-line bg-white/95 px-3 pb-[max(0.5rem,env(safe-area-inset-bottom))] pt-2 backdrop-blur md:hidden">
-      <div className="mx-auto grid max-w-xl grid-cols-3 gap-1">
-        {tabs.map(tab => {
-          const Icon = tab.icon
-          return (
-            <NavLink
-              key={tab.to}
-              to={tab.to}
-              end={tab.to === '/'}
-              className={({ isActive }) => `flex min-h-11 flex-col items-center justify-center gap-0.5 rounded-lg text-xs font-semibold ${isActive ? 'bg-primary-soft text-primary' : 'text-ink-muted'}`}
-            >
-              <Icon className="size-5" />
-              {tab.label}
-            </NavLink>
-          )
-        })}
+    <footer className="mt-[50px] w-full border-t border-line/40 bg-zinc-50/60 py-8 text-ink-muted backdrop-blur-xl">
+      <div className="mx-auto max-w-5xl px-7 md:px-[39px]">
+        <div className="flex flex-col items-center justify-between gap-6 md:flex-row md:gap-4">
+          <div className="flex flex-col items-center gap-1 md:items-start">
+            <BrandMark className="opacity-80 scale-90 origin-left" />
+            <p className="text-xs text-ink-muted/70 mt-1">
+              どんな本でも一瞬で
+            </p>
+          </div>
+          <div className="flex flex-wrap justify-center gap-x-6 gap-y-2 text-sm font-medium">
+            <Link to="/" className="hover:text-primary transition-colors">さがす</Link>
+            <Link to="/index" className="hover:text-primary transition-colors">索引</Link>
+            <Link to="/scan" className="hover:text-primary transition-colors">スキャン</Link>
+          </div>
+        </div>
+        <div className="mt-8 border-t border-line/20 pt-6 text-center text-xs text-ink-muted/50">
+          <RakutenCredit className="mb-2 underline-offset-2 hover:underline" />
+          <p>© {new Date().getFullYear()} ホンノキ. All rights reserved.</p>
+        </div>
       </div>
-    </nav>
+    </footer>
   )
 }
 
 export function SiteHeader() {
+  const location = useLocation()
+  const navigate = useNavigate()
+  const isHome = location.pathname === '/'
+  const [menuOpen, setMenuOpen] = useState(false)
+
+  useEffect(() => {
+    setMenuOpen(false)
+  }, [location.pathname])
+
   return (
-    <header className="sticky top-0 z-10 border-b border-line bg-white/95 backdrop-blur">
-      <div className="mx-auto flex h-14 max-w-5xl items-center justify-between px-4">
-        <Link to="/" className="text-lg font-bold text-primary">ホンノキ</Link>
-        <nav className="hidden items-center gap-1 md:flex">
-          <TopLink to="/">さがす</TopLink>
-          <TopLink to="/map">マップ</TopLink>
-          <TopLink to="/scan">スキャン</TopLink>
-          <TopLink to="/admin/shelves">管理</TopLink>
-        </nav>
+    <header className={`fixed left-0 top-0 w-full z-20 transition-all ${isHome ? 'bg-transparent backdrop-blur-none border-b border-transparent' : 'bg-white/60 backdrop-blur-xl border-b border-line/40'}`}>
+      <div className="mx-auto flex h-[72px] w-full items-center justify-between px-7 md:h-[88px] md:px-[39px]">
+        <div className="size-11 md:w-auto h-auto">
+          {!isHome && (
+            <>
+              <button type="button" aria-label="戻る" onClick={() => navigate(-1)} className="tap-soft grid size-11 place-items-center text-ink md:hidden">
+                <ArrowLeft className="size-6" />
+              </button>
+              <Link to="/" className="hidden md:block">
+                <BrandMark />
+              </Link>
+            </>
+          )}
+        </div>
+        <button type="button" aria-label="メニューを開く" aria-expanded={menuOpen} onClick={() => setMenuOpen(true)} className="tap-soft grid size-11 place-items-center rounded-full text-ink hover:bg-zinc-100 md:fixed md:right-[calc(32px-(100vw-100%))] md:top-[22px] md:z-20">
+          <Menu className="size-6 md:h-6 md:w-[31px]" />
+        </button>
       </div>
+      {menuOpen && <MenuDrawer onClose={() => setMenuOpen(false)} />}
     </header>
+  )
+}
+
+function MenuDrawer({ onClose }: { onClose: () => void }) {
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [onClose])
+
+  const items = [
+    { to: '/', label: 'さがす' },
+    { to: '/index', label: '索引' },
+    { to: '/scan', label: 'スキャン' },
+  ]
+  const adminItems = [
+    { to: '/map', label: '図書室マップ' },
+    { to: '/admin/shelves', label: '棚の管理' },
+    { to: '/admin/tags', label: 'タグ配置' },
+  ]
+  const itemClass = ({ isActive }: { isActive: boolean }) =>
+    `flex min-h-12 items-center border-b border-line text-xl ${isActive ? 'text-[#087f5b]' : 'text-ink'}`
+
+  // ヘッダーの backdrop-blur が fixed の基準を変えるため body 直下に描画する
+  return createPortal(
+    <div className="fixed inset-0 z-30">
+      <button type="button" aria-label="メニューを閉じる" onClick={onClose} className="absolute inset-0 cursor-default bg-black/30" />
+      <nav aria-label="メインメニュー" className="absolute right-0 top-0 flex h-full w-72 max-w-[80vw] flex-col bg-white px-7 pb-8 shadow-xl md:px-8">
+        <div className="flex h-[72px] items-center justify-end md:h-[88px]">
+          <button type="button" aria-label="メニューを閉じる" onClick={onClose} className="tap-soft grid size-11 place-items-center rounded-full text-ink hover:bg-zinc-100">
+            <X className="size-6" />
+          </button>
+        </div>
+        <div className="flex flex-col">
+          {items.map(item => (
+            <NavLink key={item.to} to={item.to} end={item.to === '/'} className={itemClass}>
+              {item.label}
+            </NavLink>
+          ))}
+        </div>
+        <div className="mt-auto flex flex-col gap-1 border-t border-line pt-4">
+          {adminItems.map(item => (
+            <NavLink key={item.to} to={item.to} className={({ isActive }) => `flex min-h-10 items-center text-sm ${isActive ? 'text-[#087f5b]' : 'text-ink-muted'}`}>
+              {item.label}
+            </NavLink>
+          ))}
+        </div>
+      </nav>
+    </div>,
+    document.body,
   )
 }
 

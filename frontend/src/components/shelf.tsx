@@ -1,12 +1,110 @@
-import { useMemo } from 'react'
+import { Fragment, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { displayColToActualCol, formatShelfLabel, getSlot, getUnit, isEmptyCell, layoutUnits, shelfIdForCell } from '../lib/shelf'
+import { displayCell, displayPositionForShelf, formatShelfLabel, getSlot, getUnit, layoutUnits, shelfDensityLevel } from '../lib/shelf'
 
 export function ShelfLocationLabel({ shelfId, size }: { shelfId: string; size: 'sm' | 'lg' }) {
   return (
     <p className={size === 'lg' ? 'text-base font-bold text-ink' : 'text-sm font-semibold text-ink'}>
       {formatShelfLabel(shelfId)}
     </p>
+  )
+}
+
+type FloorMapLocation = {
+  unitId: string
+  kind: 'bar' | 'foot'
+  index: number
+}
+
+// The physical map is numbered from right to left. The tall upper shapes are
+// base shelves, and the small lower blocks are separate side shelves backed by
+// the 3 x 7 `side-*` units in library_layout.json. The two leftmost vertical
+// locations are reserved for future base shelves 5 and 6.
+const floorMapLocations: FloorMapLocation[] = [
+  { unitId: 'base-01', kind: 'bar', index: 5 },
+  { unitId: 'base-02', kind: 'bar', index: 4 },
+  { unitId: 'base-03', kind: 'bar', index: 3 },
+  { unitId: 'base-04', kind: 'bar', index: 2 },
+  { unitId: 'side-01', kind: 'foot', index: 3 },
+  { unitId: 'side-02', kind: 'foot', index: 2 },
+  { unitId: 'side-03', kind: 'foot', index: 1 },
+  { unitId: 'side-04', kind: 'foot', index: 0 },
+]
+
+const barPositions = [0, 93, 119, 212, 238, 331]
+const footPositions = [119, 192, 238, 311]
+
+/**
+ * Compact physical floor map shared by the index and book-detail pages.
+ * A shelf ID takes precedence over a selected unit so the exact book location
+ * can be called out without callers having to resolve layout data themselves.
+ */
+export function LibraryMap({
+  selectedUnit,
+  shelfId,
+  unitCounts,
+  selectionTone = 'green',
+  onUnitClick,
+  size = 'default',
+}: {
+  selectedUnit?: string
+  shelfId?: string
+  unitCounts?: Record<string, number>
+  selectionTone?: 'green' | 'charcoal'
+  onUnitClick?: (unitId: string) => void
+  size?: 'default' | 'lg'
+}) {
+  const shelfUnit = getSlot(shelfId)?.unit
+  const activeUnit = shelfUnit ?? selectedUnit
+  const marker = shelfUnit ? floorMapLocations.find(location => location.unitId === shelfUnit) : undefined
+  const locationFor = (kind: FloorMapLocation['kind'], index: number) => floorMapLocations.find(location => location.kind === kind && location.index === index)
+  const renderUnit = (location: FloorMapLocation | undefined, className: string, style: { left: number }) => {
+    const active = location?.unitId === activeUnit
+    const count = location ? (unitCounts?.[location.unitId] ?? 0) : 0
+    const activeBackground = selectionTone === 'charcoal' ? 'bg-[#363636]' : 'bg-[#087f5b]'
+    const classes = `${className} ${active ? activeBackground : densityBackground(count)} ${location && onUnitClick ? 'tap-soft cursor-pointer transition hover:brightness-95' : ''}`
+    if (!location || !onUnitClick) return <div className={classes} style={style} />
+    return (
+      <button
+        type="button"
+        onClick={() => onUnitClick(location.unitId)}
+        aria-label={unitName(location.unitId)}
+        aria-pressed={active}
+        className={classes}
+        style={style}
+      />
+    )
+  }
+
+  const markerLeft = marker
+    ? marker.kind === 'bar'
+      ? Math.max(0, Math.min(286, barPositions[marker.index] - 24))
+      : Math.max(0, Math.min(286, footPositions[marker.index] - 13))
+    : 0
+  const markerTop = marker?.kind === 'foot' ? 88 : 14
+
+  const frameClass = size === 'lg'
+    ? 'relative h-[151px] w-[298px] max-w-full md:h-[216px] md:w-[426px]'
+    : 'relative h-[151px] w-[298px] max-w-full md:h-[180px] md:w-[355px]'
+  const scaleClass = size === 'lg' ? 'scale-[0.84] md:scale-[1.2]' : 'scale-[0.84] md:scale-100'
+
+  return (
+    <div className={frameClass} role={onUnitClick ? 'group' : 'img'} aria-label={shelfUnit ? '本がある棚を緑色で表示' : '図書室の棚マップ'}>
+      <div className={`absolute left-0 top-0 h-[180px] w-[355px] origin-top-left ${scaleClass}`}>
+        {barPositions.map((left, index) => (
+          <Fragment key={left}>{renderUnit(locationFor('bar', index), 'absolute top-0 h-[154px] w-6', { left })}</Fragment>
+        ))}
+        {footPositions.map((left, index) => (
+          <Fragment key={left}>{renderUnit(locationFor('foot', index), 'absolute top-[156px] h-6 w-[43px]', { left })}</Fragment>
+        ))}
+        {marker && (
+          <div className="absolute h-[54px] w-[69px] bg-[#d9d9d9] px-2 pt-4 text-center text-base font-semibold text-ink" style={{ left: markerLeft, top: markerTop }}>
+            ここ！
+            <span className="absolute -bottom-3 left-1/2 size-0 -translate-x-1/2 border-x-[12px] border-t-[12px] border-x-transparent border-t-[#d9d9d9]" />
+          </div>
+        )}
+      </div>
+    </div>
   )
 }
 
@@ -32,23 +130,30 @@ export function ShelfMapHighlight({
         const row = unit.rows - rowIndex
         return Array.from({ length: unit.cols }, (_, colIndex) => {
           const displayCol = colIndex + 1
-          const col = displayColToActualCol(unit, displayCol)
-          if (isEmptyCell(unit, col, row)) return null
-          const shelfId = shelfIdForCell(unit.unit, col, row)
-          const cellId = `c${String(displayCol).padStart(2, '0')}-r${String(row).padStart(2, '0')}`
-          const active = highlights.has(cellId) || highlights.has(shelfId)
+          const position = displayCell(unit, displayCol, row)
+          const x = colIndex * (cell + gap)
+          const y = rowIndex * (cell + gap)
+          if (position.empty) {
+            return (
+              <g key={position.shelfId} aria-label="構造上の空き区画">
+                <rect x={x} y={y} width={cell} height={cell} rx={5} fill="#f4f4f5" stroke="#d4d4d8" />
+                <path d={`M ${x + 6} ${y + 6} L ${x + cell - 6} ${y + cell - 6} M ${x + cell - 6} ${y + 6} L ${x + 6} ${y + cell - 6}`} stroke="#d4d4d8" strokeWidth={1.5} />
+              </g>
+            )
+          }
+          const active = highlights.has(position.displayCellId) || highlights.has(position.shelfId)
           return (
             <rect
-              key={shelfId}
-              x={colIndex * (cell + gap)}
-              y={rowIndex * (cell + gap)}
+              key={position.shelfId}
+              x={x}
+              y={y}
               width={cell}
               height={cell}
               rx={5}
               className={active ? 'animate-pulse fill-primary' : 'fill-white'}
               stroke={active ? '#15803d' : '#d4d4d8'}
               strokeWidth={active ? 2 : 1}
-              onClick={() => onCellClick?.(shelfId)}
+              onClick={() => onCellClick?.(position.shelfId)}
             />
           )
         })
@@ -68,17 +173,17 @@ export function LibraryFloorMap({
   const side = layoutUnits.filter(unit => unit.kind === 'side')
   return (
     <div className="rounded-xl border border-line bg-white p-4 shadow-sm">
-      <div className="grid gap-3">
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+      <div className="overflow-x-auto pb-2">
+        <div className="flex min-w-max items-start gap-3">
           {base.map(unit => (
             <UnitButton key={unit.unit} unitId={unit.unit} count={unitCounts[unit.unit] ?? 0} onClick={onUnitClick} />
           ))}
-        </div>
-        <div className="grid grid-cols-4 gap-3">
           {side.map(unit => (
             <UnitButton key={unit.unit} unitId={unit.unit} count={unitCounts[unit.unit] ?? 0} onClick={onUnitClick} compact />
           ))}
         </div>
+      </div>
+      <div className="mt-3">
         <div className="rounded-lg border border-dashed border-line bg-zinc-50 py-2 text-center text-xs font-semibold text-ink-muted">
           入口
         </div>
@@ -102,9 +207,12 @@ function UnitButton({
     <button
       type="button"
       onClick={() => onClick(unitId)}
-      className={`rounded-lg border border-line bg-zinc-50 p-3 text-left hover:border-primary ${compact ? 'min-h-20' : 'min-h-28'}`}
+      className={`rounded-lg border border-line bg-zinc-50 p-2 text-left hover:border-primary ${compact ? 'w-24' : 'w-56'}`}
     >
       <p className="font-bold text-ink">{unitName(unitId)}</p>
+      <div className="mt-2 rounded border border-line bg-white p-1">
+        <ShelfMapHighlight unitId={unitId} highlight={[]} />
+      </div>
       <p className="mt-2 inline-flex rounded-full bg-primary-soft px-2 py-1 text-xs font-semibold text-primary">{count}冊</p>
     </button>
   )
@@ -128,27 +236,25 @@ export function ShelfUnitGrid({
         <p className="text-xs text-ink-muted">色が濃いほど本が多い区画</p>
       </div>
       <div
-        className="grid gap-1"
+        className="grid gap-1.5"
         style={{ gridTemplateColumns: `repeat(${unit.cols}, minmax(0, 1fr))` }}
       >
         {Array.from({ length: unit.rows }, (_, rowIndex) => {
           const row = unit.rows - rowIndex
           return Array.from({ length: unit.cols }, (_, colIndex) => {
             const displayCol = colIndex + 1
-            const col = displayColToActualCol(unit, displayCol)
-            const shelfId = shelfIdForCell(unit.unit, col, row)
-            const empty = isEmptyCell(unit, col, row)
-            const count = cellCounts[shelfId] ?? 0
+            const position = displayCell(unit, displayCol, row)
+            const count = cellCounts[position.shelfId] ?? 0
             return (
               <button
-                key={shelfId}
+                key={position.shelfId}
                 type="button"
-                disabled={empty}
-                onClick={() => onCellClick(shelfId)}
-                className={`aspect-square rounded text-[10px] font-semibold ${empty ? 'bg-zinc-100 text-zinc-300' : countTone(count)}`}
-                aria-label={formatShelfLabel(shelfId)}
+                disabled={position.empty}
+                onClick={() => onCellClick(position.shelfId)}
+                className={`aspect-square rounded text-[10px] font-semibold ${position.empty ? 'bg-zinc-100 text-zinc-300' : countTone(count)}`}
+                aria-label={formatShelfLabel(position.shelfId)}
               >
-                {empty ? '' : count || ''}
+                {position.empty ? '' : count || ''}
               </button>
             )
           })
@@ -164,10 +270,9 @@ export function FreshnessBadge({ lastSeenAt }: { lastSeenAt?: string }) {
 }
 
 export function ShelfMiniMap({ shelfId }: { shelfId: string }) {
-  const slot = getSlot(shelfId)
-  if (!slot) return null
-  const cellId = `c${String(slot.col).padStart(2, '0')}-r${String(slot.row).padStart(2, '0')}`
-  return <ShelfMapHighlight unitId={slot.unit} highlight={[cellId]} />
+  const position = displayPositionForShelf(shelfId)
+  if (!position) return null
+  return <ShelfMapHighlight unitId={position.unit.unit} highlight={[position.shelfId]} />
 }
 
 export function useGoToShelf() {
@@ -181,10 +286,19 @@ function unitName(unitId: string): string {
 }
 
 function countTone(count: number): string {
-  if (count >= 6) return 'bg-green-500 text-white'
-  if (count >= 3) return 'bg-green-300 text-green-950'
-  if (count >= 1) return 'bg-green-100 text-green-800'
-  return 'bg-white text-zinc-300 border border-line'
+  const level = shelfDensityLevel(count)
+  if (level === 'high') return 'bg-[#9bcfbd] text-[#064e3b] ring-1 ring-inset ring-[#6bb8a0] hover:brightness-95'
+  if (level === 'mid') return 'bg-[#c8e5da] text-[#065f46] ring-1 ring-inset ring-[#9bcfbd] hover:brightness-95'
+  if (level === 'low') return 'bg-[#e7f3ef] text-[#087f5b] ring-1 ring-inset ring-[#c8e5da] hover:brightness-95'
+  return 'bg-white text-zinc-300 border border-line hover:bg-zinc-50'
+}
+
+function densityBackground(count: number): string {
+  const level = shelfDensityLevel(count)
+  if (level === 'high') return 'bg-[#9bcfbd]'
+  if (level === 'mid') return 'bg-[#c8e5da]'
+  if (level === 'low') return 'bg-[#e7f3ef]'
+  return 'bg-[#d9d9d9]'
 }
 
 function freshnessLabel(value: string | undefined): string {

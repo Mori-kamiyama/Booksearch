@@ -25,11 +25,17 @@ Globals:
         BUCKET: !Ref AssetsBucket
         JOBS_TABLE: !Ref JobsTable
         CROPS_TABLE: !Ref CropsTable
+        CROP_FINGERPRINTS_TABLE: !Ref CropFingerprintsTable
         SHELF_OBSERVATIONS_TABLE: !Ref ShelfObservationsTable
         SHELF_CANDIDATES_TABLE: !Ref ShelfCandidatesTable
         OCR_QUEUE_URL: !Ref OcrQueue
         LOOKUP_QUEUE_URL: !Ref LookupQueue
         SECRET_GEMINI_ARN: !Ref GeminiSecret
+        # Workers use these to recognize their last attempt and drop a single
+        # frame/crop instead of stalling a live session. Keep them equal to the
+        # matching queue's maxReceiveCount.
+        YOLO_MAX_RECEIVE_COUNT: "2"
+        OCR_MAX_RECEIVE_COUNT: "3"
 
 Resources:
 
@@ -48,6 +54,10 @@ Resources:
             Status: Enabled
             Prefix: crops/
             ExpirationInDays: 30
+          - Id: ExpireLiveFrames
+            Status: Enabled
+            Prefix: live/
+            ExpirationInDays: 7
       CorsConfiguration:
         CorsRules:
           - AllowedHeaders: ['*']
@@ -82,6 +92,18 @@ Resources:
           KeyType: HASH
         - AttributeName: crop_id
           KeyType: RANGE
+
+  CropFingerprintsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${ProjectName}-crop-fingerprints
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: fingerprint_scope
+          AttributeType: S
+      KeySchema:
+        - AttributeName: fingerprint_scope
+          KeyType: HASH
 
   ShelfObservationsTable:
     Type: AWS::DynamoDB::Table
@@ -193,6 +215,7 @@ Resources:
         - DynamoDBReadPolicy: { TableName: !Ref CropsTable }
         - DynamoDBReadPolicy: { TableName: !Ref ShelfCandidatesTable }
         - SQSSendMessagePolicy: { QueueName: !GetAtt YoloQueue.QueueName }
+        - SQSSendMessagePolicy: { QueueName: !GetAtt LookupQueue.QueueName }
       Events:
         AnyRoot:
           Type: HttpApi
@@ -220,6 +243,7 @@ Resources:
         - S3CrudPolicy: { BucketName: !Ref AssetsBucket }
         - DynamoDBCrudPolicy: { TableName: !Ref JobsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref CropsTable }
+        - DynamoDBReadPolicy: { TableName: !Ref CropFingerprintsTable }
         - SQSSendMessagePolicy: { QueueName: !GetAtt OcrQueue.QueueName }
         - SQSSendMessagePolicy: { QueueName: !GetAtt LookupQueue.QueueName }
       Events:
@@ -250,6 +274,7 @@ Resources:
         - S3CrudPolicy: { BucketName: !Ref AssetsBucket }
         - DynamoDBCrudPolicy: { TableName: !Ref JobsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref CropsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref CropFingerprintsTable }
         - SQSSendMessagePolicy: { QueueName: !GetAtt LookupQueue.QueueName }
         - Statement:
             Effect: Allow
@@ -297,6 +322,8 @@ Outputs:
     Value: !Ref JobsTable
   CropsTable:
     Value: !Ref CropsTable
+  CropFingerprintsTable:
+    Value: !Ref CropFingerprintsTable
   YoloQueueUrl:
     Value: !Ref YoloQueue
   OcrQueueUrl:

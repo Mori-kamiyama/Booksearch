@@ -1,106 +1,67 @@
 # Library Layout Model
 
-## Purpose
+## Source of truth
 
-This note captures the physical shelf structure as a working model for shelf IDs,
-AprilTag placement, and recognition-code generation. It is not yet a complete
-inventory of books or genres.
+`data/library_map.json` is the only hand-edited physical shelf map. It defines
+the coordinate convention, unit orientation, empty regions, AprilTag dictionary,
+and deterministic tag-selection rule.
 
-The machine-readable source file is `data/library_layout.json`. Regenerate it
-with:
+The following files are generated compatibility artifacts and must not be
+edited independently:
+
+- `data/library_layout.json`
+- `frontend/src/data/library_layout.json`
+- `data/apriltag_library_map.json`
+- `api/tags/apriltag_library_map.json`
+- `frontend/tag-placement/public/apriltag_library_map.json`
+- `aws/functions/yolo_worker/assets/apriltag_library_map.json`
+
+Regenerate them with:
 
 ```bash
 uv run python scripts/generate_library_layout.py
+uv run python scripts/generate_apriltag_assets.py
+uv run python scripts/visualize_library_tag_layout.py
 ```
 
-## Known Structure
+## Coordinates
 
-- The base library has 4 parallel bookshelf units, counted from the entrance
-  side.
-- Each base bookshelf unit is a 13 x 7 grid of boxes.
-- In every base bookshelf unit, columns 4 through 7 have an empty area covering
-  the bottom 5 rows.
-- There are also 4 side bookshelves. Each side bookshelf is a 3 x 7 grid.
+- `canonical_col` is the stable column encoded in `shelf_id`.
+- `display_col` is the physical left-to-right position in the placement PNG.
+- `row` is always bottom-to-top.
+- `physical_intersection` uses display coordinates.
+- tag `quadrants` contain canonical shelf IDs for the physically adjacent boxes.
 
-## Coordinate Convention
+`base-01` through `base-03` are mirrored, so:
 
-Use a stable grid coordinate before assigning human-facing labels:
+```text
+display_col = 14 - canonical_col
+canonical_col = 14 - display_col
+```
 
-- `unit`: one of the 4 parallel base bookshelf units, plus the side bookshelf
-  units.
-- `unit=1` is the entrance-side base bookshelf unit.
-- `col`: 1 to 13 for base units, counted from the entrance side.
-- `row`: 1 to 7, counted bottom to top.
-- `slot`: one physical box at `(unit, col, row)`.
+Other units are not mirrored. All UI renderers use the shared conversion in
+`frontend/src/lib/shelf.ts`.
 
-Physical orientation note:
+## Physical structure
 
-- `base-01` faces the opposite left/right direction from the other base units
-  in the AprilTag placement guide. The stable shelf IDs still use the same
-  `c01..c13` coordinate shape, but tag quadrant mapping mirrors `base-01`
-  columns when generating `data/apriltag_library_map.json`.
+- `base-01` through `base-04`: 13 columns x 7 rows.
+- `side-01` through `side-04`: 3 columns x 7 rows.
+- Every base unit has canonical columns 4..7 empty in rows 1..5.
+- `base-04` additionally has canonical columns 10..13 empty in rows 3..5.
 
-For the side bookshelves:
+Derived totals:
 
-- `unit`: `side-01` through `side-04`
-- `col`: 1 to 3
-- `row`: 1 to 7
+- 448 slots including structural empty boxes.
+- 92 structural empty boxes.
+- 356 usable shelf boxes.
+- 157 AprilTags covering every usable shelf box.
 
-## Empty Slots
+Shelf IDs have the stable form
+`{unit}-c{canonical_col:02d}-r{row:02d}`.
 
-For every base bookshelf unit, these slots are empty:
+## Invariants
 
-- `col` in `4..7`
-- `row` in `1..5`
-
-That is `4 columns * 5 rows = 20` empty slots per base unit.
-
-## Derived Counts
-
-- Base capacity before blanks: `4 * 13 * 7 = 364`
-- Empty base slots: `4 * 4 * 5 = 80`
-- Usable base slots: `284`
-- Side bookshelf slots: `4 * 3 * 7 = 84`
-- Total usable slots: `368`
-
-## Proposed Shelf ID Shape
-
-Use IDs that encode the physical coordinate directly:
-
-- Base: `base-{unit}-c{col:02d}-r{row:02d}`
-- Side: `side-{unit}-c{col:02d}-r{row:02d}`
-
-Examples:
-
-- `base-01-c01-r01`
-- `base-01-c13-r07`
-- `base-03-c08-r02`
-- `side-01-c03-r07`
-- `side-04-c03-r07`
-
-This is more scalable than the current test IDs like `shelf-A-01`, because it
-can represent all 4 parallel bookshelf units and the side bookshelf without
-inventing many letter lanes.
-
-## Recognition-Code Hypothesis
-
-The recognition system should map camera-visible tags to these slot IDs, not
-directly to book titles. A later recognition-code set can be generated from the
-layout:
-
-1. Generate all valid slot IDs.
-2. Exclude empty slots.
-3. Place AprilTags at grid intersections or known shelf boundaries.
-4. Map tag quadrants/regions to nearby slot IDs.
-5. Accumulate book observations into `book_shelf_candidates`.
-
-The current implementation already supports the final step with AprilTag-based
-`shelf_id` assignment. The missing piece is a full layout-derived map instead of
-the small `shelf-A-*` / `shelf-B-*` test map.
-
-## Open Questions
-
-- Is `row=1` bottom-to-top acceptable for users, or should the UI display
-  Japanese labels like `下から1段目`?
-- Are boxes the right shelf-location unit, or should multiple boxes sometimes
-  be grouped into a larger shelf region?
+`tests/test_library_map.py` verifies that all generated consumers are identical,
+all 157 physical quadrants point to the adjacent displayed shelf boxes, every
+usable box is covered, and the physical layout matches its golden fingerprint.
+The placement PNG SHA-256 stored in the source is the attached accepted layout.

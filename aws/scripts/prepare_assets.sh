@@ -9,6 +9,7 @@ AWS_DIR="$ROOT/aws"
 
 YOLO_ASSETS="$AWS_DIR/functions/yolo_worker/assets"
 LOOKUP_ASSETS="$AWS_DIR/functions/lookup_worker/assets"
+GO_API_ASSETS="$AWS_DIR/functions/go_api"
 
 mkdir -p "$YOLO_ASSETS" "$LOOKUP_ASSETS"
 
@@ -18,19 +19,14 @@ YOLO_MODEL_SOURCE="$ROOT/aws/functions/yolo_worker/assets/yolo_model.pt"
 if [[ ! -f "$YOLO_MODEL_SOURCE" ]]; then
   YOLO_MODEL_SOURCE="$ROOT/runs/detect/runs/picture_box_detection/yolo11n_quick/weights/best.pt"
 fi
-cp "$YOLO_MODEL_SOURCE" "$YOLO_ASSETS/yolo_model.pt"
-# AprilTag mapping は example のものを「最初の JSON object だけ」抜く
-# (元ファイルは JSON object が2つ連続している)
-uv run python - <<'PY'
-import json, pathlib, re, sys
-src = pathlib.Path("scripts/apriltag_shelf_map.example.json").read_text(encoding="utf-8")
-# 連結 JSON のうち最初の 36h11 マッピングを採用
-decoder = json.JSONDecoder()
-obj, _ = decoder.raw_decode(src.lstrip())
-pathlib.Path("aws/functions/yolo_worker/assets/apriltag_shelf_map.json").write_text(
-    json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
-print("  apriltag_shelf_map.json:", obj.get("dictionary"))
-PY
+if [[ "$(cd "$(dirname "$YOLO_MODEL_SOURCE")" && pwd)/$(basename "$YOLO_MODEL_SOURCE")" != "$(cd "$(dirname "$YOLO_ASSETS/yolo_model.pt")" && pwd)/$(basename "$YOLO_ASSETS/yolo_model.pt")" ]]; then
+  cp "$YOLO_MODEL_SOURCE" "$YOLO_ASSETS/yolo_model.pt"
+else
+  echo "  yolo_model.pt: already in place"
+fi
+# Canonical 36h11 mapping. Always refresh it so a stale image asset cannot
+# silently override the placement guide used by the frontend.
+cp "$ROOT/data/apriltag_library_map.json" "$YOLO_ASSETS/apriltag_library_map.json"
 cp "$ROOT/data/known_books.json" "$YOLO_ASSETS/known_books.json"
 
 # Lookup Worker: library.db + known_books
@@ -40,6 +36,9 @@ if [[ ! -f "$LIBRARY_DB_SOURCE" ]]; then
   LIBRARY_DB_SOURCE="$ROOT/aws/functions/go_api/library.db"
 fi
 cp "$LIBRARY_DB_SOURCE" "$LOOKUP_ASSETS/library.db"
+if [[ "$LIBRARY_DB_SOURCE" != "$GO_API_ASSETS/library.db" ]]; then
+  cp "$LIBRARY_DB_SOURCE" "$GO_API_ASSETS/library.db"
+fi
 cp "$ROOT/data/known_books.json" "$LOOKUP_ASSETS/known_books.json"
 
 echo "✓ assets ready"

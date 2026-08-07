@@ -1,0 +1,108 @@
+{
+  "schema_version": 2,
+  "map_id": "booksearch-library-physical-v2",
+  "coordinate_system": {
+    "canonical_col": "Stable shelf ID column, c01..c13 (or c01..c03 for side units)",
+    "display_col": "Left-to-right column in the physical placement PNG",
+    "row": "Bottom-to-top row, r01..r07",
+    "physical_intersection": "Intersection in display coordinates; x=1 is between display columns 1 and 2",
+    "shelf_id": "{unit}-c{canonical_col:02d}-r{row:02d}"
+  },
+  "tag_dictionary": "DICT_APRILTAG_36h11",
+  "tag_expected_angle_deg": 0,
+  "tag_angle_tolerance_deg": 35,
+  "tag_auto_distance_scale": 1.25,
+  "tag_selection": {
+    "strategy": "sparse_checkerboard_then_greedy_single_coverage",
+    "coverage": "Every usable shelf slot is covered by at least one tag",
+    "id_order": "Unit order, then canonical intersection column, then row; locked by validation tests"
+  },
+  "golden": {
+    "tag_count": 157,
+    "physical_layout_sha256": "1c05fb3674a67dfdee6d88671fc807fff13f5161078a79c27dbf28b68a06f738",
+    "placement_png_sha256": "2a16ace765413112802597619886a2c089f9c97b038519b7f953ad71aafcc24a"
+  },
+  "units": [
+    {
+      "unit": "base-01",
+      "kind": "base",
+      "unit_index_from_entrance": 1,
+      "cols": 13,
+      "rows": 7,
+      "display_mirrored": true,
+      "empty_regions": [
+        { "canonical_cols": [4, 5, 6, 7], "rows": [1, 2, 3, 4, 5] }
+      ]
+    },
+    {
+      "unit": "base-02",
+      "kind": "base",
+      "unit_index_from_entrance": 2,
+      "cols": 13,
+      "rows": 7,
+      "display_mirrored": true,
+      "empty_regions": [
+        { "canonical_cols": [4, 5, 6, 7], "rows": [1, 2, 3, 4, 5] }
+      ]
+    },
+    {
+      "unit": "base-03",
+      "kind": "base",
+      "unit_index_from_entrance": 3,
+      "cols": 13,
+      "rows": 7,
+      "display_mirrored": true,
+      "empty_regions": [
+        { "canonical_cols": [4, 5, 6, 7], "rows": [1, 2, 3, 4, 5] }
+      ]
+    },
+    {
+      "unit": "base-04",
+      "kind": "base",
+      "unit_index_from_entrance": 4,
+      "cols": 13,
+      "rows": 7,
+      "display_mirrored": false,
+      "empty_regions": [
+        { "canonical_cols": [4, 5, 6, 7], "rows": [1, 2, 3, 4, 5] },
+        { "canonical_cols": [10, 11, 12, 13], "rows": [3, 4, 5] }
+      ]
+    },
+    {
+      "unit": "side-01",
+      "kind": "side",
+      "unit_index": 1,
+      "cols": 3,
+      "rows": 7,
+      "display_mirrored": false,
+      "empty_regions": []
+    },
+    {
+      "unit": "side-02",
+      "kind": "side",
+      "unit_index": 2,
+      "cols": 3,
+      "rows": 7,
+      "display_mirrored": false,
+      "empty_regions": []
+    },
+    {
+      "unit": "side-03",
+      "kind": "side",
+      "unit_index": 3,
+      "cols": 3,
+      "rows": 7,
+      "display_mirrored": false,
+      "empty_regions": []
+    },
+    {
+      "unit": "side-04",
+      "kind": "side",
+      "unit_index": 4,
+      "cols": 3,
+      "rows": 7,
+      "display_mirrored": false,
+      "empty_regions": []
+    }
+  ]
+}

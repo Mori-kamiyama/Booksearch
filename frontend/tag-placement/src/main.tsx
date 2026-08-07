@@ -8,8 +8,8 @@ type Quadrant = 'top_left' | 'top_right' | 'bottom_right' | 'bottom_left'
 
 interface TagConfig {
   unit?: string
-  grid_intersection?: {
-    between_cols?: number[]
+  physical_intersection?: {
+    between_display_cols?: number[]
     between_rows?: number[]
   }
   expected_angle_deg?: number
@@ -18,6 +18,7 @@ interface TagConfig {
 }
 
 interface ShelfMap {
+  map_id?: string
   dictionary?: string
   tags?: Record<string, TagConfig>
 }
@@ -32,6 +33,7 @@ interface DetectedTag {
 }
 
 interface DetectResponse {
+  map_id?: string
   tags: DetectedTag[]
 }
 
@@ -105,6 +107,9 @@ function App() {
       const res = await fetch('/api/tags/detect', { method: 'POST', body: form })
       if (!res.ok) throw new Error(await res.text())
       const data = (await res.json()) as DetectResponse
+      if (data.map_id && data.map_id !== shelfMap?.map_id) {
+        throw new Error(`配置データの版が一致しません: ${data.map_id}`)
+      }
       setDetectedTags(data.tags ?? [])
 
       const usable = (data.tags ?? []).find(t => t.mapped && t.orientation_status !== 'mismatch' && tagIDs.includes(String(t.tag_id)))
@@ -123,7 +128,7 @@ function App() {
       detectingRef.current = false
       setDetecting(false)
     }
-  }, [tagIDs])
+  }, [shelfMap?.map_id, tagIDs])
 
   const stopCamera = useCallback(() => {
     if (intervalRef.current != null) {

@@ -114,7 +114,7 @@ BUCKET=$(aws cloudformation describe-stacks --stack-name booksearch-frontend \
   --query "Stacks[0].Outputs[?OutputKey=='FrontendBucketName'].OutputValue" --output text)
 DIST=$(aws cloudformation describe-stacks --stack-name booksearch-frontend \
   --query "Stacks[0].Outputs[?OutputKey=='FrontendDistributionId'].OutputValue" --output text)
-aws s3 sync dist/ s3://$BUCKET/ --delete --cache-control "public, max-age=300"
+aws s3 sync dist/ s3://$BUCKET/ --delete --exclude ".DS_Store" --cache-control "public, max-age=300"
 aws cloudfront create-invalidation --distribution-id $DIST --paths "/*"
 ```
 
@@ -201,7 +201,7 @@ aws/
     │   ├── requirements.txt
     │   └── assets/            # prepare_assets.sh が生成
     │       ├── yolo_model.pt
-    │       ├── apriltag_shelf_map.json
+    │       ├── apriltag_library_map.json
     │       └── known_books.json
     ├── ocr_worker/            # Python zip Lambda
     │   ├── handler.py         # Gemini OCR + ATOMIC INCR

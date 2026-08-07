@@ -294,6 +294,8 @@ def annotate_catalog(
 
     catalog["shelf_mapping"] = {
         "mapping_file": str(mapping_path),
+        "map_id": mapping.get("map_id"),
+        "coordinate_schema_version": mapping.get("coordinate_schema_version"),
         "tag_detections": tag_summaries,
     }
     return catalog

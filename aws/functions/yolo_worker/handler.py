@@ -21,23 +21,30 @@ import math
 import os
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import boto3
 import cv2
 import numpy as np
+from botocore.exceptions import ClientError
 from ultralytics import YOLO
 
 BUCKET = os.environ["BUCKET"]
 JOBS_TABLE = os.environ["JOBS_TABLE"]
 CROPS_TABLE = os.environ["CROPS_TABLE"]
+FINGERPRINTS_TABLE = os.environ.get("CROP_FINGERPRINTS_TABLE")
 OCR_QUEUE_URL = os.environ["OCR_QUEUE_URL"]
 LOOKUP_QUEUE_URL = os.environ["LOOKUP_QUEUE_URL"]
 TASK_ROOT = os.environ.get("LAMBDA_TASK_ROOT", ".")
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
+# Must match the YoloQueue RedrivePolicy so the last attempt is recognized
+# before the message is moved to the DLQ.
+MAX_RECEIVE_COUNT = int(os.environ.get("YOLO_MAX_RECEIVE_COUNT", "2"))
 
 MODEL_PATH = Path(TASK_ROOT) / "assets" / "yolo_model.pt"
-APRILTAG_MAP_PATH = Path(TASK_ROOT) / "assets" / "apriltag_shelf_map.json"
+APRILTAG_MAP_PATH = Path(TASK_ROOT) / "assets" / "apriltag_library_map.json"
 
 # YOLO はコンテナの warm 再利用でロードしっぱなしにする
 _yolo_model: YOLO | None = None
@@ -46,6 +53,7 @@ sqs = boto3.client("sqs")
 ddb = boto3.resource("dynamodb")
 jobs_table = ddb.Table(JOBS_TABLE)
 crops_table = ddb.Table(CROPS_TABLE)
+fingerprints_table = ddb.Table(FINGERPRINTS_TABLE) if FINGERPRINTS_TABLE else None
 
 
 def get_model() -> YOLO:
@@ -70,10 +78,14 @@ def assess_quality(crop: np.ndarray, box: tuple[int, int, int, int],
     edge_touch = []
     margin_x = max(2, int(width * 0.005))
     margin_y = max(2, int(height * 0.005))
-    if x1 <= margin_x: edge_touch.append("left")
-    if y1 <= margin_y: edge_touch.append("top")
-    if x2 >= width - margin_x: edge_touch.append("right")
-    if y2 >= height - margin_y: edge_touch.append("bottom")
+    if x1 <= margin_x:
+        edge_touch.append("left")
+    if y1 <= margin_y:
+        edge_touch.append("top")
+    if x2 >= width - margin_x:
+        edge_touch.append("right")
+    if y2 >= height - margin_y:
+        edge_touch.append("bottom")
 
     # 画像サイズ相対の閾値。スマホ等の小さい入力でも crop が落ちないように。
     # MIN_SHORT_EDGE_PX, MIN_SHORT_EDGE_RATIO, MIN_BLUR_SCORE は環境変数で上書き可。
@@ -83,10 +95,14 @@ def assess_quality(crop: np.ndarray, box: tuple[int, int, int, int],
     min_blur = float(os.environ.get("MIN_BLUR_SCORE", "50"))
 
     reasons = []
-    if blur_score < min_blur: reasons.append("blurry")
-    if short_edge < min_short_edge: reasons.append("too_small")
-    if edge_touch and aspect_ratio >= 1.45: reasons.append("edge_wide")
-    elif edge_touch and aspect_ratio <= 0.45: reasons.append("edge_tall")
+    if blur_score < min_blur:
+        reasons.append("blurry")
+    if short_edge < min_short_edge:
+        reasons.append("too_small")
+    if edge_touch and aspect_ratio >= 1.45:
+        reasons.append("edge_wide")
+    elif edge_touch and aspect_ratio <= 0.45:
+        reasons.append("edge_tall")
 
     return {
         "blur_score": round(blur_score, 2),
@@ -121,9 +137,12 @@ class DetectedTag:
     def quadrant_for_point(self, point) -> str:
         cx, cy = float(self.center[0]), float(self.center[1])
         px, py = point
-        if px < cx and py < cy: return "top_left"
-        if px >= cx and py < cy: return "top_right"
-        if px >= cx and py >= cy: return "bottom_right"
+        if px < cx and py < cy:
+            return "top_left"
+        if px >= cx and py < cy:
+            return "top_right"
+        if px >= cx and py >= cy:
+            return "bottom_right"
         return "bottom_left"
 
     def distance_to_point(self, point) -> float:
@@ -210,14 +229,19 @@ def assign_shelf(box_xyxy, tags, mapping, max_distance=None):
         return None
     votes.sort(key=lambda v: v["distance_px"])
     unique = {v["shelf_id"] for v in votes}
+    provenance = {
+        "map_id": mapping.get("map_id"),
+        "coordinate_schema_version": mapping.get("coordinate_schema_version"),
+    }
     if len(unique) == 1:
-        return {"shelf_id": votes[0]["shelf_id"], "status": "assigned", "votes": votes}
+        return {"shelf_id": votes[0]["shelf_id"], "status": "assigned", "votes": votes, **provenance}
     return {
         "shelf_id": votes[0]["shelf_id"],
         "status": "assigned",
         "reason": "nearest_of_conflicting_votes",
         "conflicting_shelf_ids": sorted(unique),
         "votes": votes,
+        **provenance,
     }
 
 
@@ -233,19 +257,59 @@ def clamp_box(xyxy, image_size, pad_ratio=0.02):
     return x1, y1, max(x1 + 1, x2), max(y1 + 1, y2)
 
 
-def process_job(job_id: str, image_key: str) -> None:
+def crop_phash(crop: np.ndarray, hash_size: int = 8) -> int:
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    resized = cv2.resize(gray, (hash_size, hash_size), interpolation=cv2.INTER_AREA)
+    average = float(resized.mean())
+    value = 0
+    for pixel in resized.flatten():
+        value = (value << 1) | int(pixel > average)
+    return value
+
+
+def hash_distance(left: int, right: int) -> int:
+    return (left ^ right).bit_count()
+
+
+def fingerprint_scope(shelf: dict[str, Any] | None, box, image_size) -> str | None:
+    if not shelf or not shelf.get("shelf_id"):
+        return None
+    width, height = image_size
+    x1, y1, x2, y2 = box
+    # Position and size are bucketed so minor camera motion remains stable, while
+    # moving/adding/removing books changes either the bucket or perceptual hash.
+    normalized = (
+        round(((x1 + x2) / 2) / width * 10),
+        round(((y1 + y2) / 2) / height * 10),
+        round((x2 - x1) / width * 10),
+        round((y2 - y1) / height * 10),
+    )
+    return f"{shelf['shelf_id']}:{':'.join(str(v) for v in normalized)}"
+
+
+def persistent_duplicate(scope: str | None, phash: int) -> dict[str, Any] | None:
+    if not scope or not fingerprints_table:
+        return None
+    item = fingerprints_table.get_item(Key={"fingerprint_scope": scope}).get("Item")
+    if not item:
+        return None
+    previous = int(str(item.get("phash", "0")), 16)
+    if hash_distance(phash, previous) <= int(os.environ.get("CROP_HASH_DISTANCE", "6")):
+        return item
+    return None
+
+
+def process_frame(job_id: str, image_key: str, frame_index: int,
+                  seen_hashes: list[tuple[int, str]], local_path: str | None = None
+                  ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     print(f"[yolo] job_id={job_id} image_key={image_key}")
-
-    # 1. S3 → /tmp
-    local_image = f"/tmp/{job_id}_input{Path(image_key).suffix}"
-    s3.download_file(BUCKET, image_key, local_image)
-
+    local_image = local_path or f"/tmp/{job_id}_{frame_index:04d}{Path(image_key).suffix or '.jpg'}"
+    if local_path is None:
+        s3.download_file(BUCKET, image_key, local_image)
     img = cv2.imread(local_image)
     if img is None:
         raise RuntimeError(f"unreadable image: {image_key}")
     height, width = img.shape[:2]
-
-    # 2. YOLO 推論
     model = get_model()
     results = model.predict(source=local_image, imgsz=640, conf=0.25, device="cpu", verbose=False)
     boxes = []
@@ -256,7 +320,6 @@ def process_job(job_id: str, image_key: str) -> None:
         )
     print(f"[yolo] detected {len(boxes)} boxes")
 
-    # 3. AprilTag (optional)
     mapping = None
     tags: list[DetectedTag] = []
     tag_diag: dict[str, Any] = {}
@@ -269,10 +332,8 @@ def process_job(job_id: str, image_key: str) -> None:
             print(f"[yolo] apriltag failed: {e}")
             tag_diag = {"error": str(e)}
 
-    # 4. crop, S3 PUT, DDB
-    image_stem = Path(image_key).stem
-    crop_records = []
-    readable_count = 0
+    image_stem = f"frame_{frame_index:06d}_{Path(image_key).stem[:12]}"
+    crop_records: list[dict[str, Any]] = []
     for i, (xyxy, score) in enumerate(boxes, 1):
         box = clamp_box(tuple(xyxy), (width, height))
         x1, y1, x2, y2 = box
@@ -286,6 +347,27 @@ def process_job(job_id: str, image_key: str) -> None:
                       ContentType="image/jpeg")
 
         shelf = assign_shelf(box, tags, mapping) if mapping else None
+        phash = crop_phash(crop)
+        scope = fingerprint_scope(shelf, box, (width, height))
+        duplicate_ref = None
+        for previous_hash, previous_crop_id in seen_hashes:
+            if hash_distance(phash, previous_hash) <= int(os.environ.get("CROP_HASH_DISTANCE", "6")):
+                duplicate_ref = {"job_id": job_id, "crop_id": previous_crop_id, "source": "session"}
+                break
+        persisted = None if duplicate_ref else persistent_duplicate(scope, phash)
+        if persisted:
+            duplicate_ref = {
+                "job_id": persisted.get("job_id"), "crop_id": persisted.get("crop_id"),
+                "source": "persistent", "titles": persisted.get("titles") or [],
+            }
+
+        status = "ocr_pending" if quality["readable"] else "skipped_low_quality"
+        ocr_error = None
+        titles: list[dict[str, Any]] = []
+        if quality["readable"] and duplicate_ref:
+            status = "skipped_duplicate_crop"
+            ocr_error = "skipped_duplicate_crop"
+            titles = duplicate_ref.get("titles") or []
 
         item = {
             "job_id": job_id,
@@ -294,71 +376,226 @@ def process_job(job_id: str, image_key: str) -> None:
             "bbox_xyxy": [int(v) for v in box],
             "detector_confidence": round(float(score), 4),
             "quality": quality,
-            "status": "ocr_pending" if quality["readable"] else "skipped_low_quality",
+            "status": status,
             "shelf": shelf,
+            "fingerprint_scope": scope,
+            "phash": f"{phash:016x}",
         }
+        if ocr_error:
+            item["ocr_error"] = ocr_error
+            item["existing_ocr_ref"] = duplicate_ref
+            item["titles"] = titles
         crops_table.put_item(Item=ddb_safe(item))
         crop_records.append(item)
-        if quality["readable"]:
-            readable_count += 1
+        if quality["readable"] and not duplicate_ref:
+            seen_hashes.append((phash, crop_id))
+    return crop_records, {"image_key": image_key, "width": width, "height": height, "apriltag": tag_diag}
 
-    # 5. jobs テーブル更新（apriltag 診断情報を含む）
+
+def extract_video_frames(video_path: str, job_id: str) -> list[str]:
+    """Extract a bounded, time-spaced set of JPEG frames from an uploaded video."""
+    interval = max(0.1, float(os.environ.get("VIDEO_FRAME_INTERVAL_SEC", "0.5")))
+    max_frames = max(1, int(os.environ.get("VIDEO_MAX_FRAMES", "120")))
+    capture = cv2.VideoCapture(video_path)
+    if not capture.isOpened():
+        raise RuntimeError(f"unreadable video: {video_path}")
+
+    frames: list[str] = []
+    next_sample = 0.0
+    frame_number = 0
+    try:
+        while len(frames) < max_frames:
+            ok, image = capture.read()
+            if not ok:
+                break
+            fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+            timestamp = frame_number / fps if fps > 0 else float(capture.get(cv2.CAP_PROP_POS_MSEC) or 0.0) / 1000.0
+            if timestamp + 1e-6 >= next_sample:
+                frame_path = f"/tmp/{job_id}_video_{len(frames) + 1:04d}.jpg"
+                if not cv2.imwrite(frame_path, image, [int(cv2.IMWRITE_JPEG_QUALITY), 92]):
+                    raise RuntimeError(f"failed to write video frame: {frame_path}")
+                frames.append(frame_path)
+                next_sample = timestamp + interval
+            frame_number += 1
+    finally:
+        capture.release()
+
+    if not frames:
+        raise RuntimeError(f"video contains no readable frames: {video_path}")
+    print(f"[yolo] extracted {len(frames)} video frames from {video_path}")
+    return frames
+
+
+def queue_final_lookup_if_ready(job_id: str, item: dict[str, Any]) -> None:
+    if not item.get("scan_closed"):
+        return
+    if int(item.get("processed_frames", 0)) < int(item.get("accepted_frames", 0)):
+        return
+    if int(item.get("ocr_done", 0)) < int(item.get("ocr_total", 0)):
+        return
+    try:
+        jobs_table.update_item(
+            Key={"job_id": job_id},
+            UpdateExpression="SET final_lookup_queued = :yes, #s = :pending",
+            ConditionExpression="attribute_not_exists(final_lookup_queued)",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={":yes": True, ":pending": "lookup_pending"},
+        )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return
+        raise
+    try:
+        sqs.send_message(
+            QueueUrl=LOOKUP_QUEUE_URL,
+            MessageBody=json.dumps({"job_id": job_id, "incremental": False}),
+        )
+    except Exception:
+        jobs_table.update_item(
+            Key={"job_id": job_id},
+            UpdateExpression="SET #s = :processing REMOVE final_lookup_queued",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={":processing": "processing"},
+        )
+        raise
+
+
+def abandon_live_frame(job_id: str, frame_key: str | None, reason: str) -> None:
+    """Give up on one live frame without stalling the session.
+
+    processed_frames must keep up with accepted_frames, otherwise the session
+    never satisfies the final-lookup condition and the job stays in
+    `processing` forever. A dropped frame costs the books in that frame only.
+    """
+    print(f"[yolo] abandoning frame {job_id}/{frame_key}: {reason}", file=sys.stderr)
+    if not frame_key:
+        return
+    try:
+        updated = jobs_table.update_item(
+            Key={"job_id": job_id},
+            UpdateExpression="SET updated_at = :u ADD processed_frame_keys :frame, "
+                             "processed_frames :one, failed_frames :one",
+            ConditionExpression="attribute_not_exists(processed_frame_keys) "
+                                "OR NOT contains(processed_frame_keys, :frame_key)",
+            ExpressionAttributeValues={
+                ":frame": {frame_key}, ":frame_key": frame_key, ":one": 1,
+                ":u": datetime.now(timezone.utc).isoformat(),
+            },
+            ReturnValues="ALL_NEW",
+        )
+        item = updated.get("Attributes", {})
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+            raise
+        item = jobs_table.get_item(Key={"job_id": job_id}).get("Item") or {}
+    queue_final_lookup_if_ready(job_id, item)
+
+
+def process_job(job_id: str, image_keys: list[str], incremental: bool = False) -> None:
+    if not image_keys:
+        raise RuntimeError("image_keys is empty")
+    if incremental:
+        existing_job = jobs_table.get_item(Key={"job_id": job_id}).get("Item") or {}
+        if image_keys[0] in (existing_job.get("processed_frame_keys") or set()):
+            print(f"[yolo] frame already processed {job_id}/{image_keys[0]}")
+            return
+    crop_records: list[dict[str, Any]] = []
+    frame_diagnostics = []
+    seen_hashes: list[tuple[int, str]] = []
+    for index, image_key in enumerate(image_keys, 1):
+        suffix = Path(image_key).suffix.lower()
+        if suffix in VIDEO_EXTENSIONS:
+            video_path = f"/tmp/{job_id}_{index:04d}{suffix}"
+            s3.download_file(BUCKET, image_key, video_path)
+            frame_paths = extract_video_frames(video_path, job_id)
+            try:
+                for frame_index, frame_path in enumerate(frame_paths, index):
+                    records, diagnostics = process_frame(job_id, image_key, frame_index, seen_hashes, frame_path)
+                    crop_records.extend(records)
+                    frame_diagnostics.append(diagnostics)
+            finally:
+                Path(video_path).unlink(missing_ok=True)
+                for frame_path in frame_paths:
+                    Path(frame_path).unlink(missing_ok=True)
+        else:
+            records, diagnostics = process_frame(job_id, image_key, index, seen_hashes)
+            crop_records.extend(records)
+            frame_diagnostics.append(diagnostics)
+
+    ocr_records = [r for r in crop_records if r["status"] == "ocr_pending"]
+    duplicate_count = sum(r["status"] == "skipped_duplicate_crop" for r in crop_records)
     skip_reason_counts: dict[str, int] = {}
     for r in crop_records:
         for reason in r["quality"].get("reasons", []):
             skip_reason_counts[reason] = skip_reason_counts.get(reason, 0) + 1
     diag = {
-        "apriltag": tag_diag,
+        "frames": frame_diagnostics,
         "skip_reasons": skip_reason_counts,
-        "readable_count": readable_count,
+        "readable_count": len(ocr_records),
+        "duplicate_count": duplicate_count,
         "total_crops": len(crop_records),
     }
-    jobs_table.update_item(
-        Key={"job_id": job_id},
-        UpdateExpression="SET #s = :s, crop_total = :n, ocr_total = :ot, ocr_done = :z, "
-                         "image_width = :w, image_height = :h, #d = :d",
-        ExpressionAttributeNames={"#s": "status", "#d": "diagnostics"},
-        ExpressionAttributeValues={
-            ":s": "ocr_pending" if readable_count > 0 else "no_readable_crops",
-            ":n": len(crop_records),
-            ":ot": readable_count,
-            ":z": 0,
-            ":w": width,
-            ":h": height,
-            ":d": ddb_safe(diag),
-        },
-    )
-
-    # 6. fan-out: 各 readable crop を OCR queue へ
-    for rec in crop_records:
-        if rec["quality"]["readable"]:
-            sqs.send_message(
-                QueueUrl=OCR_QUEUE_URL,
-                MessageBody=json.dumps({
-                    "job_id": job_id,
-                    "crop_id": rec["crop_id"],
-                    "crop_key": rec["crop_key"],
-                }),
+    first_frame = frame_diagnostics[0]
+    terminal_without_ocr = "no_detection" if not crop_records else "no_readable_crops"
+    if incremental:
+        frame_key = image_keys[0]
+        try:
+            updated = jobs_table.update_item(
+                Key={"job_id": job_id},
+                UpdateExpression="SET image_width = :w, image_height = :h, latest_diagnostics = :d, updated_at = :u "
+                                 "ADD processed_frame_keys :frame, processed_frames :one, crop_total :n, ocr_total :ot",
+                ConditionExpression="attribute_not_exists(processed_frame_keys) OR NOT contains(processed_frame_keys, :frame_key)",
+                ExpressionAttributeValues={
+                    ":frame": {frame_key}, ":frame_key": frame_key, ":one": 1,
+                    ":n": len(crop_records), ":ot": len(ocr_records),
+                    ":w": first_frame["width"], ":h": first_frame["height"],
+                    ":d": ddb_safe(diag), ":u": datetime.now(timezone.utc).isoformat(),
+                },
+                ReturnValues="ALL_NEW",
             )
-
-    # 全 crop が unreadable なら直接 lookup_queue へ (空 catalog 生成)
-    if readable_count == 0 and crop_records:
-        sqs.send_message(
-            QueueUrl=LOOKUP_QUEUE_URL,
-            MessageBody=json.dumps({"job_id": job_id}),
-        )
-    elif not crop_records:
-        # 検出 0 件: 即 lookup へ
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                print(f"[yolo] frame already processed {job_id}/{frame_key}")
+                return
+            raise
+        job_item = updated.get("Attributes", {})
+    else:
         jobs_table.update_item(
             Key={"job_id": job_id},
-            UpdateExpression="SET #s = :s, crop_total = :n",
-            ExpressionAttributeNames={"#s": "status"},
-            ExpressionAttributeValues={":s": "no_detection", ":n": 0},
+            UpdateExpression="SET #s = :s, crop_total = :n, ocr_total = :ot, ocr_done = :z, "
+                             "image_width = :w, image_height = :h, #d = :d",
+            ExpressionAttributeNames={"#s": "status", "#d": "diagnostics"},
+            ExpressionAttributeValues={
+                ":s": "ocr_pending" if ocr_records else terminal_without_ocr,
+                ":n": len(crop_records),
+                ":ot": len(ocr_records),
+                ":z": 0,
+                ":w": first_frame["width"],
+                ":h": first_frame["height"],
+                ":d": ddb_safe(diag),
+            },
         )
+        job_item = {}
+
+    for rec in ocr_records:
+        sqs.send_message(
+            QueueUrl=OCR_QUEUE_URL,
+            MessageBody=json.dumps({
+                "job_id": job_id, "crop_id": rec["crop_id"], "crop_key": rec["crop_key"],
+                "fingerprint_scope": rec.get("fingerprint_scope"), "phash": rec.get("phash"),
+                "incremental": incremental,
+            }),
+        )
+    if incremental:
+        # Cached titles and zero-detection frames still need to refresh the
+        # partial catalog/progress visible in the camera UI.
         sqs.send_message(
             QueueUrl=LOOKUP_QUEUE_URL,
-            MessageBody=json.dumps({"job_id": job_id}),
+            MessageBody=json.dumps({"job_id": job_id, "incremental": True}),
         )
+        queue_final_lookup_if_ready(job_id, job_item)
+    elif not ocr_records:
+        sqs.send_message(QueueUrl=LOOKUP_QUEUE_URL, MessageBody=json.dumps({"job_id": job_id}))
 
 
 def ddb_safe(item):
@@ -378,10 +615,21 @@ def ddb_safe(item):
 def handler(event, context):
     for rec in event.get("Records", []):
         body = json.loads(rec["body"])
+        incremental = bool(body.get("incremental"))
+        image_keys = body.get("image_keys") or [body["image_key"]]
         try:
-            process_job(body["job_id"], body["image_key"])
+            process_job(body["job_id"], image_keys, incremental)
         except Exception as e:
             print(f"[yolo] ERROR: {e}", file=sys.stderr)
+            if incremental:
+                # One bad frame out of hundreds must not fail the whole live
+                # session. Retry while SQS still has attempts left, then drop
+                # just this frame so the session can still finish.
+                receive_count = int(rec.get("attributes", {}).get("ApproximateReceiveCount", "1"))
+                if receive_count < MAX_RECEIVE_COUNT:
+                    raise
+                abandon_live_frame(body["job_id"], image_keys[0] if image_keys else None, str(e))
+                continue
             try:
                 jobs_table.update_item(
                     Key={"job_id": body["job_id"]},
