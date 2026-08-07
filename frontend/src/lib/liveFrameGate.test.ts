@@ -2,7 +2,21 @@ import { describe, expect, it } from 'vitest'
 import { frameMetrics, shouldSendFrame } from './liveFrameGate'
 
 describe('live frame gate', () => {
-  const state = { previous: new Uint8Array([1]), lastSentAt: 0 }
+  const state = { previous: new Uint8Array([1]), lastSentAt: 0, lastTagSeenAt: 1000 }
+  it('sends a slow trickle of frames when no tag is tracked', () => {
+    const sharp = { blur: 99, difference: 99, glareRatio: 0 }
+    // First frame without a tag is accepted after the no-tag interval.
+    expect(shouldSendFrame(sharp, 6000, { previous: new Uint8Array([1]), lastSentAt: 0 })).toBeNull()
+    // Immediately after is rate limited.
+    expect(shouldSendFrame(sharp, 6500, { previous: new Uint8Array([1]), lastSentAt: 6000 })).toBe('rate_limited')
+  })
+  it('still gates by tag grace period when tag was recently seen', () => {
+    const sharp = { blur: 99, difference: 99, glareRatio: 0 }
+    // Tag seen 1000ms ago at t=3000 → still within grace → unchanged skipped.
+    expect(shouldSendFrame(sharp, 3000, { ...state, lastTagSeenAt: 1000 })).toBeNull()
+    // Static frame with active tag → unchanged.
+    expect(shouldSendFrame({ blur: 99, difference: 1, glareRatio: 0 }, 3000, { ...state, lastTagSeenAt: 1000 })).toBe('unchanged')
+  })
   it('skips blurred, static and too-frequent frames', () => {
     expect(shouldSendFrame({ blur: 1, difference: 99, glareRatio: 0 }, 1000, state)).toBe('blurred')
     expect(shouldSendFrame({ blur: 99, difference: 99, glareRatio: 0.5 }, 1000, state)).toBe('glare')
@@ -13,7 +27,7 @@ describe('live frame gate', () => {
     expect(shouldSendFrame({ blur: 99, difference: 99, glareRatio: 0 }, 1000, state)).toBeNull()
   })
   it('accepts the first sharp frame without requiring camera movement', () => {
-    expect(shouldSendFrame({ blur: 99, difference: 0, glareRatio: 0 }, 1000, { lastSentAt: 0 })).toBeNull()
+    expect(shouldSendFrame({ blur: 99, difference: 0, glareRatio: 0 }, 1000, { lastSentAt: 0, lastTagSeenAt: 1000 })).toBeNull()
   })
   it('reports more Laplacian variance for a checkerboard than a flat frame', () => {
     const makeImage = (checker: boolean) => {

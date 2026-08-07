@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useState, useRef } from 'react'
-import { ArrowLeft } from 'lucide-react'
+import { ArrowLeft, BookMarked } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { apiFetch, apiUrl } from '../lib/api'
-import { frameMetrics, shouldSendFrame, type FrameSkipReason } from '../lib/liveFrameGate'
+import { frameMetrics, shouldSendFrame, type FrameGateState, type FrameSkipReason } from '../lib/liveFrameGate'
 import { detectBrowserAprilTags, isBrowserAprilTagReady } from '../lib/browserAprilTag'
 import { StableTagTracker } from '../lib/stableTagTracker'
 import { cameraAccessErrorMessage } from '../lib/cameraAccess'
@@ -73,6 +73,13 @@ interface ShelfAnnouncement {
   detail: string
 }
 
+interface BookPop {
+  popId: number
+  key: string
+  title: string
+  cover?: string
+}
+
 export default function ScanPage() {
   const [mode, setMode] = useState<'upload' | 'camera'>('camera')
   const [file, setFile] = useState<File | null>(null)
@@ -91,6 +98,7 @@ export default function ScanPage() {
   const [liveJob, setLiveJob] = useState<LiveJobState | null>(null)
   const [lastQualityIssue, setLastQualityIssue] = useState<{ reason: 'blurred' | 'glare'; at: number } | null>(null)
   const [shelfAnnouncement, setShelfAnnouncement] = useState<ShelfAnnouncement | null>(null)
+  const [bookPops, setBookPops] = useState<BookPop[]>([])
   const [cameraReady, setCameraReady] = useState(false)
   const [detecting, setDetecting] = useState(false)
   const [browserDetecting, setBrowserDetecting] = useState(false)
@@ -115,10 +123,12 @@ export default function ScanPage() {
   const trackingEnabledRef = useRef(false)
   const stableTagTrackerRef = useRef(new StableTagTracker(2))
   const announcedTagSetsRef = useRef(new Set<string>())
+  const announcedBookKeysRef = useRef(new Set<string>())
+  const bookPopIdRef = useRef(0)
   const scanCanvasRef = useRef<HTMLCanvasElement>(null)
   const captureCanvasRef = useRef<HTMLCanvasElement>(null)
   const scanAnimationRef = useRef<number | null>(null)
-  const scanGateRef = useRef<{ previous?: Uint8Array; lastSentAt: number }>({ lastSentAt: 0 })
+  const scanGateRef = useRef<FrameGateState>({ lastSentAt: 0 })
   const sessionRef = useRef<{ id: string; template: string } | null>(null)
   const frameNumberRef = useRef(0)
   const lastEvaluationRef = useRef(0)
@@ -181,6 +191,9 @@ export default function ScanPage() {
       stableTagTrackerRef.current.update([])
       return
     }
+    // The frame gate shares the animation-loop clock, so record the sighting
+    // with performance.now() rather than Date.now().
+    scanGateRef.current.lastTagSeenAt = performance.now()
 
     const now = Date.now()
     const activePrimary = shelfTagMapRef.current.tags?.[String(normalized[0])]
@@ -430,6 +443,8 @@ export default function ScanPage() {
       setScanStats({ evaluated: 0, sent: 0, skipped: {} })
       stableTagTrackerRef.current.reset()
       announcedTagSetsRef.current.clear()
+      announcedBookKeysRef.current.clear()
+      setBookPops([])
       setTrackedTags([])
       setActiveTagIds([])
       setShelfEvents([])
@@ -519,6 +534,7 @@ export default function ScanPage() {
       setLiveJobId(data.job_id)
       setCompletedJobId(data.job_id)
       setLiveStatus('録画を終了しました。リザルトから認識結果を確認できます。')
+      navigate(`/jobs/${data.job_id}`)
     } catch (e) {
       setRecording(true)
       setError(`スキャン確定に失敗しました。再確定またはキャンセルできます: ${String(e)}`)
@@ -531,6 +547,8 @@ export default function ScanPage() {
     const session = sessionRef.current; stopFrameLoop(); stopTagDetection(); setRecording(false); sessionRef.current = null
     stableTagTrackerRef.current.reset()
     announcedTagSetsRef.current.clear()
+    announcedBookKeysRef.current.clear()
+    setBookPops([])
     setTrackedTags([])
     setShelfEvents([])
     setCurrentShelfLabel('スキャン待機中')
@@ -612,6 +630,23 @@ export default function ScanPage() {
     }
     return books
   }, [liveJob])
+
+  // Each newly identified book pops up once with its cover and title, so the
+  // operator can see what the scan actually recognized while still filming.
+  useEffect(() => {
+    const fresh = liveBooks.filter(book => !announcedBookKeysRef.current.has(book.key))
+    if (fresh.length === 0) return
+    for (const book of fresh) announcedBookKeysRef.current.add(book.key)
+    const pops = fresh.slice(-3).map(book => ({ ...book, popId: ++bookPopIdRef.current }))
+    setBookPops(current => [...current, ...pops].slice(-3))
+    // The timer is intentionally not cleared on re-run: a later detection must
+    // not keep an already visible pop on screen forever.
+    window.setTimeout(() => {
+      const expired = new Set(pops.map(pop => pop.popId))
+      setBookPops(current => current.filter(pop => !expired.has(pop.popId)))
+    }, 3400)
+  }, [liveBooks])
+
   const processedFrames = Number(liveJob?.processed_frames ?? 0)
   const cropTotal = Number(liveJob?.crop_total ?? 0)
   const ocrTotal = Number(liveJob?.ocr_total ?? 0)
@@ -633,9 +668,11 @@ export default function ScanPage() {
                 ? ['背表紙が小さいようです', '少し近づいてください。']
                 : activeTagIds.length > 0
                   ? [currentShelfLabel, '本棚を確認しています…']
-                  : trackedTags.length > 0
-                    ? ['次の棚を探しています', `${trackedTags.length}個の棚を確認済みです。カメラを動かしてください。`]
-                    : [detecting || browserDetecting ? '棚を検知しています…' : currentShelfLabel, liveStatus]
+                  : recording && trackedTags.length > 0
+                    ? ['次の棚を探しています', `${trackedTags.length}個の棚を確認済みです。タグが見えると記録を再開します。`]
+                    : recording
+                      ? ['棚のタグを画面に入れてください', 'タグが見えている間だけ本を記録します。']
+                      : [detecting || browserDetecting ? '棚を検知しています…' : currentShelfLabel, liveStatus]
   const visibleTrackedTags = trackedTags.slice(0, 4)
 
   return (
@@ -646,7 +683,9 @@ export default function ScanPage() {
             <>
               <video
                 ref={videoRef}
-                className="absolute inset-0 size-full object-cover"
+                // object-contain, not cover: what the operator frames must be
+                // exactly what gets uploaded and analyzed.
+                className="absolute inset-0 size-full object-contain"
                 autoPlay
                 muted
                 playsInline
@@ -694,27 +733,27 @@ export default function ScanPage() {
           )}
 
           {mode === 'camera' && liveBooks.length > 0 && (
-            <section className="absolute inset-x-7 bottom-[286px] z-10 mx-auto max-w-[560px] rounded-2xl bg-black/65 px-4 py-3 text-white shadow-lg backdrop-blur-md" aria-label="見つかった本">
-              <div className="mb-2 flex items-center justify-between text-sm font-semibold">
-                <span>見つかった本</span>
-                <span>{liveBooks.length}冊</span>
-              </div>
-              <div className="flex gap-3 overflow-x-auto pb-1">
-                {liveBooks.slice(0, 8).map(book => (
-                  <article key={book.key} className="flex w-[72px] shrink-0 flex-col gap-1">
-                    <div className="flex h-16 items-end justify-center rounded-md bg-white/10">
-                      {book.cover
-                        ? <img src={book.cover} alt="" className="max-h-16 max-w-[48px] object-contain" />
-                        : <div className="h-14 w-10 rounded-sm bg-white/25" />}
-                    </div>
-                    <p className="line-clamp-2 text-[10px] leading-3 text-white/95">{book.title}</p>
-                  </article>
-                ))}
-              </div>
-            </section>
+            <p className="absolute right-7 top-6 z-10 rounded-full bg-black/60 px-3 py-2 text-xs font-semibold text-white backdrop-blur-md">
+              見つかった本 {liveBooks.length}冊
+            </p>
           )}
 
-          {mode === 'camera' && trackedTags.length > 0 && liveBooks.length === 0 && (
+          {mode === 'camera' && bookPops.length > 0 && (
+            <div className="pointer-events-none absolute inset-x-7 bottom-[286px] z-20 mx-auto flex max-w-[560px] flex-col items-end gap-2" aria-label="認識した本">
+              {bookPops.map(pop => (
+                <article key={pop.popId} className="scan-book-pop flex w-[196px] items-center gap-3 rounded-2xl bg-white/95 p-2 shadow-xl">
+                  <div className="grid h-[72px] w-[52px] shrink-0 place-items-center overflow-hidden rounded-md bg-[#e9e9e9]">
+                    {pop.cover
+                      ? <img src={pop.cover} alt="" className="max-h-full max-w-full object-contain" />
+                      : <BookMarked className="size-6 text-[#087f5b]" />}
+                  </div>
+                  <p className="line-clamp-3 text-xs leading-4 text-[#1e1e1e]">{pop.title}</p>
+                </article>
+              ))}
+            </div>
+          )}
+
+          {mode === 'camera' && trackedTags.length > 0 && bookPops.length === 0 && (
             <div className="absolute inset-x-7 bottom-[286px] z-10 mx-auto max-w-[560px]" aria-live="polite">
               <div className="mb-2 flex items-center justify-between text-xs font-medium text-white drop-shadow">
                 <span>認識済みタグ</span>
