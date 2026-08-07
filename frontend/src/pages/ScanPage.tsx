@@ -790,9 +790,13 @@ export default function ScanPage() {
             >
               {completedJobId ? 'リザルト' : (
                 <span
-                  className={`grid place-items-center text-sm font-semibold text-[#1e1e1e] transition-all duration-200 ease-out ${recording || stopping ? 'size-12 rounded-[13px] bg-[#ff3b30] text-transparent' : 'size-[90px] rounded-full bg-white'}`}
+                  className={`grid place-items-center transition-all duration-200 ease-out ${recording || stopping ? 'size-16 rounded-[20px] bg-[#ff3b30] shadow-lg' : 'size-[90px] rounded-full bg-white'}`}
                 >
-                  {mode === 'upload' && !recording ? '解析' : null}
+                  {mode === 'upload' && !recording ? (
+                    <span className="text-sm font-semibold text-[#1e1e1e]">解析</span>
+                  ) : recording || stopping ? (
+                    <span className="block size-6 rounded-[5px] bg-white" aria-label="スキャンを終了" />
+                  ) : null}
                 </span>
               )}
             </button>
