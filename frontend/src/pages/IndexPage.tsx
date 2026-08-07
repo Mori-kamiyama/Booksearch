@@ -2,9 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { ErrorState } from '../components/common'
 import { LibraryMap } from '../components/shelf'
-import { apiUrl, getShelfCandidates } from '../lib/api'
+import { apiUrl, getIndexBooks, getShelfCandidates } from '../lib/api'
 import type { ShelfCandidate } from '../lib/types'
-import { formatShelfLabel, getSlot, getUnit, isDisplayCellEmpty, shelfIdForDisplayCell } from '../lib/shelf'
+import { formatShelfLabel, getSlot, getUnit, isDisplayCellEmpty, shelfDensityLevel, shelfIdForDisplayCell } from '../lib/shelf'
 import { fallbackCoverForTitle, figmaResultBooks } from '../data/figmaBooks'
 import { groupBooksForIndex } from '../lib/indexGrouping'
 
@@ -13,6 +13,7 @@ type ViewMode = 'map' | 'list'
 interface IndexBook {
   id: number
   title: string
+  title_reading?: string
   cover?: string
 }
 
@@ -20,6 +21,7 @@ export default function IndexPage() {
   const [params, setParams] = useSearchParams()
   const [view, setView] = useState<ViewMode>(() => viewModeFromParam(params.get('view')))
   const [candidates, setCandidates] = useState<ShelfCandidate[]>([])
+  const [indexBooks, setIndexBooks] = useState<IndexBook[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
 
@@ -27,11 +29,22 @@ export default function IndexPage() {
     setLoading(true)
     setError(false)
     try {
-      const loaded = await withDevTimeout(getShelfCandidates())
-      setCandidates(indexCandidatesForDisplay(loaded))
+      const [loadedCandidates, loadedBooks] = await withDevTimeout(Promise.all([
+        getShelfCandidates(),
+        getIndexBooks(),
+      ]))
+      const displayCandidates = indexCandidatesForDisplay(loadedCandidates)
+      setCandidates(displayCandidates)
+      setIndexBooks(loadedBooks.map(book => ({
+        id: book.id,
+        title: book.title,
+        title_reading: book.title_reading,
+        cover: book.thumbnail || fallbackCoverForTitle(book.title),
+      })))
     } catch {
       const fallback = fallbackIndexCandidates()
       setCandidates(fallback)
+      setIndexBooks(uniqueBooks(fallback))
       setError(fallback.length === 0)
     } finally {
       setLoading(false)
@@ -53,7 +66,7 @@ export default function IndexPage() {
         <ViewToggle value={view} onChange={changeView} />
         {loading && <IndexSkeleton />}
         {!loading && error && <div className="w-full"><ErrorState message="索引を読み込めませんでした。" onRetry={load} /></div>}
-        {!loading && !error && (view === 'map' ? <MapView candidates={candidates} /> : <ListView candidates={candidates} />)}
+        {!loading && !error && (view === 'map' ? <MapView candidates={candidates} /> : <ListView books={indexBooks} />)}
       </div>
     </div>
   )
@@ -101,6 +114,23 @@ function MapView({ candidates }: { candidates: ShelfCandidate[] }) {
     return uniqueBooks(scoped)
   }, [candidates, selectedUnit, selectedShelf])
 
+  const cellCounts = useMemo(() => {
+    const counts: Record<string, number> = {}
+    for (const candidate of candidates) {
+      counts[candidate.shelf_id] = (counts[candidate.shelf_id] ?? 0) + 1
+    }
+    return counts
+  }, [candidates])
+
+  const unitCounts = useMemo(() => {
+    const counts: Record<string, number> = {}
+    for (const candidate of candidates) {
+      const unitId = getSlot(candidate.shelf_id)?.unit
+      if (unitId) counts[unitId] = (counts[unitId] ?? 0) + 1
+    }
+    return counts
+  }, [candidates])
+
   const selectUnit = (unitId: string) => {
     setSelectedUnit(unitId)
     setSelectedShelf(null)
@@ -111,10 +141,11 @@ function MapView({ candidates }: { candidates: ShelfCandidate[] }) {
       <section className="flex w-full flex-col gap-4 md:gap-5">
         <h2 className="w-full text-base font-semibold leading-[19px] text-ink">MAP</h2>
         <div className="flex flex-col items-center gap-5 md:gap-6">
-          <LibraryMap selectedUnit={selectedUnit} onUnitClick={selectUnit} size="lg" />
+          <LibraryMap selectedUnit={selectedUnit} unitCounts={unitCounts} selectionTone="charcoal" onUnitClick={selectUnit} size="lg" />
           <div className="flex w-full max-w-[560px] flex-col items-center gap-2">
             <p className="w-full text-xs font-semibold text-ink-muted md:text-sm">棚の区画を選択</p>
-            <UnitCellGrid unitId={selectedUnit} selectedShelf={selectedShelf} onSelectShelf={setSelectedShelf} />
+            <UnitCellGrid unitId={selectedUnit} cellCounts={cellCounts} selectedShelf={selectedShelf} onSelectShelf={setSelectedShelf} />
+            <p className="w-full text-[11px] text-ink-faint md:text-xs">本が多い区画ほど緑が少し濃くなります</p>
           </div>
         </div>
       </section>
@@ -135,8 +166,9 @@ function MapView({ candidates }: { candidates: ShelfCandidate[] }) {
 
 
 
-function UnitCellGrid({ unitId, selectedShelf, onSelectShelf }: {
+function UnitCellGrid({ unitId, cellCounts, selectedShelf, onSelectShelf }: {
   unitId: string
+  cellCounts: Record<string, number>
   selectedShelf: string | null
   onSelectShelf: (shelfId: string | null) => void
 }) {
@@ -165,14 +197,16 @@ function UnitCellGrid({ unitId, selectedShelf, onSelectShelf }: {
             return <div key={shelfId} className="aspect-square" />
           }
           const active = selectedShelf === shelfId
+          const count = cellCounts[shelfId] ?? 0
           return (
             <button
               key={shelfId}
               type="button"
               onClick={() => onSelectShelf(active ? null : shelfId)}
-              aria-label={formatShelfLabel(shelfId)}
+              aria-label={`${formatShelfLabel(shelfId)} ${count}冊`}
               aria-pressed={active}
-              className={`tap-soft aspect-square transition ${active ? 'bg-[#087f5b]' : 'bg-[#d9d9d9] hover:bg-[#c4c4c4]'}`}
+              style={active ? { backgroundColor: '#363636' } : undefined}
+              className={`tap-soft aspect-square transition ${active ? 'bg-[#363636] ring-2 ring-[#8a8a8a] ring-offset-1' : indexCellTone(count)}`}
             />
           )
         })
@@ -181,19 +215,28 @@ function UnitCellGrid({ unitId, selectedShelf, onSelectShelf }: {
   )
 }
 
+function indexCellTone(count: number): string {
+  const level = shelfDensityLevel(count)
+  if (level === 'high') return 'bg-[#9bcfbd] hover:brightness-95'
+  if (level === 'mid') return 'bg-[#c8e5da] hover:brightness-95'
+  if (level === 'low') return 'bg-[#e7f3ef] hover:brightness-95'
+  return 'bg-[#d9d9d9] hover:bg-[#cfcfcf]'
+}
 
 
-function ListView({ candidates }: { candidates: ShelfCandidate[] }) {
+
+function ListView({ books }: { books: IndexBook[] }) {
   const groups = useMemo(() => {
-    const books = uniqueBooks(candidates)
-    if (isDevFallbackCandidates(candidates)) return [{ label: 'あ', books }]
     return groupBooksForIndex(books)
-  }, [candidates])
+  }, [books])
 
   return (
     <section className="flex w-full flex-col gap-4">
-      <h2 className="w-full text-base font-semibold leading-[19px] text-ink">リスト</h2>
-      {groups.length === 0 && <p className="w-full text-center text-sm text-ink-faint">まだ本が登録されていません。棚をスキャンすると一覧に追加されます。</p>}
+      <div className="flex w-full items-baseline justify-between gap-4">
+        <h2 className="text-base font-semibold leading-[19px] text-ink">リスト</h2>
+        <p className="text-xs text-ink-muted">全{books.length.toLocaleString('ja-JP')}冊</p>
+      </div>
+      {groups.length === 0 && <p className="w-full text-center text-sm text-ink-faint">蔵書が登録されていません。</p>}
       {groups.map(group => (
         <div key={group.label} className="flex w-full flex-col gap-4">
           <p className="w-full text-4xl font-normal leading-normal text-[#087f5b]">{group.label}</p>
@@ -202,10 +245,6 @@ function ListView({ candidates }: { candidates: ShelfCandidate[] }) {
       ))}
     </section>
   )
-}
-
-function isDevFallbackCandidates(candidates: ShelfCandidate[]): boolean {
-  return import.meta.env.DEV && candidates.length > 0 && candidates.every(candidate => Number(candidate.book_id) < 0)
 }
 
 function BookGrid({ books }: { books: IndexBook[] }) {
@@ -249,6 +288,7 @@ function uniqueBooks(candidates: ShelfCandidate[]): IndexBook[] {
   return [...best.entries()].map(([id, candidate]) => ({
     id,
     title: candidate.title!,
+    title_reading: candidate.title_reading,
     cover: candidate.thumbnail || (candidate.crop_url ? apiUrl(candidate.crop_url) : fallbackCoverForTitle(candidate.title!)),
   }))
 }

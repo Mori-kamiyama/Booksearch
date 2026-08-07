@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from enrich_book_metadata import select_volume  # noqa: E402
 from build_bm25_recommendations import ranked_recommendations  # noqa: E402
+from fetch_missing_covers import rakuten_cover, rakuten_title_match  # noqa: E402
 from recommendation_utils import metadata_match_score, tokenize  # noqa: E402
 
 
@@ -36,6 +37,25 @@ class MetadataMatchingTests(unittest.TestCase):
         self.assertIsNone(volume)
         self.assertLess(score, 0.92)
         self.assertEqual(method, "title_only")
+
+    def test_rakuten_title_match_prefers_matching_edition(self) -> None:
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        connection.execute(
+            "CREATE TABLE books (title TEXT, authors TEXT, publisher TEXT, published_date TEXT)"
+        )
+        connection.execute("INSERT INTO books VALUES ('広辞苑', '新村, 出', '岩波書店', '2018/01')")
+        book = connection.execute("SELECT * FROM books").fetchone()
+        payload = {"items": [
+            {"title": "広辞苑", "author": "新村 出", "publisherName": "岩波書店", "salesDate": "2007年12月", "largeImageUrl": "https://example.com/old.jpg"},
+            {"title": "広辞苑 第7版（普通版）", "author": "新村 出", "publisherName": "岩波書店", "salesDate": "2018年01月", "largeImageUrl": "https://example.com/new.jpg"},
+        ]}
+        matched = rakuten_title_match(payload, book)
+        self.assertIsNotNone(matched)
+        self.assertEqual(matched["largeImageUrl"], "https://example.com/new.jpg")
+
+    def test_rakuten_noimage_is_not_a_cover(self) -> None:
+        self.assertEqual(rakuten_cover({"largeImageUrl": "https://example.com/noimage_01.gif"}), "")
 
 
 class KeywordBm25Tests(unittest.TestCase):

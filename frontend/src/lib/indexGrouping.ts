@@ -1,5 +1,5 @@
 export const KANA_ROWS: Array<[string, string]> = [
-  ['あ', 'あいうえおぁぃぅぇぉ'],
+  ['あ', 'あいうえおぁぃぅぇぉゔ'],
   ['か', 'かきくけこがぎぐげご'],
   ['さ', 'さしすせそざじずぜぞ'],
   ['た', 'たちつてとだぢづでどっ'],
@@ -15,8 +15,8 @@ const kanaGroupOrder = new Map(KANA_ROWS.map(([label], index) => [label, index])
 const titleCollator = new Intl.Collator('ja')
 const groupCollator = new Intl.Collator('ja', { sensitivity: 'base' })
 
-export function indexGroupForTitle(title: string): string {
-  const normalized = title.trim().normalize('NFKC')
+export function indexGroupForTitle(title: string, titleReading?: string): string {
+  const normalized = (titleReading || title).trim().normalize('NFKC')
   const ch = normalized.charAt(0)
   if (!ch) return 'その他'
 
@@ -26,15 +26,13 @@ export function indexGroupForTitle(title: string): string {
     if (chars.includes(hira)) return label
   }
   if (/[A-Za-z]/.test(ch)) return ch.toUpperCase()
-  if (/[0-9]/.test(ch)) return ch
-  if (/\p{Script=Han}/u.test(ch)) return ch
   return 'その他'
 }
 
-export function groupBooksForIndex<T extends { title: string }>(books: T[]): Array<{ label: string, books: T[] }> {
+export function groupBooksForIndex<T extends { title: string, title_reading?: string }>(books: T[]): Array<{ label: string, books: T[] }> {
   const grouped = new Map<string, T[]>()
-  for (const book of [...books].sort((a, b) => titleCollator.compare(a.title, b.title))) {
-    const label = indexGroupForTitle(book.title)
+  for (const book of [...books].sort((a, b) => titleCollator.compare(a.title_reading || a.title, b.title_reading || b.title))) {
+    const label = indexGroupForTitle(book.title, book.title_reading)
     const group = grouped.get(label) ?? []
     group.push(book)
     grouped.set(label, group)
@@ -54,7 +52,5 @@ function compareIndexGroupLabels(left: string, right: string): number {
 function groupRank(label: string): number {
   if (kanaGroupOrder.has(label)) return kanaGroupOrder.get(label)!
   if (/^[A-Z]$/.test(label)) return 10 + label.charCodeAt(0) - 65
-  if (/^[0-9]$/.test(label)) return 36 + Number(label)
-  if (/^\p{Script=Han}$/u.test(label)) return 46
-  return 47
+  return 36
 }

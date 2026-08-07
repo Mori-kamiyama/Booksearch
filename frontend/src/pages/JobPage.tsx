@@ -13,6 +13,7 @@ interface Candidate {
   score?: number
   match_confidence?: string
   thumbnail?: string
+  library_db_id?: number
 }
 
 interface BookEntry {
@@ -54,6 +55,8 @@ interface JobState {
   error?: string
   catalog?: Catalog
   diagnostics?: Diagnostics
+  // Live scans write per-frame diagnostics under a different key.
+  latest_diagnostics?: Diagnostics
   crop_total?: number | string
   ocr_done?: number | string
   average_seconds?: number
@@ -100,10 +103,12 @@ export default function JobPage() {
   if (!job) return <ScanResultLoading onBack={() => navigate(-1)} />
 
   const entries = job.catalog?.entries ?? []
-  const bookCount = Number(job.detected_book_count ?? entries.reduce((n, e) => n + (e.books?.length ?? 0), 0))
+  const groups = groupResultBooks(entries)
+  // detected_book_count counts every OCR hit, so the same spine seen in ten
+  // frames reads as ten books. The metric follows the deduplicated list.
+  const bookCount = groups.reduce((n, group) => n + group.books.length, 0)
   const shelfIds = new Set(entries.map(entry => entry.shelf_id).filter(Boolean))
   const shelfCount = Number(job.detected_shelf_count ?? (shelfIds.size || (entries.length > 0 ? 1 : 0)))
-  const groups = groupResultBooks(entries)
   const processing = ['collecting', 'processing', 'pending', 'running', 'ocr_pending', 'lookup_pending'].includes(job.status)
 
   return (
@@ -157,7 +162,7 @@ export default function JobPage() {
               <p className="px-7 text-center text-sm text-ink-muted">本を検出できませんでした。撮影距離を変えてもう一度お試しください。</p>
             )}
 
-            <div className="mx-7 mt-10"><DiagnosticsPanel diag={job.diagnostics} /></div>
+            <div className="mx-7 mt-10"><DiagnosticsPanel diag={job.diagnostics ?? job.latest_diagnostics} /></div>
           </div>
         )}
       </div>
@@ -175,18 +180,25 @@ interface ResultBook {
 }
 
 function groupResultBooks(entries: CatalogEntry[]): { shelf: string; books: ResultBook[] }[] {
-  const groups = new Map<string, ResultBook[]>()
+  const groups = new Map<string, Map<string, ResultBook>>()
   for (const entry of entries) {
     const shelf = devShelfLabel(entry.box_id) ?? (entry.shelf_id ? formatShelfLabel(entry.shelf_id) : '棚未判定')
-    const books = groups.get(shelf) ?? []
+    const books = groups.get(shelf) ?? new Map<string, ResultBook>()
     for (const book of entry.books ?? []) {
       const top = book.book_lookup?.candidates?.[0]
       const title = top?.title || book.title
-      books.push({ title, cover: top?.thumbnail || fallbackCoverForTitle(title) })
+      if (!title) continue
+      // A live scan sees the same spine across many frames, so each book is
+      // shown once per shelf instead of once per crop.
+      const key = String(top?.library_db_id ?? title.trim().toLocaleLowerCase('ja-JP'))
+      if (books.has(key)) continue
+      books.set(key, { title, cover: top?.thumbnail || fallbackCoverForTitle(title) })
     }
     groups.set(shelf, books)
   }
-  return [...groups.entries()].filter(([, books]) => books.length > 0).map(([shelf, books]) => ({ shelf, books }))
+  return [...groups.entries()]
+    .filter(([, books]) => books.size > 0)
+    .map(([shelf, books]) => ({ shelf, books: [...books.values()] }))
 }
 
 function devShelfLabel(boxId: string): string | null {

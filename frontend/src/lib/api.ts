@@ -37,3 +37,15 @@ export async function getShelfCandidates(limit = 1000): Promise<ShelfCandidate[]
   const data = await jsonFetch<{ candidates?: ShelfCandidate[] }>(`/api/shelf-candidates?limit=${limit}`)
   return data.candidates ?? []
 }
+
+export interface IndexBookResponse {
+  id: number
+  title: string
+  title_reading: string
+  thumbnail: string | null
+}
+
+export async function getIndexBooks(): Promise<IndexBookResponse[]> {
+  const data = await jsonFetch<{ books?: IndexBookResponse[] }>('/api/books/index')
+  return data.books ?? []
+}

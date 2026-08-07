@@ -19,6 +19,7 @@ export interface Book {
 export interface ShelfCandidate {
   book_id?: number
   title?: string
+  title_reading?: string
   shelf_id: string
   confidence: number
   observations: number

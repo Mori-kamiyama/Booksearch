@@ -5,7 +5,7 @@ import { SearchBar } from '../components/book'
 import { fallbackCoverForTitle, featuredBooks } from '../data/figmaBooks'
 import { getFeaturedBooks } from '../lib/api'
 import type { Book } from '../lib/types'
-import { BrandMark } from '../components/common'
+import { BrandMark, RakutenCredit } from '../components/common'
 
 export default function SearchPage() {
   const navigate = useNavigate()
@@ -71,6 +71,7 @@ export default function SearchPage() {
           <p className="text-center text-xs leading-[15px] text-ink md:hidden">本棚をスキャンして検索</p>
         </div>
       </div>
+      <RakutenCredit className="absolute bottom-1 left-2 z-20 text-[9px] text-ink-muted/60 underline-offset-2 hover:underline md:bottom-3 md:left-1/2 md:-translate-x-1/2 md:text-[10px]" />
     </div>
   )
 }

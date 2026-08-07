@@ -194,6 +194,12 @@
 ## 2026-08-06 書影拡充
 
 - 書影付き蔵書からランダムに5冊返すAWS API `/api/books/featured` を追加し、書籍IDルートへの誤判定を修正した。
-- `outputs/library/library.db` の未登録3,141冊をISBNで走査し、Open Libraryから231冊、APIキー付きGoogle Booksから595冊を追加した。書影付きは1,061冊から1,887冊へ増加し、このDBスナップショットを`booksearch-api` Lambdaへ反映した。
-- 再開可能な `scripts/fetch_missing_covers.py` を追加した。OpenBD、Open Library、Google Booksの順で未取得分のみ処理し、プロバイダ別の試行結果を`cover_fetch_attempts`へ保存する。
-- Google BooksはAPIキー未設定時のクォータが0でHTTP 429になる。有効な`GOOGLE_BOOKS_API_KEY`で取得を再開し、短期制限は1並列と指数バックオフで回避した。残り2,315冊は日次1,000件の余裕を確保しつつ翌日以降に再実行する。国立国会図書館の書影APIは2026年3月31日に終了済みのため代替には使わない。
+- `outputs/library/library.db` の未登録3,141冊をISBNで走査し、Open Libraryから231冊、APIキー付きGoogle Booksから595冊を追加した。さらに楽天ブックス書籍検索APIで残り2,315冊を一巡し、2,012冊を追加した。最終的な書影付き蔵書は3,899 / 4,202冊、未取得は303冊となり、最新DBを`booksearch-api` Lambdaへ反映した。
+- 再開可能な `scripts/fetch_missing_covers.py` を追加した。OpenBD、Open Library、楽天ブックス、Google Booksの順で未取得分のみ処理し、プロバイダ別の試行結果を`cover_fetch_attempts`へ保存する。楽天はISBN完全一致のみ採用し、書誌リンクには全2,012件でアフィリエイトURLを保存した。
+- Google Booksの短期制限は並列数と指数バックオフで回避する。楽天ブックスは小バッチと再試行を使い、429発生時に並列数を下げて再開した。国立国会図書館の書影APIは2026年3月31日に終了済みのため代替には使わない。
+- 楽天API利用規約への対応として、通常ページのフッターとホーム画面に公式指定の `Supported by Rakuten Developers` クレジットを追加した。楽天由来の本の詳細リンクはAPIが返すアフィリエイトURLへ向ける。
+- ISBNが空の15冊はタイトル・著者・出版社・刊行年による厳密照合を追加し、『広辞苑』3冊と『歴史の歴史』1冊へ楽天書影とアフィリエイトURLを補完した。版違いと楽天の `noimage_01.gif` は書影として採用せず、既存のNo Image 8件も削除した。索引に残った『Networking for Dummies』1冊はGoogle BooksのISBN完全一致で補完し、実書影は3,896 / 4,202冊、未取得は306冊。
+- AWSの索引API `/api/shelf-candidates` はDynamoDBの棚候補だけを返し、SQLiteの書影を含めていなかった。候補の書籍IDをSQLiteへ一括照合して `thumbnail` と正規タイトルを付与し、索引カードが楽天を含む最新書影を表示できるよう修正した。本番の棚候補448件すべてで書影を確認し、うち268件は楽天書影。
+- 索引の「リスト」は棚マッピング済みの本だけでなく、SQLiteの全蔵書4,202冊を返す `/api/books/index` を使う構成へ変更した。MAPと「この棚の本」は引き続きDynamoDBの棚候補だけを対象とする。
+- 全タイトルをKagome/IPADICで読みへ変換し、辞書で先頭複合語を読めなかった17冊には限定的な読み補正を追加した。「ヴ」始まりも「あ」行へ分類し、本番リストに漢字見出し・「その他」が残らないことを全4,202件で確認した。
+- リスト上部に動的な蔵書件数を表示する。本番では `全4,202冊` と4,202枚の書籍カードが描画されることを確認済み。

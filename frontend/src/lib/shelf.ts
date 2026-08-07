@@ -59,6 +59,13 @@ export function confidenceLevel(confidence: number): 'high' | 'mid' | 'low' {
   return 'low'
 }
 
+export function shelfDensityLevel(count: number): 'empty' | 'low' | 'mid' | 'high' {
+  if (count >= 13) return 'high'
+  if (count >= 6) return 'mid'
+  if (count >= 1) return 'low'
+  return 'empty'
+}
+
 export function splitShelfId(shelfId: string): { unitId: string; cellId: string; col: number; row: number } | undefined {
   const position = displayPositionForShelf(shelfId)
   if (!position) return undefined

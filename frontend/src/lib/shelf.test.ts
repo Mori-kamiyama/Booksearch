@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { displayPositionForShelf, getUnit, isDisplayCellEmpty, shelfIdForDisplayCell } from './shelf'
+import { displayPositionForShelf, getUnit, isDisplayCellEmpty, shelfDensityLevel, shelfIdForDisplayCell } from './shelf'
 
 describe('shelf display coordinates', () => {
   it('maps display cells to mirrored data shelf IDs for mirrored base units', () => {
@@ -28,5 +28,14 @@ describe('shelf display coordinates', () => {
     expect(position?.displayCol).toBe(13)
     expect(position?.displayCellId).toBe('c13-r02')
     expect(position?.shelfId).toBe('base-01-c01-r02')
+  })
+})
+
+describe('shelf density colors', () => {
+  it('uses gentle tiers based on the number of books', () => {
+    expect(shelfDensityLevel(0)).toBe('empty')
+    expect(shelfDensityLevel(1)).toBe('low')
+    expect(shelfDensityLevel(6)).toBe('mid')
+    expect(shelfDensityLevel(13)).toBe('high')
   })
 })

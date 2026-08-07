@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 from pathlib import Path
 import sys
@@ -69,3 +70,58 @@ def test_batch_queues_only_new_readable_crops() -> None:
     values = worker.jobs_table.updates[0]["ExpressionAttributeValues"]
     assert values[":n"] == 2
     assert values[":ot"] == 1
+
+
+class RecordingJobsTable:
+    """Records updates and hands back the resulting live-session counters."""
+
+    def __init__(self, attributes=None) -> None:
+        self.updates = []
+        self.attributes = attributes or {}
+
+    def update_item(self, **kwargs):
+        self.updates.append(kwargs)
+        return {"Attributes": self.attributes}
+
+
+def test_live_frame_that_exhausts_retries_still_lets_the_session_finish() -> None:
+    worker = load_worker()
+    worker.sqs = FakeSQS()
+    # The abandoned frame is the last outstanding work of a closed session.
+    worker.jobs_table = RecordingJobsTable({
+        "scan_closed": True, "accepted_frames": 3, "processed_frames": 3,
+        "ocr_total": 5, "ocr_done": 5,
+    })
+    worker.process_job = lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("yolo oom"))
+
+    worker.handler({"Records": [{
+        "body": json.dumps({"job_id": "job-1", "image_keys": ["live/job-1/frames/a.jpg"], "incremental": True}),
+        "attributes": {"ApproximateReceiveCount": str(worker.MAX_RECEIVE_COUNT)},
+    }]}, None)
+
+    counted = worker.jobs_table.updates[0]["ExpressionAttributeValues"]
+    assert counted[":frame"] == {"live/job-1/frames/a.jpg"}
+    assert counted[":one"] == 1
+    # The final lookup must still be queued, otherwise the job hangs forever.
+    assert json.loads(worker.sqs.messages[0]["MessageBody"]) == {"job_id": "job-1", "incremental": False}
+
+
+def test_live_frame_is_retried_while_sqs_attempts_remain() -> None:
+    worker = load_worker()
+    worker.sqs = FakeSQS()
+    worker.jobs_table = RecordingJobsTable()
+    worker.process_job = lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("transient"))
+
+    try:
+        worker.handler({"Records": [{
+            "body": json.dumps({"job_id": "job-1", "image_keys": ["live/job-1/frames/a.jpg"], "incremental": True}),
+            "attributes": {"ApproximateReceiveCount": "1"},
+        }]}, None)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("the message must go back to SQS while retries remain")
+
+    # A retryable frame must not be counted as processed, and the session must
+    # not be marked failed.
+    assert worker.jobs_table.updates == []

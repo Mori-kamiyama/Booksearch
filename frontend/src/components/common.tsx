@@ -13,6 +13,14 @@ export function BrandMark({ className = '' }: { className?: string }) {
   )
 }
 
+export function RakutenCredit({ className = '' }: { className?: string }) {
+  return (
+    <div className={className}>
+      <a href="https://developers.rakuten.com/" target="_blank">Supported by Rakuten Developers</a>
+    </div>
+  )
+}
+
 export function PageHeader({ title, back = false }: { title: string; back?: boolean }) {
   const navigate = useNavigate()
   return (
@@ -115,6 +123,7 @@ export function SiteFooter() {
           </div>
         </div>
         <div className="mt-8 border-t border-line/20 pt-6 text-center text-xs text-ink-muted/50">
+          <RakutenCredit className="mb-2 underline-offset-2 hover:underline" />
           <p>© {new Date().getFullYear()} ホンノキ. All rights reserved.</p>
         </div>
       </div>

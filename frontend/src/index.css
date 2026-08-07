@@ -54,8 +54,20 @@ button {
   animation: scan-status-popup 2.8s ease-out both;
 }
 
+@keyframes scan-book-pop {
+  0% { opacity: 0; transform: translateY(16px) scale(0.82); }
+  18% { opacity: 1; transform: translateY(-4px) scale(1.06); }
+  30%, 74% { opacity: 1; transform: translateY(0) scale(1); }
+  100% { opacity: 0; transform: translateY(-14px) scale(0.94); }
+}
+
+.scan-book-pop {
+  animation: scan-book-pop 3.4s ease-out both;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .scan-status-popup { animation: none; }
+  .scan-book-pop { animation: none; }
 }
 
 @layer components {

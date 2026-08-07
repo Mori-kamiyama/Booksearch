@@ -76,3 +76,55 @@ def test_ocr_failure_is_recorded_and_job_continues_to_lookup() -> None:
     assert crop_values[":s"] == "ocr_done"
     assert len(worker.sqs.messages) == 1
     assert worker.jobs_table.calls[-1]["ExpressionAttributeValues"][":s"] == "lookup_pending"
+
+
+class FailingS3:
+    def get_object(self, **_kwargs):
+        raise RuntimeError("crop object is gone")
+
+
+def test_crop_that_exhausts_retries_still_lets_the_job_finish() -> None:
+    import json
+
+    worker = load_worker()
+    worker.s3 = FailingS3()
+    worker.sqs = FakeSQS()
+    worker.crops_table = FakeTable()
+    worker.jobs_table = FakeTable({"ocr_done": 2, "ocr_total": 2})
+    worker.fingerprints_table = None
+
+    worker.handler({"Records": [{
+        "body": json.dumps({"job_id": "job-1", "crop_id": "crop-1", "crop_key": "crops/crop-1.jpg"}),
+        "attributes": {"ApproximateReceiveCount": str(worker.MAX_RECEIVE_COUNT)},
+    }]}, None)
+
+    crop_values = worker.crops_table.calls[0]["ExpressionAttributeValues"]
+    assert crop_values[":s"] == "ocr_done"
+    assert "crop object is gone" in crop_values[":e"]
+    # ocr_done reached ocr_total, so lookup must be queued instead of hanging.
+    assert len(worker.sqs.messages) == 1
+    assert worker.jobs_table.calls[-1]["ExpressionAttributeValues"][":s"] == "lookup_pending"
+
+
+def test_crop_is_retried_while_sqs_attempts_remain() -> None:
+    import json
+
+    worker = load_worker()
+    worker.s3 = FailingS3()
+    worker.sqs = FakeSQS()
+    worker.crops_table = FakeTable()
+    worker.jobs_table = FakeTable({"ocr_done": 1, "ocr_total": 2})
+    worker.fingerprints_table = None
+
+    try:
+        worker.handler({"Records": [{
+            "body": json.dumps({"job_id": "job-1", "crop_id": "crop-1", "crop_key": "crops/crop-1.jpg"}),
+            "attributes": {"ApproximateReceiveCount": "1"},
+        }]}, None)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("the message must go back to SQS while retries remain")
+
+    assert worker.crops_table.calls == []
+    assert worker.sqs.messages == []

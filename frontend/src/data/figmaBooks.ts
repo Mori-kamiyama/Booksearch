@@ -18,6 +18,10 @@ export const figmaResultBooks: FeaturedBook[] = [
   { title: '1984', cover: '/figma-books/nineteen-eighty-four.png' },
 ]
 
+// The Figma mock covers only exist to keep local demos looking like the design.
+// In production a partial title match would attach an unrelated cover to a real
+// book, so real data is shown without a cover instead.
 export function fallbackCoverForTitle(title: string): string | undefined {
+  if (!import.meta.env.DEV) return undefined
   return [...figmaResultBooks, ...featuredBooks].find(book => title.includes(book.title) || book.title.includes(title))?.cover
 }
