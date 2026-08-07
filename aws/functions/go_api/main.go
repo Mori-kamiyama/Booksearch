@@ -86,6 +86,8 @@ func handler(ctx context.Context, raw json.RawMessage) (events.APIGatewayV2HTTPR
 		return searchBooks(ctx, req)
 	case method == "GET" && path == "/api/books/featured":
 		return featuredBooks(ctx, req)
+	case method == "GET" && path == "/api/books/index":
+		return indexBooks()
 	case method == "GET" && path == "/api/shelf-candidates":
 		return listShelfCandidates(ctx)
 	case method == "GET" && strings.HasPrefix(path, "/api/books/"):
@@ -115,6 +117,17 @@ func handler(ctx context.Context, raw json.RawMessage) (events.APIGatewayV2HTTPR
 	default:
 		return errJSON(404, "not found"), nil
 	}
+}
+
+func indexBooks() (events.APIGatewayV2HTTPResponse, error) {
+	if bookStore == nil {
+		return errJSON(503, "library database unavailable"), nil
+	}
+	books, err := bookStore.AllIndexBooks()
+	if err != nil {
+		return errJSON(500, err.Error()), nil
+	}
+	return okJSON(200, map[string]any{"books": books}), nil
 }
 
 // Live sessions process each committed frame while the camera is still running.
@@ -223,18 +236,23 @@ func liveSessionComplete(ctx context.Context, path string) (events.APIGatewayV2H
 	if committed == nil || len(committed.Value) == 0 {
 		return errJSON(400, "no accepted frames"), nil
 	}
-	_, err = ddbClient.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+	// The counters must be re-read from the write that sets scan_closed. A worker
+	// that finished its last frame just before this update saw scan_closed=false
+	// and skipped the final lookup, so the stale pre-update snapshot would leave
+	// the job stuck in processing forever.
+	closed, err := ddbClient.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(jobsTable), Key: map[string]ddbtypes.AttributeValue{"job_id": &ddbtypes.AttributeValueMemberS{Value: id}},
 		UpdateExpression: aws.String("SET #s = :s, scan_closed = :closed, updated_at = :u"), ConditionExpression: aws.String("#s = :collecting"),
 		ExpressionAttributeNames: map[string]string{"#s": "status"}, ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 			":s": &ddbtypes.AttributeValueMemberS{Value: "processing"}, ":collecting": &ddbtypes.AttributeValueMemberS{Value: "collecting"},
 			":closed": &ddbtypes.AttributeValueMemberBOOL{Value: true}, ":u": &ddbtypes.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)},
 		},
+		ReturnValues: ddbtypes.ReturnValueAllNew,
 	})
 	if err != nil {
 		return errJSON(500, err.Error()), nil
 	}
-	if liveWorkFinished(out.Item) {
+	if liveWorkFinished(closed.Attributes) {
 		if err := queueFinalLookup(ctx, id); err != nil {
 			return errJSON(500, err.Error()), nil
 		}
@@ -721,6 +739,24 @@ func listShelfCandidates(ctx context.Context) (events.APIGatewayV2HTTPResponse, 
 	candidates := make([]ShelfCandidate, 0, len(out.Items))
 	for _, item := range out.Items {
 		candidates = append(candidates, shelfCandidateFromItem(item))
+	}
+	if bookStore != nil {
+		ids := make([]int, 0, len(candidates))
+		for _, candidate := range candidates {
+			ids = append(ids, candidate.BookID)
+		}
+		entries, lookupErr := bookStore.IndexEntries(ids)
+		if lookupErr != nil {
+			log.Printf("warn: shelf candidate cover lookup failed: %v", lookupErr)
+		} else {
+			for index := range candidates {
+				if entry, ok := entries[candidates[index].BookID]; ok {
+					candidates[index].Title = entry.Title
+					candidates[index].TitleReading = entry.TitleReading
+					candidates[index].Thumbnail = entry.Thumbnail
+				}
+			}
+		}
 	}
 	return okJSON(200, map[string]any{"candidates": candidates}), nil
 }

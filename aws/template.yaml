@@ -31,6 +31,11 @@ Globals:
         OCR_QUEUE_URL: !Ref OcrQueue
         LOOKUP_QUEUE_URL: !Ref LookupQueue
         SECRET_GEMINI_ARN: !Ref GeminiSecret
+        # Workers use these to recognize their last attempt and drop a single
+        # frame/crop instead of stalling a live session. Keep them equal to the
+        # matching queue's maxReceiveCount.
+        YOLO_MAX_RECEIVE_COUNT: "2"
+        OCR_MAX_RECEIVE_COUNT: "3"
 
 Resources:
 

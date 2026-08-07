@@ -28,6 +28,9 @@ FINGERPRINTS_TABLE = os.environ.get("CROP_FINGERPRINTS_TABLE")
 LOOKUP_QUEUE_URL = os.environ["LOOKUP_QUEUE_URL"]
 SECRET_ARN = os.environ["SECRET_GEMINI_ARN"]
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite-preview")
+# Must match the OcrQueue RedrivePolicy so the last attempt is recognized
+# before the message is moved to the DLQ.
+MAX_RECEIVE_COUNT = int(os.environ.get("OCR_MAX_RECEIVE_COUNT", "3"))
 
 s3 = boto3.client("s3")
 sqs = boto3.client("sqs")
@@ -201,7 +204,10 @@ def process_one(job_id: str, crop_id: str, crop_key: str,
         ExpressionAttributeValues={":one": 1},
         ReturnValues="ALL_NEW",
     )
-    item = out.get("Attributes", {})
+    advance_after_crop(job_id, out.get("Attributes", {}), incremental)
+
+
+def advance_after_crop(job_id: str, item: dict[str, Any], incremental: bool) -> None:
     done = int(item.get("ocr_done", 0))
     diagnostics = item.get("diagnostics") or {}
     total = int(
@@ -233,11 +239,48 @@ def process_one(job_id: str, crop_id: str, crop_key: str,
         )
 
 
+def abandon_crop(job_id: str, crop_id: str, reason: str, incremental: bool) -> None:
+    """Give up on one crop without stalling the job.
+
+    ocr_done must reach ocr_total for the job to ever leave `processing`, so a
+    crop that exhausted its SQS attempts is recorded as failed and counted.
+    """
+    print(f"[ocr] abandoning crop {job_id}/{crop_id}: {reason}", file=sys.stderr)
+    try:
+        crops_table.update_item(
+            Key={"job_id": job_id, "crop_id": crop_id},
+            UpdateExpression="SET #s = :s, ocr_error = :e",
+            ConditionExpression="#s = :pending",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={":s": "ocr_done", ":e": reason, ":pending": "ocr_pending"},
+        )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            # Already counted by a successful attempt; nothing to advance.
+            return
+        raise
+    out = jobs_table.update_item(
+        Key={"job_id": job_id},
+        UpdateExpression="ADD ocr_done :one",
+        ExpressionAttributeValues={":one": 1},
+        ReturnValues="ALL_NEW",
+    )
+    advance_after_crop(job_id, out.get("Attributes", {}), incremental)
+
+
 def handler(event, context):
     for rec in event.get("Records", []):
         body = json.loads(rec["body"])
-        process_one(
-            body["job_id"], body["crop_id"], body["crop_key"],
-            body.get("fingerprint_scope"), body.get("phash"), bool(body.get("incremental")),
-        )
+        incremental = bool(body.get("incremental"))
+        try:
+            process_one(
+                body["job_id"], body["crop_id"], body["crop_key"],
+                body.get("fingerprint_scope"), body.get("phash"), incremental,
+            )
+        except Exception as e:
+            print(f"[ocr] ERROR: {e}", file=sys.stderr)
+            receive_count = int(rec.get("attributes", {}).get("ApproximateReceiveCount", "1"))
+            if receive_count < MAX_RECEIVE_COUNT:
+                raise
+            abandon_crop(body["job_id"], body["crop_id"], str(e), incremental)
     return {"ok": True}

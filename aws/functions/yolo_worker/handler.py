@@ -39,6 +39,9 @@ OCR_QUEUE_URL = os.environ["OCR_QUEUE_URL"]
 LOOKUP_QUEUE_URL = os.environ["LOOKUP_QUEUE_URL"]
 TASK_ROOT = os.environ.get("LAMBDA_TASK_ROOT", ".")
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
+# Must match the YoloQueue RedrivePolicy so the last attempt is recognized
+# before the message is moved to the DLQ.
+MAX_RECEIVE_COUNT = int(os.environ.get("YOLO_MAX_RECEIVE_COUNT", "2"))
 
 MODEL_PATH = Path(TASK_ROOT) / "assets" / "yolo_model.pt"
 APRILTAG_MAP_PATH = Path(TASK_ROOT) / "assets" / "apriltag_library_map.json"
@@ -457,6 +460,37 @@ def queue_final_lookup_if_ready(job_id: str, item: dict[str, Any]) -> None:
         raise
 
 
+def abandon_live_frame(job_id: str, frame_key: str | None, reason: str) -> None:
+    """Give up on one live frame without stalling the session.
+
+    processed_frames must keep up with accepted_frames, otherwise the session
+    never satisfies the final-lookup condition and the job stays in
+    `processing` forever. A dropped frame costs the books in that frame only.
+    """
+    print(f"[yolo] abandoning frame {job_id}/{frame_key}: {reason}", file=sys.stderr)
+    if not frame_key:
+        return
+    try:
+        updated = jobs_table.update_item(
+            Key={"job_id": job_id},
+            UpdateExpression="SET updated_at = :u ADD processed_frame_keys :frame, "
+                             "processed_frames :one, failed_frames :one",
+            ConditionExpression="attribute_not_exists(processed_frame_keys) "
+                                "OR NOT contains(processed_frame_keys, :frame_key)",
+            ExpressionAttributeValues={
+                ":frame": {frame_key}, ":frame_key": frame_key, ":one": 1,
+                ":u": datetime.now(timezone.utc).isoformat(),
+            },
+            ReturnValues="ALL_NEW",
+        )
+        item = updated.get("Attributes", {})
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+            raise
+        item = jobs_table.get_item(Key={"job_id": job_id}).get("Item") or {}
+    queue_final_lookup_if_ready(job_id, item)
+
+
 def process_job(job_id: str, image_keys: list[str], incremental: bool = False) -> None:
     if not image_keys:
         raise RuntimeError("image_keys is empty")
@@ -581,11 +615,21 @@ def ddb_safe(item):
 def handler(event, context):
     for rec in event.get("Records", []):
         body = json.loads(rec["body"])
+        incremental = bool(body.get("incremental"))
+        image_keys = body.get("image_keys") or [body["image_key"]]
         try:
-            image_keys = body.get("image_keys") or [body["image_key"]]
-            process_job(body["job_id"], image_keys, bool(body.get("incremental")))
+            process_job(body["job_id"], image_keys, incremental)
         except Exception as e:
             print(f"[yolo] ERROR: {e}", file=sys.stderr)
+            if incremental:
+                # One bad frame out of hundreds must not fail the whole live
+                # session. Retry while SQS still has attempts left, then drop
+                # just this frame so the session can still finish.
+                receive_count = int(rec.get("attributes", {}).get("ApproximateReceiveCount", "1"))
+                if receive_count < MAX_RECEIVE_COUNT:
+                    raise
+                abandon_live_frame(body["job_id"], image_keys[0] if image_keys else None, str(e))
+                continue
             try:
                 jobs_table.update_item(
                     Key={"job_id": body["job_id"]},
