@@ -1,6 +1,6 @@
 import { Fragment, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { displayCell, displayPositionForShelf, formatShelfLabel, getSlot, getUnit, layoutUnits } from '../lib/shelf'
+import { displayCell, displayPositionForShelf, formatShelfLabel, getSlot, getUnit, layoutUnits, shelfDensityLevel } from '../lib/shelf'
 
 export function ShelfLocationLabel({ shelfId, size }: { shelfId: string; size: 'sm' | 'lg' }) {
   return (
@@ -42,11 +42,15 @@ const footPositions = [119, 192, 238, 311]
 export function LibraryMap({
   selectedUnit,
   shelfId,
+  unitCounts,
+  selectionTone = 'green',
   onUnitClick,
   size = 'default',
 }: {
   selectedUnit?: string
   shelfId?: string
+  unitCounts?: Record<string, number>
+  selectionTone?: 'green' | 'charcoal'
   onUnitClick?: (unitId: string) => void
   size?: 'default' | 'lg'
 }) {
@@ -56,7 +60,9 @@ export function LibraryMap({
   const locationFor = (kind: FloorMapLocation['kind'], index: number) => floorMapLocations.find(location => location.kind === kind && location.index === index)
   const renderUnit = (location: FloorMapLocation | undefined, className: string, style: { left: number }) => {
     const active = location?.unitId === activeUnit
-    const classes = `${className} ${active ? 'bg-[#087f5b]' : 'bg-[#d9d9d9]'} ${location && onUnitClick ? 'tap-soft cursor-pointer transition hover:bg-[#c4c4c4]' : ''}`
+    const count = location ? (unitCounts?.[location.unitId] ?? 0) : 0
+    const activeBackground = selectionTone === 'charcoal' ? 'bg-[#363636]' : 'bg-[#087f5b]'
+    const classes = `${className} ${active ? activeBackground : densityBackground(count)} ${location && onUnitClick ? 'tap-soft cursor-pointer transition hover:brightness-95' : ''}`
     if (!location || !onUnitClick) return <div className={classes} style={style} />
     return (
       <button
@@ -230,7 +236,7 @@ export function ShelfUnitGrid({
         <p className="text-xs text-ink-muted">色が濃いほど本が多い区画</p>
       </div>
       <div
-        className="grid gap-1"
+        className="grid gap-1.5"
         style={{ gridTemplateColumns: `repeat(${unit.cols}, minmax(0, 1fr))` }}
       >
         {Array.from({ length: unit.rows }, (_, rowIndex) => {
@@ -280,10 +286,19 @@ function unitName(unitId: string): string {
 }
 
 function countTone(count: number): string {
-  if (count >= 6) return 'bg-green-500 text-white'
-  if (count >= 3) return 'bg-green-300 text-green-950'
-  if (count >= 1) return 'bg-green-100 text-green-800'
-  return 'bg-white text-zinc-300 border border-line'
+  const level = shelfDensityLevel(count)
+  if (level === 'high') return 'bg-[#9bcfbd] text-[#064e3b] ring-1 ring-inset ring-[#6bb8a0] hover:brightness-95'
+  if (level === 'mid') return 'bg-[#c8e5da] text-[#065f46] ring-1 ring-inset ring-[#9bcfbd] hover:brightness-95'
+  if (level === 'low') return 'bg-[#e7f3ef] text-[#087f5b] ring-1 ring-inset ring-[#c8e5da] hover:brightness-95'
+  return 'bg-white text-zinc-300 border border-line hover:bg-zinc-50'
+}
+
+function densityBackground(count: number): string {
+  const level = shelfDensityLevel(count)
+  if (level === 'high') return 'bg-[#9bcfbd]'
+  if (level === 'mid') return 'bg-[#c8e5da]'
+  if (level === 'low') return 'bg-[#e7f3ef]'
+  return 'bg-[#d9d9d9]'
 }
 
 function freshnessLabel(value: string | undefined): string {
