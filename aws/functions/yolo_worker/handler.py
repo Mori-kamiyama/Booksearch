@@ -20,16 +20,25 @@ import json
 import math
 import os
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import boto3
 import cv2
 import numpy as np
 from botocore.exceptions import ClientError
-from ultralytics import YOLO
+
+if TYPE_CHECKING:
+    from ultralytics import YOLO
+
+# Lambda's read-only home directory makes Ultralytics/Matplotlib create a new
+# fallback cache on every cold start. Point both caches at writable /tmp before
+# the optional YOLO import runs.
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+os.environ.setdefault("YOLO_CONFIG_DIR", "/tmp/Ultralytics")
 
 BUCKET = os.environ["BUCKET"]
 JOBS_TABLE = os.environ["JOBS_TABLE"]
@@ -58,11 +67,15 @@ scan_tasks_table = ddb.Table(SCAN_TASKS_TABLE) if SCAN_TASKS_TABLE else None
 fingerprints_table = ddb.Table(FINGERPRINTS_TABLE) if FINGERPRINTS_TABLE else None
 
 
-def get_model() -> YOLO:
+def get_model() -> "YOLO":
     global _yolo_model
     if _yolo_model is None:
+        started = time.perf_counter()
+        from ultralytics import YOLO
+
         print(f"loading YOLO model: {MODEL_PATH}")
         _yolo_model = YOLO(str(MODEL_PATH))
+        print(f"[yolo] model initialization seconds={time.perf_counter() - started:.3f}")
     return _yolo_model
 
 

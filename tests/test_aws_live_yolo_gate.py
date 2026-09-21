@@ -99,6 +99,31 @@ def test_batch_queues_only_new_readable_crops(monkeypatch) -> None:
     assert values[":ot"] == 1
 
 
+def test_yolo_model_import_and_load_are_deferred(monkeypatch) -> None:
+    monkeypatch.delenv("MPLCONFIGDIR", raising=False)
+    monkeypatch.delenv("YOLO_CONFIG_DIR", raising=False)
+    worker = load_worker(monkeypatch)
+
+    assert worker._yolo_model is None
+    assert worker.os.environ["MPLCONFIGDIR"] == "/tmp/matplotlib"
+    assert worker.os.environ["YOLO_CONFIG_DIR"] == "/tmp/Ultralytics"
+
+    loaded = []
+
+    class FakeYOLO:
+        def __init__(self, path):
+            loaded.append(path)
+
+    fake_ultralytics = types.ModuleType("ultralytics")
+    fake_ultralytics.YOLO = FakeYOLO
+    monkeypatch.setitem(sys.modules, "ultralytics", fake_ultralytics)
+    first = worker.get_model()
+    second = worker.get_model()
+    assert isinstance(first, FakeYOLO)
+    assert second is first
+    assert loaded == [str(worker.MODEL_PATH)]
+
+
 def test_duplicate_yolo_cannot_reopen_finalized_batch(monkeypatch) -> None:
     worker = load_worker(monkeypatch)
     worker.jobs_table = TerminalJobsTable()

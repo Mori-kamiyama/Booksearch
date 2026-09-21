@@ -26,3 +26,17 @@ uv run --no-project --with boto3 python aws/scripts/diagnose_scan.py \
 - DLQの`visible > 0`またはCloudWatch age alarmがALARMなら、まず入力・Lambdaログ・失敗理由を確認してから個別の再送判断をする。
 
 このCLIは削除、再送、visibility変更、DynamoDB更新を行いません。DLQからの復旧やleaseの変更は、原因と対象を確認した後の個別運用判断に限定します。
+
+## 初回起動と表示速度の切り分け
+
+YOLOのログ `model initialization seconds` はUltralyticsのimportとモデル構築の合計であり、Lambda全体のcold startや推論時間ではありません。LambdaのINIT_REPORT/REPORTと合わせて確認します。モデルは初回処理時に作成し、同じ実行環境で再利用します。設定ファイルは書き込み可能な `/tmp/matplotlib` と `/tmp/Ultralytics` に置きます。
+
+おすすめ表示は `tests/` で次の読み取り専用測定を実行できます。
+
+```sh
+FRONTEND_URL=https://d2uel8nex1m4w7.cloudfront.net \
+API_BASE=https://rx7ylpbzg6.execute-api.ap-northeast-1.amazonaws.com \
+OUTPUT=/tmp/booksearch-featured-timing.json npm run measure:featured
+```
+
+20回を直列に測定し、毎回ブラウザcontextと保存領域を新しくします。APIを事前に取得するため、サーバーcold startの測定ではありません。最初のおすすめの文字が表示されるまでの時間、document受信、DOMContentLoaded、API要求、JS転送量を記録します。表紙画像の全件完了は待ちません。CPU/回線の制限はなく、測定中に他のブラウザテストを走らせない条件で比較します。

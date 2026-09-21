@@ -1,16 +1,17 @@
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom'
-import { Component, useEffect, type ErrorInfo, type ReactNode } from 'react'
+import { Component, lazy, Suspense, useEffect, type ErrorInfo, type ReactNode } from 'react'
 import SearchPage from './pages/SearchPage'
-import SearchResultsPage from './pages/SearchResultsPage'
-import ScanPage from './pages/ScanPage'
-import JobPage from './pages/JobPage'
-import ShelvesPage from './pages/ShelvesPage'
-import TagPlacementPage from './pages/TagPlacementPage'
-import BookDetailPage from './pages/BookDetailPage'
-import IndexPage from './pages/IndexPage'
-import MapPage from './pages/MapPage'
-import ShelfDetailPage from './pages/ShelfDetailPage'
 import { NotFoundPage, SiteFooter, SiteHeader } from './components/common'
+
+const SearchResultsPage = lazy(() => import('./pages/SearchResultsPage'))
+const ScanPage = lazy(() => import('./pages/ScanPage'))
+const JobPage = lazy(() => import('./pages/JobPage'))
+const ShelvesPage = lazy(() => import('./pages/ShelvesPage'))
+const TagPlacementPage = lazy(() => import('./pages/TagPlacementPage'))
+const BookDetailPage = lazy(() => import('./pages/BookDetailPage'))
+const IndexPage = lazy(() => import('./pages/IndexPage'))
+const MapPage = lazy(() => import('./pages/MapPage'))
+const ShelfDetailPage = lazy(() => import('./pages/ShelfDetailPage'))
 
 export default function App() {
   return (
@@ -70,23 +71,33 @@ function AppShell() {
     <div className={`min-h-screen flex flex-col ${usesFigmaLayout ? 'bg-white' : 'bg-surface'}`}>
       {!isScanFlow && <SiteHeader />}
       <main className={`flex-grow ${usesFigmaLayout ? 'w-full' : 'mx-auto w-full max-w-5xl px-4 pb-6'} ${needsHeaderPadding ? (usesFigmaLayout ? 'pt-[72px] md:pt-[88px]' : 'pt-[96px] md:pt-[120px]') : ''}`}>
-        <Routes>
-          <Route path="/" element={<SearchPage />} />
-          <Route path="/search" element={<SearchResultsPage />} />
-          <Route path="/books/:id" element={<BookDetailPage />} />
-          <Route path="/index" element={<IndexPage />} />
-          <Route path="/map" element={<MapPage />} />
-          <Route path="/map/:shelfId" element={<ShelfDetailPage />} />
-          <Route path="/scan" element={<ScanPage />} />
-          <Route path="/jobs/:id" element={<JobPage />} />
-          <Route path="/admin/shelves" element={<ShelvesPage />} />
-          <Route path="/admin/tags" element={<TagPlacementPage />} />
-          <Route path="/shelves" element={<Navigate to="/admin/shelves" replace />} />
-          <Route path="/tag-placement" element={<Navigate to="/admin/tags" replace />} />
-          <Route path="*" element={<NotFoundPage />} />
-        </Routes>
+        <Suspense fallback={<RouteLoading />}>
+          <Routes>
+            <Route path="/" element={<SearchPage />} />
+            <Route path="/search" element={<SearchResultsPage />} />
+            <Route path="/books/:id" element={<BookDetailPage />} />
+            <Route path="/index" element={<IndexPage />} />
+            <Route path="/map" element={<MapPage />} />
+            <Route path="/map/:shelfId" element={<ShelfDetailPage />} />
+            <Route path="/scan" element={<ScanPage />} />
+            <Route path="/jobs/:id" element={<JobPage />} />
+            <Route path="/admin/shelves" element={<ShelvesPage />} />
+            <Route path="/admin/tags" element={<TagPlacementPage />} />
+            <Route path="/shelves" element={<Navigate to="/admin/shelves" replace />} />
+            <Route path="/tag-placement" element={<Navigate to="/admin/tags" replace />} />
+            <Route path="*" element={<NotFoundPage />} />
+          </Routes>
+        </Suspense>
       </main>
       {!isScanFlow && <SiteFooter />}
+    </div>
+  )
+}
+
+function RouteLoading() {
+  return (
+    <div role="status" aria-live="polite" className="grid min-h-[50vh] place-items-center px-7 py-16 text-sm text-ink-muted">
+      ページを読み込んでいます…
     </div>
   )
 }
