@@ -22,7 +22,7 @@ try {
     try {
       const page = await context.newPage()
       const start = performance.now()
-      await page.goto(frontendUrl, { waitUntil: 'domcontentloaded' })
+      const documentResponse = await page.goto(frontendUrl, { waitUntil: 'domcontentloaded' })
       await page.getByRole('button', { name: books[0].title, exact: true }).waitFor({ state: 'visible' })
       const visibleMs = Math.round(performance.now() - start)
       const timing = await page.evaluate(() => {
@@ -32,13 +32,16 @@ try {
         const scripts = resources.filter(entry => /\/assets\/.*\.js(?:\?|$)/.test(entry.name))
         return {
           documentMs: Math.round(navigation.responseEnd),
+          dnsMs: Math.round(navigation.domainLookupEnd - navigation.domainLookupStart),
+          connectionMs: Math.round(navigation.connectEnd - navigation.connectStart),
+          documentResponseWaitMs: Math.round(navigation.responseStart - navigation.requestStart),
           domContentLoadedMs: Math.round(navigation.domContentLoadedEventEnd),
           featuredRequestMs: featured ? Math.round(featured.duration) : null,
           scriptTransferBytes: scripts.reduce((sum, entry) => sum + entry.transferSize, 0),
           scriptCount: scripts.length,
         }
       })
-      samples.push({ visibleMs, ...timing })
+      samples.push({ visibleMs, ...timing, documentCache: await documentResponse?.headerValue('x-cache') })
     } finally {
       await context.close()
     }

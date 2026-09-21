@@ -124,6 +124,25 @@ def test_yolo_model_import_and_load_are_deferred(monkeypatch) -> None:
     assert loaded == [str(worker.MODEL_PATH)]
 
 
+def test_quality_and_tag_helpers_still_load_optional_image_modules(monkeypatch) -> None:
+    import numpy as np
+
+    worker = load_worker(monkeypatch)
+    image = np.zeros((100, 100, 3), dtype=np.uint8)
+    quality = worker.assess_quality(image, (0, 0, 100, 100), (100, 100))
+    assert quality["readable"] is False
+    assert "blurry" in quality["reasons"]
+
+    tags, diagnostics = worker.detect_tags(
+        image, {"dictionary": "DICT_APRILTAG_36h11", "tags": {}},
+    )
+    assert tags == []
+    assert diagnostics["raw_ids"] == []
+    tags, diagnostics = worker.detect_tags(image, {"dictionary": "getPredefinedDictionary"})
+    assert tags == []
+    assert all(entry["dict"] in worker.ARUCO_DICTIONARIES for entry in diagnostics["tried"])
+
+
 def test_duplicate_yolo_cannot_reopen_finalized_batch(monkeypatch) -> None:
     worker = load_worker(monkeypatch)
     worker.jobs_table = TerminalJobsTable()

@@ -27,11 +27,11 @@ from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 import boto3
-import cv2
-import numpy as np
 from botocore.exceptions import ClientError
 
 if TYPE_CHECKING:
+    import cv2
+    import numpy as np
     from ultralytics import YOLO
 
 # Lambda's read-only home directory makes Ultralytics/Matplotlib create a new
@@ -82,6 +82,8 @@ def get_model() -> "YOLO":
 # ---------- crop quality ----------
 def assess_quality(crop: np.ndarray, box: tuple[int, int, int, int],
                    image_size: tuple[int, int]) -> dict[str, Any]:
+    import cv2
+
     width, height = image_size
     x1, y1, x2, y2 = box
     h, w = crop.shape[:2]
@@ -130,16 +132,16 @@ def assess_quality(crop: np.ndarray, box: tuple[int, int, int, int],
 
 
 # ---------- AprilTag ----------
-ARUCO_DICTIONARIES = {
-    "DICT_4X4_50": cv2.aruco.DICT_4X4_50,
-    "DICT_4X4_100": cv2.aruco.DICT_4X4_100,
-    "DICT_5X5_100": cv2.aruco.DICT_5X5_100,
-    "DICT_6X6_250": cv2.aruco.DICT_6X6_250,
-    "DICT_APRILTAG_16h5": cv2.aruco.DICT_APRILTAG_16h5,
-    "DICT_APRILTAG_25h9": cv2.aruco.DICT_APRILTAG_25h9,
-    "DICT_APRILTAG_36h10": cv2.aruco.DICT_APRILTAG_36h10,
-    "DICT_APRILTAG_36h11": cv2.aruco.DICT_APRILTAG_36h11,
-}
+ARUCO_DICTIONARIES = (
+    "DICT_4X4_50",
+    "DICT_4X4_100",
+    "DICT_5X5_100",
+    "DICT_6X6_250",
+    "DICT_APRILTAG_16h5",
+    "DICT_APRILTAG_25h9",
+    "DICT_APRILTAG_36h10",
+    "DICT_APRILTAG_36h11",
+)
 
 
 @dataclass
@@ -161,21 +163,29 @@ class DetectedTag:
         return "bottom_left"
 
     def distance_to_point(self, point) -> float:
+        import numpy as np
+
         return float(np.linalg.norm(np.array(point, dtype=np.float32) - self.center))
 
 
 def detect_tags(image: np.ndarray, mapping: dict[str, Any]) -> tuple[list[DetectedTag], dict[str, Any]]:
     """AprilTag/ArUco を検出。mapping の辞書で失敗したら全辞書を試行し、
     最も多く検出できた辞書を採用する。検出サマリも返す。"""
+    import cv2
+    import numpy as np
+
     primary = mapping.get("dictionary", "DICT_APRILTAG_36h11")
-    candidates = [primary] + [k for k in ARUCO_DICTIONARIES if k != primary]
+    candidates = [primary] + [name for name in ARUCO_DICTIONARIES if name != primary]
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     best: tuple[list[Any], Any, str] = ([], None, primary)
     diagnostics: dict[str, Any] = {"tried": [], "selected": None, "raw_ids": []}
     for name in candidates:
         if name not in ARUCO_DICTIONARIES:
             continue
-        aruco_dict = cv2.aruco.getPredefinedDictionary(ARUCO_DICTIONARIES[name])
+        dictionary_id = getattr(cv2.aruco, name, None)
+        if dictionary_id is None:
+            continue
+        aruco_dict = cv2.aruco.getPredefinedDictionary(dictionary_id)
         detector = cv2.aruco.ArucoDetector(aruco_dict)
         corners, ids, _ = detector.detectMarkers(gray)
         n = 0 if ids is None else len(ids)
@@ -273,6 +283,8 @@ def clamp_box(xyxy, image_size, pad_ratio=0.02):
 
 
 def crop_phash(crop: np.ndarray, hash_size: int = 8) -> int:
+    import cv2
+
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
     resized = cv2.resize(gray, (hash_size, hash_size), interpolation=cv2.INTER_AREA)
     average = float(resized.mean())
@@ -318,6 +330,8 @@ def process_frame(job_id: str, image_key: str, frame_index: int,
                   seen_hashes: list[tuple[int, str]], local_path: str | None = None,
                   *, task_id: str | None = None, detection_token: str | None = None,
                   ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    import cv2
+
     print(f"[yolo] job_id={job_id} image_key={image_key}")
     local_image = local_path or f"/tmp/{job_id}_{frame_index:04d}{Path(image_key).suffix or '.jpg'}"
     if local_path is None:
@@ -436,6 +450,8 @@ def process_frame(job_id: str, image_key: str, frame_index: int,
 
 def extract_video_frames(video_path: str, job_id: str) -> list[str]:
     """Extract a bounded, time-spaced set of JPEG frames from an uploaded video."""
+    import cv2
+
     interval = max(0.1, float(os.environ.get("VIDEO_FRAME_INTERVAL_SEC", "0.5")))
     max_frames = max(1, int(os.environ.get("VIDEO_MAX_FRAMES", "120")))
     capture = cv2.VideoCapture(video_path)
