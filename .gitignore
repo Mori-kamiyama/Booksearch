@@ -36,6 +36,7 @@ dataset/
 # Misc
 .claude/
 aws/.aws-sam/
+/.aws-sam/
 .nvimlog
 .DS_Store
 .vercel

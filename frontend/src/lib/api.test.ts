@@ -25,6 +25,28 @@ describe('API stability', () => {
     expect((await searchBookResults('x')).total).toBe(0)
   })
 
+  it('passes the requested search offset while preserving the total', async () => {
+    let requested = ''
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      requested = url
+      return new Response('{"books":[{"id":2,"title":"second"}],"total":31}')
+    }))
+    const result = await searchBookResults('two words', 30, 30)
+    expect(requested).toContain('/api/books/search?q=two%20words&limit=30&offset=30')
+    expect(result.total).toBe(31)
+    expect(result.books[0].id).toBe(2)
+  })
+
+  it('rejects unsafe offsets instead of sending an imprecise integer', async () => {
+    let requested = ''
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      requested = url
+      return new Response('{"books":[],"total":65}')
+    }))
+    await searchBookResults('alpha', 30, Number.MAX_SAFE_INTEGER + 1)
+    expect(requested).toContain('offset=0')
+  })
+
   it('coalesces featured requests and serves cached books', async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({ books: [{ id: 1, title: 'real' }] })))
     vi.stubGlobal('fetch', fetchMock)

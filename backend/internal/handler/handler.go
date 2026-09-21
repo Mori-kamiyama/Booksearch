@@ -40,7 +40,11 @@ func (h *Handler) SearchBooks(c *gin.Context) {
 	if l, err := strconv.Atoi(c.Query("limit")); err == nil && l > 0 {
 		limit = l
 	}
-	result, err := h.Store.SearchWithTotal(q, limit)
+	offset := 0
+	if o, err := strconv.Atoi(c.Query("offset")); err == nil && o > 0 {
+		offset = o
+	}
+	result, err := h.Store.SearchWithTotalOffset(q, limit, offset)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

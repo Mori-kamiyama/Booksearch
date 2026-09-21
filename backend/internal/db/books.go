@@ -207,12 +207,19 @@ func (s *Store) Search(query string, limit int) ([]Book, error) {
 }
 
 func (s *Store) SearchWithTotal(query string, limit int) (SearchResult, error) {
+	return s.SearchWithTotalOffset(query, limit, 0)
+}
+
+func (s *Store) SearchWithTotalOffset(query string, limit, offset int) (SearchResult, error) {
 	terms := searchTerms(query)
 	if len(terms) == 0 {
 		return SearchResult{Books: []Book{}, Total: 0}, nil
 	}
 	if limit <= 0 {
 		limit = 20
+	}
+	if offset < 0 {
+		offset = 0
 	}
 	where, whereArgs := searchWhere(terms)
 	var total int
@@ -221,7 +228,7 @@ func (s *Store) SearchWithTotal(query string, limit int) (SearchResult, error) {
 	}
 	order, orderArgs := searchOrder(terms)
 	args := append(append([]any{}, whereArgs...), orderArgs...)
-	args = append(args, limit)
+	args = append(args, limit, offset)
 	rows, err := s.db.Query(`
 		SELECT b.id, b.title, COALESCE(b.authors,''), COALESCE(b.publisher,''),
 		       COALESCE(b.published_date,''), COALESCE(b.class_number,''),
@@ -229,7 +236,7 @@ func (s *Store) SearchWithTotal(query string, limit int) (SearchResult, error) {
 		       bc.thumbnail, bc.info_link
 		FROM books b
 		LEFT JOIN book_covers bc ON b.id = bc.book_id
-		WHERE `+where+` ORDER BY `+order+` LIMIT ?`, args...,
+		WHERE `+where+` ORDER BY `+order+` LIMIT ? OFFSET ?`, args...,
 	)
 	if err != nil {
 		return SearchResult{}, err

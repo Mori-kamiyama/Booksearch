@@ -19,6 +19,7 @@ func buildRouter(h *handler.Handler) *gin.Engine {
 		api.GET("/books/search", h.SearchBooks)
 		api.GET("/books/featured", h.FeaturedBooks)
 		api.GET("/books/:id", h.GetBook)
+		api.GET("/books/:id/related", h.RelatedBooks)
 		api.GET("/shelf-candidates", h.ShelfCandidates)
 		api.POST("/scan", h.Scan)
 		api.POST("/scan/sessions", h.StartLiveSession)

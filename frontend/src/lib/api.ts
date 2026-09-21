@@ -49,16 +49,17 @@ export interface SearchBookResults {
   total: number | null
 }
 
-export async function searchBookResults(query: string, limit = 30): Promise<SearchBookResults> {
-  const data = await jsonFetch<{ books?: Book[]; total?: number | null }>(`/api/books/search?q=${encodeURIComponent(query)}&limit=${limit}`)
+export async function searchBookResults(query: string, limit = 30, offset = 0): Promise<SearchBookResults> {
+  const normalizedOffset = Number.isSafeInteger(offset) && offset > 0 ? offset : 0
+  const data = await jsonFetch<{ books?: Book[]; total?: number | null }>(`/api/books/search?q=${encodeURIComponent(query)}&limit=${limit}&offset=${normalizedOffset}`)
   return {
     books: data.books ?? [],
     total: typeof data.total === 'number' && Number.isFinite(data.total) ? data.total : null,
   }
 }
 
-export async function searchBooks(query: string, limit = 30): Promise<Book[]> {
-  return (await searchBookResults(query, limit)).books
+export async function searchBooks(query: string, limit = 30, offset = 0): Promise<Book[]> {
+  return (await searchBookResults(query, limit, offset)).books
 }
 
 export async function getBook(id: string | number): Promise<Book> {

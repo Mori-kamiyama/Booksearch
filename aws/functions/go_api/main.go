@@ -104,6 +104,8 @@ func handler(ctx context.Context, raw json.RawMessage) (events.APIGatewayV2HTTPR
 		return indexBooks()
 	case method == "GET" && path == "/api/shelf-candidates":
 		return listShelfCandidates(ctx)
+	case method == "GET" && strings.HasPrefix(path, "/api/books/") && strings.HasSuffix(path, "/related"):
+		return relatedBooks(ctx, req)
 	case method == "GET" && strings.HasPrefix(path, "/api/books/"):
 		return getBook(ctx, req)
 	case method == "GET" && strings.HasPrefix(path, "/api/jobs/"):
@@ -438,10 +440,16 @@ func searchBooks(ctx context.Context, req events.APIGatewayV2HTTPRequest) (event
 			limit = n
 		}
 	}
+	offset := 0
+	if value := req.QueryStringParameters["offset"]; value != "" {
+		if n, err := strconv.Atoi(value); err == nil && n > 0 {
+			offset = n
+		}
+	}
 	if bookStore == nil {
 		return errJSON(503, "library DB not available"), nil
 	}
-	result, err := bookStore.SearchWithTotal(q, limit)
+	result, err := bookStore.SearchWithTotalOffset(q, limit, offset)
 	if err != nil {
 		return errJSON(500, err.Error()), nil
 	}

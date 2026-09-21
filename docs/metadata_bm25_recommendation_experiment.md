@@ -62,7 +62,7 @@ uv run python scripts/build_bm25_recommendations.py \
   --top-k 6
 
 # ネットワーク不要のテスト
-uv run python -m unittest tests.test_book_recommendations
+uv run --no-project --with pytest pytest tests/test_book_recommendations.py tests/test_recommendation_pipeline.py -q
 ```
 
 特定の本だけを調べる場合は、両スクリプトで `--book-id 123` を使えます。収集済みの `matched` 行を取り直す場合は `--refresh` を指定します。
@@ -97,3 +97,14 @@ BM25の後に、同一著者へ `+0.45`、分類番号の共通接頭辞へ最�
 5. 同一著者・同一大分類ばかりになっていないか
 
 BM25はベースラインです。説明文取得率が十分高く、手動評価で不十分なら、次段階として日本語Embeddingや、取得可能性が確認できた貸出統計を別のスコアとして加えます。
+
+
+## API・画面への接続（2026-09-21）
+
+AWS/ローカルとも `GET /api/books/:id/related` で `bm25-keyword-v1` の上位6冊を読む。対象本自身・存在しない本・別方式を除外し、詳細画面で保存済み理由を表示する。データ未作成は空、取得失敗はエラー表示とし、無関係な週次おすすめへ置換しない。
+
+外部メタデータが未取得でも既存の書名・著者・分類で計算できる。`--book-id` は計算する対象本だけを制限し、候補は全蔵書から選ぶ。`--limit-books` は実験用に候補集合自体を制限する。dry-runはDDLも残さない。
+
+配信用DBのコピーで計算・整合性確認を終えてから、APIとlookupの同梱DBを同じ版へ揃えてビルドする。推薦を再生成してもbooks/表紙/棚候補の既存テーブルは変更しない。人による関連性・多様性の評価と、自然文検索・AI要約は別の残件。
+
+配信時は `--conservative` を指定する。通常モードの文字片一致だけでは内容的に無関係な候補があり、書名だけの内容推定に使わない。保守モードは同一著者・分類3文字・共通カテゴリを条件にし、同一ISBN・同名同著者を除外する。ISBNは重複判定にのみ使い、関連性のスコアには入れない。

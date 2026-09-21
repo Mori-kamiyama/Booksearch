@@ -5,7 +5,8 @@ import { CoverImage, SearchBar } from '../components/book'
 import { EmptyState, ErrorState } from '../components/common'
 import { LibraryMap, ShelfLocationLabel } from '../components/shelf'
 import { fallbackCoverForTitle } from '../data/figmaBooks'
-import { getBook, getFeaturedBooks, subscribeFeaturedBooks } from '../lib/api'
+import { getBook } from '../lib/api'
+import { getRelatedBooks, type RelatedBook } from '../lib/relatedBooks'
 import type { Book, ShelfCandidate } from '../lib/types'
 
 const fallbackSummary = 'データがありません。'
@@ -19,7 +20,9 @@ export default function BookDetailPage() {
   const [book, setBook] = useState<Book | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
-  const [recommendations, setRecommendations] = useState<Book[]>([])
+  const [recommendations, setRecommendations] = useState<RelatedBook[]>([])
+  const [recommendationsFailed, setRecommendationsFailed] = useState(false)
+  const [recommendationsLoading, setRecommendationsLoading] = useState(true)
 
   const requestRef = useRef(0)
   const load = useCallback(async () => {
@@ -42,17 +45,20 @@ export default function BookDetailPage() {
 
   useEffect(() => {
     let cancelled = false
-    const applyRecommendations = (books: Book[]) => {
-      if (!cancelled) setRecommendations(books.filter(b => String(b.id) !== id).slice(0, 6))
-    }
-    const unsubscribe = subscribeFeaturedBooks(7, applyRecommendations)
-    getFeaturedBooks(7)
-      .then(applyRecommendations)
-      .catch(() => { if (!cancelled) setRecommendations([]) })
-    return () => { cancelled = true; unsubscribe() }
+    setRecommendations([])
+    setRecommendationsFailed(false)
+    setRecommendationsLoading(true)
+    if (id) getRelatedBooks(id)
+      .then(books => { if (!cancelled) setRecommendations(books) })
+      .catch(() => { if (!cancelled) setRecommendationsFailed(true) })
+      .finally(() => { if (!cancelled) setRecommendationsLoading(false) })
+    return () => { cancelled = true }
   }, [id])
 
   const topCandidate = useMemo(() => [...(book?.shelf_candidates ?? [])].sort((a, b) => b.confidence - a.confidence)[0], [book])
+  const returnTo = book
+    ? `/books/${book.id}${params.toString() ? `?${params.toString()}` : ''}`
+    : '/'
   const runSearch = () => {
     const q = query.trim()
     if (q) navigate(`/search?q=${encodeURIComponent(q)}`)
@@ -80,6 +86,14 @@ export default function BookDetailPage() {
             <span className="line-clamp-1 align-bottom text-ink-muted">{book.title}</span>
           </nav>
 
+          <div className="mb-6 flex items-center justify-between gap-3 rounded-xl bg-primary-soft px-4 py-3 text-sm">
+            <div>
+              <p className="text-xs text-ink-muted">{topCandidate ? 'この本の棚候補' : 'この本の位置は未登録です'}</p>
+              {topCandidate && <ShelfLocationLabel shelfId={topCandidate.shelf_id} size="sm" />}
+            </div>
+            <a href="#shelf-location" className="shrink-0 py-2 font-semibold text-primary underline">{topCandidate ? '場所を確認' : '探し方を見る'}</a>
+          </div>
+
           <section className="grid gap-8 md:grid-cols-[minmax(0,300px)_minmax(0,1fr)] md:gap-[44px]">
             <BookCoverPanel book={book} cover={cover} />
             <BookInfoPanel book={book} readingHours={readingHours} />
@@ -90,12 +104,22 @@ export default function BookDetailPage() {
       <MapSection
         candidate={topCandidate}
         onOpenMap={() => topCandidate && navigate(`/map/${encodeURIComponent(topCandidate.shelf_id)}`)}
+        onScanForBook={() => navigate('/scan', {
+          state: {
+            targetBook: {
+              id: book.id,
+              title: book.title,
+              shelfId: topCandidate?.shelf_id ?? null,
+            },
+            returnTo,
+          },
+        })}
       />
 
       <AiSummarySection text={summary} />
 
       <div className="mx-auto w-full max-w-[402px] px-7 pt-10 md:max-w-[886px] md:px-0 md:pt-12">
-        <Recommendations books={recommendations} onOpen={bookId => navigate(`/books/${bookId}`)} />
+        <Recommendations loading={recommendationsLoading} failed={recommendationsFailed} books={recommendations} onOpen={bookId => navigate(`/books/${bookId}`)} />
       </div>
     </div>
   )
@@ -161,9 +185,9 @@ function MetaRow({ label, value, accent = false }: { label: string; value?: stri
   )
 }
 
-function MapSection({ candidate, onOpenMap }: { candidate?: ShelfCandidate; onOpenMap: () => void }) {
+function MapSection({ candidate, onOpenMap, onScanForBook }: { candidate?: ShelfCandidate; onOpenMap: () => void; onScanForBook: () => void }) {
   return (
-    <section className="mx-auto mt-12 w-full max-w-[402px] px-7 md:mt-16 md:max-w-[886px] md:px-0">
+    <section id="shelf-location" className="mx-auto mt-12 w-full max-w-[402px] scroll-mt-24 px-7 md:mt-16 md:max-w-[886px] md:px-0">
       <h2 className="text-base font-semibold leading-[19px] text-ink">棚の位置候補</h2>
       {candidate ? (
         <div className="mt-4 flex flex-col items-center gap-4 md:mt-6 md:grid md:grid-cols-[1fr_355px] md:items-center md:gap-[44px]">
@@ -180,6 +204,13 @@ function MapSection({ candidate, onOpenMap }: { candidate?: ShelfCandidate; onOp
       ) : (
         <p className="mt-4 text-sm text-ink-muted">まだ棚の位置が登録されていません。スキャンするとここに表示されます。</p>
       )}
+      <div className="mt-6 rounded-xl border border-primary-soft bg-primary-soft p-4">
+        <p className="text-sm font-semibold text-ink">本棚を見ながら、この本を探す</p>
+        <p className="mt-1 text-xs leading-5 text-ink-muted">周囲の本も一緒に認識し、対象本は候補と自動照合を分けて表示します。</p>
+        <button type="button" onClick={onScanForBook} className="tap-card mt-3 rounded-full bg-primary px-4 py-2 text-sm font-semibold text-white">
+          スキャンしながら探す
+        </button>
+      </div>
     </section>
   )
 }
@@ -198,11 +229,11 @@ function AiSummarySection({ text }: { text: string }) {
   )
 }
 
-function Recommendations({ books, onOpen }: { books: Book[]; onOpen: (bookId: number) => void }) {
-  if (books.length === 0) return null
+function Recommendations({ books, onOpen, failed, loading }: { books: RelatedBook[]; onOpen: (bookId: number) => void; failed: boolean; loading: boolean }) {
   return (
     <section>
-      <h2 className="text-lg font-bold leading-[1.4] text-ink">今週のおすすめ</h2>
+      <h2 className="text-lg font-bold leading-[1.4] text-ink">関連する本</h2>
+      {books.length === 0 && <p className="mt-3 text-sm text-ink-muted">{loading ? '関連する本を読み込んでいます…' : failed ? '関連する本を取得できませんでした。' : '関連する本はまだ用意されていません。'}</p>}
       <div className="-mx-7 mt-5 flex snap-x snap-mandatory scroll-px-7 items-start gap-6 overflow-x-auto px-7 pb-2 [-webkit-overflow-scrolling:touch] [scrollbar-width:none] md:mx-0 md:snap-none md:gap-5 md:overflow-x-auto md:px-0 [&::-webkit-scrollbar]:hidden">
         {books.map(book => {
           const cover = book.thumbnail || fallbackCoverForTitle(book.title)
@@ -222,6 +253,7 @@ function Recommendations({ books, onOpen }: { books: Book[]; onOpen: (bookId: nu
                 />
               </div>
               <p className="line-clamp-2 w-full text-center text-[11px] leading-[13px] text-ink">{book.title}</p>
+              {book.reasons.map(reason => <p key={reason} className="text-xs text-ink-muted">{reason}</p>)}
             </button>
           )
         })}

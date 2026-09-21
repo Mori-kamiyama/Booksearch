@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useState, useRef } from 'react'
 import { ArrowLeft, BookMarked, Camera, ImagePlus } from 'lucide-react'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { apiFetch, apiUrl } from '../lib/api'
 import { frameMetrics, shouldSendFrame, type FrameGateState, type FrameSkipReason } from '../lib/liveFrameGate'
 import { detectBrowserAprilTags, isBrowserAprilTagReady } from '../lib/browserAprilTag'
 import { StableTagTracker } from '../lib/stableTagTracker'
 import { cameraAccessErrorMessage } from '../lib/cameraAccess'
+import { parseScanNavigationState, scanTargetMatchState, type ScanTargetMatchState } from '../lib/scanTarget'
 import embeddedShelfMap from '../../../data/apriltag_library_map.json'
 import { fallbackCoverForTitle } from '../data/figmaBooks'
 
@@ -92,6 +93,9 @@ interface ActiveSession {
 }
 
 export default function ScanPage() {
+  const location = useLocation()
+  const scanNavigation = useMemo(() => parseScanNavigationState(location.state), [location.state])
+  const targetBook = scanNavigation?.targetBook ?? null
   const [mode, setMode] = useState<'upload' | 'camera'>('camera')
   const [file, setFile] = useState<File | null>(null)
   const [filePreview, setFilePreview] = useState('')
@@ -154,10 +158,19 @@ export default function ScanPage() {
   const pendingUploadsRef = useRef<Set<Promise<void>>>(new Set())
   const [scanStats, setScanStats] = useState({ evaluated: 0, sent: 0, skipped: {} as Partial<Record<FrameSkipReason, number>> })
   const navigate = useNavigate()
+  const navigateToJob = (jobId: string) => {
+    const path = `/jobs/${jobId}`
+    if (scanNavigation) navigate(path, { state: scanNavigation })
+    else navigate(path)
+  }
   const goBack = () => {
     uploadGenerationRef.current += 1
     uploadAbortRef.current?.abort()
     uploadAbortRef.current = null
+    if (scanNavigation?.returnTo) {
+      navigate(scanNavigation.returnTo)
+      return
+    }
     if (window.history.state?.idx > 0) navigate(-1)
     else navigate('/')
   }
@@ -667,7 +680,7 @@ export default function ScanPage() {
       setFinalizeRetryAvailable(false)
       setLiveStatus('録画を終了しました。リザルトから認識結果を確認できます。')
       setStopping(false)
-      navigate(`/jobs/${data.job_id}`)
+      navigateToJob(data.job_id)
     } catch (e) {
       if (isCurrentSession(session)) {
         setRecording(false)
@@ -749,7 +762,7 @@ export default function ScanPage() {
       if (!startRes.ok) throw new Error(`start ${startRes.status}: ${await startRes.text()}`)
 
       if (generation !== uploadGenerationRef.current || controller.signal.aborted) return
-      navigate(`/jobs/${init.job_id}`)
+      navigateToJob(init.job_id)
     } catch (e) {
       if (!controller.signal.aborted && generation === uploadGenerationRef.current) {
         setError(`アップロードに失敗しました: ${e instanceof Error ? e.message : String(e)}`)
@@ -792,7 +805,7 @@ export default function ScanPage() {
     if (mode === 'upload') {
       void submit()
     } else if (completedJobId) {
-      navigate(`/jobs/${completedJobId}`)
+      navigateToJob(completedJobId)
     } else if (finalizeRetryAvailable) {
       void stopRecording()
     } else if (recording) {
@@ -834,6 +847,12 @@ export default function ScanPage() {
   }, [liveJob])
 
   const definitiveLiveBookCount = liveBooks.filter(book => book.definitive).length
+  const targetMatchState = useMemo<ScanTargetMatchState>(() => scanTargetMatchState(targetBook, liveBooks), [liveBooks, targetBook])
+  const targetMatchLabel = targetMatchState === 'confirmed'
+    ? '対象本を自動照合しました'
+    : targetMatchState === 'candidate'
+      ? '対象本の候補を認識しました（要確認）'
+      : '対象本を探しています'
 
   // Each newly identified book pops up once with its cover and title, so the
   // operator can see what the scan actually recognized while still filming.
@@ -954,6 +973,22 @@ export default function ScanPage() {
                 ? `自動照合 ${definitiveLiveBookCount}冊`
                 : `照合候補 ${liveBooks.length}冊`}
             </p>
+          )}
+
+          {targetBook && (
+            <div
+              role="status"
+              aria-live="polite"
+              data-testid="scan-target-status"
+              className="absolute right-7 top-[62px] z-10 max-w-[250px] rounded-xl bg-white/95 px-3 py-2 text-xs text-[#1e1e1e] shadow-lg backdrop-blur-md"
+            >
+              <p className="font-semibold">探している本</p>
+              <p className="mt-0.5 line-clamp-2">{targetBook.title}</p>
+              {targetBook.shelfId && <p className="mt-0.5 text-[10px] text-[#087f5b]">棚候補: {targetBook.shelfId}</p>}
+              <p className={`mt-1 font-semibold ${targetMatchState === 'confirmed' ? 'text-[#087f5b]' : 'text-ink-muted'}`}>
+                {targetMatchLabel}
+              </p>
+            </div>
           )}
 
           {mode === 'camera' && bookPops.length > 0 && (

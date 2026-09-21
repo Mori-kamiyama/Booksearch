@@ -228,6 +228,46 @@ func TestSearch_ISBNNormalizationAndTotal(t *testing.T) {
 	}
 }
 
+func TestSearchOffsetKeepsStableTotal(t *testing.T) {
+	store := setupDB(t)
+
+	first, err := store.SearchWithTotalOffset("プログラミング", 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.SearchWithTotalOffset("プログラミング", 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Total != 2 || second.Total != 2 || len(first.Books) != 1 || len(second.Books) != 1 {
+		t.Fatalf("offset result totals/books: first=%#v second=%#v", first, second)
+	}
+	if first.Books[0].ID == second.Books[0].ID {
+		t.Fatalf("offset returned the same book: first=%d second=%d", first.Books[0].ID, second.Books[0].ID)
+	}
+}
+
+func TestSearchOffsetBoundsDoNotOverflow(t *testing.T) {
+	store := setupDB(t)
+
+	negative, err := store.SearchWithTotalOffset("プログラミング", 1, -1)
+	if err != nil {
+		t.Fatalf("negative offset: %v", err)
+	}
+	if len(negative.Books) != 1 || negative.Books[0].ID != 1 {
+		t.Fatalf("negative offset should clamp to first page: %#v", negative.Books)
+	}
+
+	maxInt := int(^uint(0) >> 1)
+	extreme, err := store.SearchWithTotalOffset("プログラミング", 1, maxInt)
+	if err != nil {
+		t.Fatalf("maximum offset should be safe: %v", err)
+	}
+	if extreme.Total != 2 || len(extreme.Books) != 0 {
+		t.Fatalf("maximum offset should return an empty page with stable total: %#v", extreme)
+	}
+}
+
 // ── GetByID ─────────────────────────────────────────────────
 
 func TestGetByID_Found(t *testing.T) {

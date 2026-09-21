@@ -4,47 +4,21 @@
 
 ## アーキテクチャ
 
-```
-[Client]
-    │ POST /api/scan {filename, content_base64}
-    ▼
-[API Gateway HTTP API]
-    │
-    ▼
-[ApiFunction] (Go, provided.al2023, arm64)
-    ├─ S3 PUT uploads/{job_id}/upload.jpg
-    ├─ DDB PutItem jobs (status=pending)
-    └─ SQS yolo-queue へ
-            │
-            ▼
-    [YoloFunction] (Container, x86_64, 3GB)
-        ├─ S3 GET image
-        ├─ YOLO 推論 (model.pt は image 同梱)
-        ├─ AprilTag 検出 + shelf 割当
-        ├─ crop S3 PUT crops/{job_id}/{crop_id}.jpg
-        ├─ DDB PutItem crops × N
-        ├─ DDB Update jobs.crop_total = N
-        └─ SQS ocr-queue へ × N (readable のみ)
-                │
-                ▼
-        [OcrFunction] (Python zip, arm64) × N 並列
-            ├─ Secrets Manager から GEMINI_API_KEY
-            ├─ S3 GET crop
-            ├─ Gemini OCR
-            ├─ DDB Update crops.titles
-            ├─ DDB ADD jobs.ocr_done += 1 (ATOMIC)
-            └─ 最後の 1 件のみ SQS lookup-queue へ
-                    │
-                    ▼
-            [LookupFunction] (Container, arm64)
-                ├─ DDB Query crops (全件)
-                ├─ library.db (image 同梱) で照合
-                ├─ known_books.json で補完
-                ├─ catalog.json を S3 PUT catalogs/{job_id}/
-                └─ DDB Update jobs.status=done
+```text
+Client → API
+  → JobsTableの受付とScanTasksTable.pendingを同時保存
+  → Streams / 定期再照合 → dispatcher → YOLO queue
+  → YOLO: cropとmanifestを保存、task.doneとジョブ件数を同時確定
+  → dispatcher → OCR queue
+  → OCR: crop結果と完了件数を同時保存
+  → JobsTableの最終lookup送信予定
+  → Streams / 定期再照合 → dispatcher → lookup queue
+  → lookup: 採用済みcropを照合、catalog保存、条件付き完了
 ```
 
-最終 lookup の配送・再送・重複実行の契約は [final_lookup_outbox.md](../docs/final_lookup_outbox.md) を参照。上図は単発スキャンの概略で、最終配送は JobsTable の送信予定 → Streams dispatcher → SQS を経由する。
+配送・再送・重複実行の契約は [scan_delivery_and_featured_cache.md](../docs/scan_delivery_and_featured_cache.md)、最終確定は [final_lookup_outbox.md](../docs/final_lookup_outbox.md)、滞留の読み取り専用診断は [scan_operations.md](../docs/scan_operations.md) を参照。
+
+APIは互換ワーカーの更新後に更新する依存関係を持つ。旧taskなしジョブは自動移行しない。週次おすすめはS3保存と週次スケジュール、関連本は同梱SQLiteの事前計算結果を使う。
 
 ## 前提
 
@@ -83,7 +57,7 @@ sam deploy --parameter-overrides "GeminiApiKey=$GEMINI_API_KEY"
 - Stack Name: `booksearch`
 - Region: `ap-northeast-1`
 - `Save arguments to samconfig.toml`: yes
-- 4 つの Lambda の image repo: `277707097118.dkr.ecr.ap-northeast-1.amazonaws.com/booksearch/yolo` 等
+- 2 つのコンテナ Lambda の image repo: `277707097118.dkr.ecr.ap-northeast-1.amazonaws.com/booksearch/yolo` 等
 
 ## アセットの S3 配置 (任意)
 

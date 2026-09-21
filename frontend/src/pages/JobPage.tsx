@@ -1,10 +1,11 @@
 import { CoverImage } from '../components/book'
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { ArrowUpLeft } from 'lucide-react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { apiFetch, apiUrl } from '../lib/api'
 import { formatShelfLabel } from '../lib/shelf'
 import { fallbackCoverForTitle, figmaResultBooks } from '../data/figmaBooks'
+import { parseScanNavigationState, scanTargetMatchState, type ScanTargetMatchState } from '../lib/scanTarget'
 
 interface Candidate {
   title: string
@@ -70,6 +71,8 @@ interface JobState {
 
 export default function JobPage() {
   const navigate = useNavigate()
+  const location = useLocation()
+  const scanNavigation = useMemo(() => parseScanNavigationState(location.state), [location.state])
   const goBack = () => { if ((window.history.state?.idx ?? 0) > 0) navigate(-1); else navigate('/') }
   const { id } = useParams<{ id: string }>()
   const [job, setJob] = useState<JobState | null>(null)
@@ -152,6 +155,15 @@ export default function JobPage() {
   const shelfCount = Number(currentJob.detected_shelf_count ?? shelfIds.size)
   const processing = isProcessingStatus(currentJob.status)
   const uploading = currentJob.status === 'uploading'
+  const targetMatchState = scanNavigation
+    ? processing
+      ? 'searching'
+      : scanTargetMatchState(scanNavigation.targetBook, groups.flatMap(group => group.books.map(book => ({
+        key: resultBookKey({ title: book.title, library_db_id: book.libraryDbId }, book.title),
+        title: book.title,
+        definitive: book.matchLabel === '自動照合',
+      }))))
+    : null
 
   return (
     <div className="min-h-screen bg-white">
@@ -166,6 +178,10 @@ export default function JobPage() {
           <p role="status" className="mx-7 mt-[82px] rounded-xl bg-orange-50 p-3 text-sm text-orange-800">
             一部の画像（{currentJob.failed_frames}件）を解析できませんでした。結果に含まれていない本は、もう一度撮影してください。
           </p>
+        )}
+
+        {scanNavigation && targetMatchState && (
+          <TargetBookResultStatus target={scanNavigation.targetBook} matchState={targetMatchState} processing={processing} completed={currentJob.status === 'done'} returnTo={scanNavigation.returnTo} />
         )}
 
         {processing ? (
@@ -237,6 +253,38 @@ export default function JobPage() {
         )}
       </div>
     </div>
+  )
+}
+
+function TargetBookResultStatus({
+  target,
+  matchState,
+  processing,
+  completed,
+  returnTo,
+}: {
+  target: { id: number; title: string }
+  matchState: ScanTargetMatchState
+  processing: boolean
+  completed: boolean
+  returnTo: string
+}) {
+  const label = processing
+    ? '対象本を探索中'
+    : !completed ? '探索結果を確定できませんでした'
+    : matchState === 'confirmed'
+      ? '対象本を自動照合しました'
+      : matchState === 'candidate'
+        ? '対象本の候補があります（要確認）'
+        : '対象本は未発見でした'
+  return (
+    <section data-testid="target-result-status" className="mx-7 mt-[82px] rounded-xl border border-primary-soft bg-primary-soft p-4">
+      <p className="text-sm text-ink">対象本: {target.title}</p>
+      <p className="mt-1 font-semibold text-[#087f5b]">{label}</p>
+      <Link to={returnTo} className="mt-3 inline-flex text-sm font-semibold text-[#087f5b] underline underline-offset-2">
+        対象本の詳細へ戻る
+      </Link>
+    </section>
   )
 }
 

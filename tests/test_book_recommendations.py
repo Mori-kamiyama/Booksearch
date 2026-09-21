@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from enrich_book_metadata import select_volume  # noqa: E402
 from build_bm25_recommendations import ranked_recommendations  # noqa: E402
 from fetch_missing_covers import rakuten_cover, rakuten_title_match  # noqa: E402
-from recommendation_utils import metadata_match_score, tokenize  # noqa: E402
+from recommendation_utils import bm25_scores, metadata_match_score, prepare_bm25, tokenize  # noqa: E402
 
 
 class MetadataMatchingTests(unittest.TestCase):
@@ -88,6 +88,57 @@ class KeywordBm25Tests(unittest.TestCase):
         ranked = ranked_recommendations(books, source_index=0, top_k=2)
         self.assertEqual(ranked[0][0]["id"], 2)
         self.assertIn("分類が近い本", ranked[0][2])
+
+    def test_prepared_bm25_fixture_preserves_scores(self) -> None:
+        documents = [
+            tokenize("Python データ分析入門"),
+            tokenize("実践 Python 機械学習"),
+            tokenize("日本の近代史"),
+        ]
+        baseline = bm25_scores(documents, documents[0])
+        prepared = prepare_bm25(documents)
+        reused = bm25_scores(
+            documents,
+            documents[0],
+            prepared=prepared,
+            query_frequencies=prepared.term_frequencies[0],
+        )
+        self.assertEqual(reused, baseline)
+        self.assertAlmostEqual(reused[0], 9.976440238813048)
+        self.assertAlmostEqual(reused[1], 0.5295815540797022)
+        self.assertEqual(reused[2], 0.0)
+
+    def test_conservative_mode_requires_metadata_support_and_deduplicates(self) -> None:
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        connection.execute(
+            """
+            CREATE TABLE books (
+                id INTEGER, title TEXT, authors TEXT, publisher TEXT,
+                class_number TEXT, description TEXT, categories_json TEXT, categories_text TEXT, isbn TEXT
+            )
+            """
+        )
+        connection.executemany(
+            "INSERT INTO books VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (1, "Python入門", "山田太郎", "技術社", "007.6", "Python 入門", '["技術"]', "技術", "9784000000001"),
+                (2, "Python実践", "山田 太郎", "技術社", "999", "Python 実践", '["別"]', "別", "9784000000002"),
+                (3, "Python応用", "佐藤花子", "技術社", "007.7", "Python 応用", '["別"]', "別", "9784000000003"),
+                (4, "Python研究", "鈴木一郎", "技術社", "210", "Python 研究", '["技術"]', "技術", "9784000000004"),
+                (5, "Python入門", "山田太郎", "技術社", "007.6", "Python 入門", '["技術"]', "技術", "9784000000005"),
+                (6, "Python実践", "山田太郎", "技術社", "007.6", "Python 実践", '["技術"]', "技術", "9784000000006"),
+                (7, "Python入門", "別著者", "技術社", "999", "Python 入門", '["別"]', "別", "9784000000007"),
+            ],
+        )
+        books = connection.execute("SELECT * FROM books ORDER BY id").fetchall()
+        ranked = ranked_recommendations(books, source_index=0, top_k=10, conservative=True)
+        ids = [book["id"] for book, _, _ in ranked]
+        self.assertEqual(len(ids), 3)
+        self.assertEqual(set(ids) - {2, 6}, {3, 4})
+        self.assertEqual(len(set(ids) & {2, 6}), 1)
+        self.assertTrue(all(reasons for _, _, reasons in ranked))
+        self.assertNotIn("内容のキーワードが近い本", [reason for _, _, reasons in ranked for reason in reasons])
 
 
 if __name__ == "__main__":
