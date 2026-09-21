@@ -1,45 +1,32 @@
-# Booksearch E2E Tests (Playwright)
+# Booksearch regression checks
 
-CloudFront 配信のフロントエンドと AWS API の E2E テスト。デスクトップ Chrome とモバイル Safari の 2 プロジェクトで実行する。
-
-## セットアップ
+## ローカル UI
 
 ```bash
 cd tests
-npm install
-npx playwright install chromium webkit
-```
-
-## 実行
-
-```bash
-# 全テスト
+npm ci
+npx playwright install chromium
 npm test
-
-# ヘッド付き（ブラウザを表示）
-npm run test:headed
-
-# モバイルのみ
-npx playwright test --project=mobile-safari
-
-# レポート表示
-npm run report
 ```
 
-## 環境変数
+`npm test` はフロントをビルドしてローカル preview を起動し、API を模擬した Chromium 回帰テストを実行する。本番 API への登録は行わない。画面表示付きは `npm run test:headed`。既に起動したフロントを使う場合は `PRIORITY_FRONTEND_URL` を明示する。
 
-| 変数 | デフォルト | 用途 |
-|------|-----------|------|
-| `FRONTEND_URL` | `https://d2uel8nex1m4w7.cloudfront.net` | テスト対象フロント URL |
-| `API_BASE` | `https://rx7ylpbzg6.execute-api.ap-northeast-1.amazonaws.com` | API エンドポイント |
-
-ローカル UI に対して実行する場合:
+## 実環境の読み取りスモークテスト
 
 ```bash
-FRONTEND_URL=http://localhost:5173 API_BASE=http://localhost:8080 npm test
+npx playwright install chromium webkit
+FRONTEND_URL=https://example.com npm run test:live
 ```
 
-## カバレッジ
+対象 URL の明示が必須。デスクトップ Chromium / モバイル Safari の閲覧のみを確認し、実画像 OCR・試験登録の検証にはならない。
 
-- UI: ホーム表示、検索（ヒット/ノーヒット）、棚候補、スキャン UI、SPA ルーティング
-- API: `/api/health`, `/api/books/search`, `/api/shelf-candidates`, `POST /api/scan` + ジョブ作成
+## AWS 最終 lookup の障害回帰
+
+リポジトリのルートから実行する。AWS の認証情報は不要。SDK の通信はテスト内で模擬する。
+
+```bash
+uv run --no-project --with pytest --with boto3 --with 'moto[dynamodb,sqs,s3]' --with pillow --with numpy --with opencv-python-headless \
+  pytest tests/test_aws*.py -q
+```
+
+`test_aws_lookup_outbox_integration.py` は Moto の DynamoDB / SQS / S3 を通し、送信予定の保存、Streams イベントを失った場合の再送、二重配送、S3 障害後の再実行、遅延した途中結果による上書き防止を検証する。実 AWS の権限・イベント配線・コンテナ配布は別途受け入れ確認が必要。

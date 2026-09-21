@@ -426,6 +426,25 @@ def extract_video_frames(video_path: str, job_id: str) -> list[str]:
     return frames
 
 
+def mark_final_lookup_outbox(job_id: str, expected_status: str) -> bool:
+    """Atomically publish the durable final-lookup outbox transition."""
+    try:
+        jobs_table.update_item(
+            Key={"job_id": job_id},
+            UpdateExpression="SET final_lookup_queued = :yes, final_lookup_outbox_version = :version, #s = :pending",
+            ConditionExpression="attribute_not_exists(final_lookup_outbox_version) AND #s = :expected",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={
+                ":yes": True, ":version": 1, ":pending": "lookup_pending", ":expected": expected_status,
+            },
+        )
+        return True
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return False
+        raise
+
+
 def queue_final_lookup_if_ready(job_id: str, item: dict[str, Any]) -> None:
     if not item.get("scan_closed"):
         return
@@ -433,31 +452,7 @@ def queue_final_lookup_if_ready(job_id: str, item: dict[str, Any]) -> None:
         return
     if int(item.get("ocr_done", 0)) < int(item.get("ocr_total", 0)):
         return
-    try:
-        jobs_table.update_item(
-            Key={"job_id": job_id},
-            UpdateExpression="SET final_lookup_queued = :yes, #s = :pending",
-            ConditionExpression="attribute_not_exists(final_lookup_queued)",
-            ExpressionAttributeNames={"#s": "status"},
-            ExpressionAttributeValues={":yes": True, ":pending": "lookup_pending"},
-        )
-    except ClientError as exc:
-        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
-            return
-        raise
-    try:
-        sqs.send_message(
-            QueueUrl=LOOKUP_QUEUE_URL,
-            MessageBody=json.dumps({"job_id": job_id, "incremental": False}),
-        )
-    except Exception:
-        jobs_table.update_item(
-            Key={"job_id": job_id},
-            UpdateExpression="SET #s = :processing REMOVE final_lookup_queued",
-            ExpressionAttributeNames={"#s": "status"},
-            ExpressionAttributeValues={":processing": "processing"},
-        )
-        raise
+    mark_final_lookup_outbox(job_id, "processing")
 
 
 def abandon_live_frame(job_id: str, frame_key: str | None, reason: str) -> None:
@@ -494,6 +489,10 @@ def abandon_live_frame(job_id: str, frame_key: str | None, reason: str) -> None:
 def process_job(job_id: str, image_keys: list[str], incremental: bool = False) -> None:
     if not image_keys:
         raise RuntimeError("image_keys is empty")
+    if not incremental:
+        existing_job = jobs_table.get_item(Key={"job_id": job_id}, ConsistentRead=True).get("Item") or {}
+        if existing_job.get("status") not in {"pending", "ocr_pending"}:
+            return
     if incremental:
         existing_job = jobs_table.get_item(Key={"job_id": job_id}).get("Item") or {}
         if image_keys[0] in (existing_job.get("processed_frame_keys") or set()):
@@ -536,7 +535,6 @@ def process_job(job_id: str, image_keys: list[str], incremental: bool = False) -
         "total_crops": len(crop_records),
     }
     first_frame = frame_diagnostics[0]
-    terminal_without_ocr = "no_detection" if not crop_records else "no_readable_crops"
     if incremental:
         frame_key = image_keys[0]
         try:
@@ -560,23 +558,57 @@ def process_job(job_id: str, image_keys: list[str], incremental: bool = False) -
             raise
         job_item = updated.get("Attributes", {})
     else:
-        jobs_table.update_item(
-            Key={"job_id": job_id},
-            UpdateExpression="SET #s = :s, crop_total = :n, ocr_total = :ot, ocr_done = :z, "
-                             "image_width = :w, image_height = :h, #d = :d",
-            ExpressionAttributeNames={"#s": "status", "#d": "diagnostics"},
-            ExpressionAttributeValues={
-                ":s": "ocr_pending" if ocr_records else terminal_without_ocr,
-                ":n": len(crop_records),
-                ":ot": len(ocr_records),
-                ":z": 0,
-                ":w": first_frame["width"],
-                ":h": first_frame["height"],
-                ":d": ddb_safe(diag),
-            },
-        )
+        if ocr_records:
+            try:
+                jobs_table.update_item(
+                    Key={"job_id": job_id},
+                    UpdateExpression="SET #s = :s, crop_total = :n, ocr_total = :ot, ocr_done = :z, "
+                                     "image_width = :w, image_height = :h, #d = :d",
+                    ConditionExpression="#s = :pending AND attribute_not_exists(final_lookup_outbox_version)",
+                    ExpressionAttributeNames={"#s": "status", "#d": "diagnostics"},
+                    ExpressionAttributeValues={
+                        ":s": "ocr_pending", ":pending": "pending", ":n": len(crop_records),
+                        ":ot": len(ocr_records), ":z": 0, ":w": first_frame["width"],
+                        ":h": first_frame["height"], ":d": ddb_safe(diag),
+                    },
+                )
+            except ClientError as exc:
+                if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                    raise
+                current = jobs_table.get_item(Key={"job_id": job_id}).get("Item") or {}
+                if current.get("status") != "ocr_pending":
+                    print(f"[yolo] duplicate batch already finalized {job_id}")
+                    return
+                # A retry after the state transition must resend OCR messages:
+                # the first invocation may have failed before sending them.
+        else:
+            try:
+                jobs_table.update_item(
+                    Key={"job_id": job_id},
+                    UpdateExpression="SET #s = :s, final_lookup_queued = :yes, "
+                                     "final_lookup_outbox_version = :version, crop_total = :n, "
+                                     "ocr_total = :ot, ocr_done = :z, image_width = :w, "
+                                     "image_height = :h, #d = :d",
+                    ConditionExpression="attribute_not_exists(final_lookup_outbox_version) AND #s = :pending",
+                    ExpressionAttributeNames={"#s": "status", "#d": "diagnostics"},
+                    ExpressionAttributeValues={
+                        ":s": "lookup_pending", ":yes": True, ":version": 1,
+                        ":pending": "pending", ":n": len(crop_records), ":ot": 0, ":z": 0,
+                        ":w": first_frame["width"], ":h": first_frame["height"],
+                        ":d": ddb_safe(diag),
+                    },
+                )
+            except ClientError as exc:
+                if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                    raise
+                print(f"[yolo] final lookup already published {job_id}")
+                return
         job_item = {}
 
+    if incremental:
+        # Persist the final intent before sending the refresh message.  A
+        # failed refresh send must not lose the durable final transition.
+        queue_final_lookup_if_ready(job_id, job_item)
     for rec in ocr_records:
         sqs.send_message(
             QueueUrl=OCR_QUEUE_URL,
@@ -593,9 +625,6 @@ def process_job(job_id: str, image_keys: list[str], incremental: bool = False) -
             QueueUrl=LOOKUP_QUEUE_URL,
             MessageBody=json.dumps({"job_id": job_id, "incremental": True}),
         )
-        queue_final_lookup_if_ready(job_id, job_item)
-    elif not ocr_records:
-        sqs.send_message(QueueUrl=LOOKUP_QUEUE_URL, MessageBody=json.dumps({"job_id": job_id}))
 
 
 def ddb_safe(item):
@@ -634,8 +663,11 @@ def handler(event, context):
                 jobs_table.update_item(
                     Key={"job_id": body["job_id"]},
                     UpdateExpression="SET #s = :s, #e = :e",
+                    ConditionExpression="#s IN (:pending, :ocr_pending)",
                     ExpressionAttributeNames={"#s": "status", "#e": "error"},
-                    ExpressionAttributeValues={":s": "failed", ":e": str(e)},
+                    ExpressionAttributeValues={
+                        ":s": "failed", ":e": str(e), ":pending": "pending", ":ocr_pending": "ocr_pending",
+                    },
                 )
             except Exception:
                 pass

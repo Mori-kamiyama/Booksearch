@@ -132,6 +132,7 @@ func TestListShelfCandidatesReturnsMidPaginationError(t *testing.T) {
 
 func TestLiveSessionCompleteRetriesFinalLookupAfterWorkersFinish(t *testing.T) {
 	var updates, messages atomic.Int32
+	var updateBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		target := r.Header.Get("X-Amz-Target")
 		switch {
@@ -139,6 +140,7 @@ func TestLiveSessionCompleteRetriesFinalLookupAfterWorkersFinish(t *testing.T) {
 			writeDynamoJSON(w, http.StatusOK, "{\"Item\":{\"job_id\":{\"S\":\"session-1\"},\"status\":{\"S\":\"processing\"},\"accepted_frames\":{\"N\":\"1\"},\"processed_frames\":{\"N\":\"1\"},\"ocr_total\":{\"N\":\"1\"},\"ocr_done\":{\"N\":\"1\"}}}")
 		case strings.HasSuffix(target, ".UpdateItem"):
 			updates.Add(1)
+			updateBody, _ = io.ReadAll(r.Body)
 			writeDynamoJSON(w, http.StatusOK, "{}")
 		case strings.HasSuffix(target, ".SendMessage"):
 			messages.Add(1)
@@ -163,8 +165,26 @@ func TestLiveSessionCompleteRetriesFinalLookupAfterWorkersFinish(t *testing.T) {
 	if response.StatusCode != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202", response.StatusCode)
 	}
-	if updates.Load() != 1 || messages.Load() != 1 {
-		t.Fatalf("final lookup calls = update %d/send %d, want 1/1", updates.Load(), messages.Load())
+	if updates.Load() != 1 || messages.Load() != 0 {
+		t.Fatalf("final lookup calls = update %d/send %d, want 1/0", updates.Load(), messages.Load())
+	}
+	var request struct {
+		ConditionExpression       string                    `json:"ConditionExpression"`
+		UpdateExpression          string                    `json:"UpdateExpression"`
+		ExpressionAttributeValues map[string]map[string]any `json:"ExpressionAttributeValues"`
+	}
+	if err := json.Unmarshal(updateBody, &request); err != nil {
+		t.Fatal(err)
+	}
+	if request.ConditionExpression != "attribute_not_exists(final_lookup_outbox_version) AND #s = :processing" {
+		t.Fatalf("condition = %q", request.ConditionExpression)
+	}
+	if request.UpdateExpression != "SET final_lookup_queued = :yes, final_lookup_outbox_version = :version, #s = :pending" {
+		t.Fatalf("update = %q", request.UpdateExpression)
+	}
+	values := request.ExpressionAttributeValues
+	if values[":version"]["N"] != "1" || values[":pending"]["S"] != "lookup_pending" || values[":processing"]["S"] != "processing" {
+		t.Fatalf("outbox values = %#v", values)
 	}
 }
 

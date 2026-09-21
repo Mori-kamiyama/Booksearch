@@ -1,6 +1,6 @@
 # Booksearch AWS Backend
 
-ホンノキ バックエンドの AWS (SAM) 移植版。プランの「Go API + S3 + DynamoDB + SQS + Python Worker」分割を、4 つの Lambda として実装した。
+ホンノキ バックエンドの AWS (SAM) 移植版。プランの「Go API + S3 + DynamoDB + SQS + Python Worker」分割を、Lambda 群として実装した。
 
 ## アーキテクチャ
 
@@ -43,6 +43,8 @@
                 ├─ catalog.json を S3 PUT catalogs/{job_id}/
                 └─ DDB Update jobs.status=done
 ```
+
+最終 lookup の配送・再送・重複実行の契約は [final_lookup_outbox.md](../docs/final_lookup_outbox.md) を参照。上図は単発スキャンの概略で、最終配送は JobsTable の送信予定 → Streams dispatcher → SQS を経由する。
 
 ## 前提
 

@@ -7,7 +7,7 @@
   1. DDB から job と全 crops を取得
   2. crops.titles それぞれを SQLite (library.db) で照合
   3. 候補が無ければ known_books.json で補完
-  4. catalog.json を組み立てて S3 PUT (catalogs/<job_id>/catalog.json)
+  4. カタログを組み立て、一意キーで S3 PUT (catalogs/<job_id>/final/<token>.json)
   5. jobs.status = "done"
 """
 
@@ -21,6 +21,7 @@ import sqlite3
 import sys
 import time
 import unicodedata
+import uuid
 from decimal import Decimal
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -46,6 +47,98 @@ jobs_table = ddb.Table(JOBS_TABLE)
 crops_table = ddb.Table(CROPS_TABLE)
 shelf_observations_table = ddb.Table(SHELF_OBSERVATIONS_TABLE) if SHELF_OBSERVATIONS_TABLE else None
 shelf_candidates_table = ddb.Table(SHELF_CANDIDATES_TABLE) if SHELF_CANDIDATES_TABLE else None
+
+FINAL_LEASE_SECONDS = 180
+FINAL_TERMINAL_STATUSES = frozenset({"done", "canceled", "no_detection", "no_readable_crops"})
+INCREMENTAL_STATUSES = frozenset({"collecting", "processing"})
+
+
+class RetryableLeaseError(RuntimeError):
+    """Another lookup worker owns a live finalization lease."""
+
+
+def _is_conditional_failure(error: ClientError) -> bool:
+    return error.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException"
+
+
+def _job_item(job_id: str) -> dict[str, Any]:
+    return jobs_table.get_item(Key={"job_id": job_id}, ConsistentRead=True).get("Item") or {}
+
+
+def _lease_until(item: dict[str, Any]) -> int:
+    try:
+        return int(item.get("lookup_lease_until", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def claim_final_lookup(job_id: str) -> str | None:
+    """Claim one final lookup while keeping status=lookup_pending.
+
+    SQS can deliver the same final message more than once.  A conditional
+    token/lease lets one consumer do the work while allowing a scheduled
+    retry to recover a timed-out consumer.
+    """
+    item = _job_item(job_id)
+    status = item.get("status")
+    if status in FINAL_TERMINAL_STATUSES:
+        return None
+    if status != "lookup_pending":
+        return None
+    now = int(time.time())
+    if _lease_until(item) > now:
+        raise RetryableLeaseError(f"final lookup lease is active for {job_id}")
+
+    token = uuid.uuid4().hex
+    try:
+        jobs_table.update_item(
+            Key={"job_id": job_id},
+            UpdateExpression="SET lookup_claim_token = :token, lookup_lease_until = :lease, updated_at = :updated",
+            ConditionExpression="#s = :pending AND "
+                               "(attribute_not_exists(lookup_lease_until) OR lookup_lease_until <= :now)",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={
+                ":pending": "lookup_pending", ":token": token,
+                ":lease": now + FINAL_LEASE_SECONDS, ":now": now,
+                ":updated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            },
+        )
+    except ClientError as error:
+        if not _is_conditional_failure(error):
+            raise
+        # A concurrent claimant may have won after the consistent read.  Do
+        # not mark the job failed; let SQS/sweeper retry after its lease.
+        current = _job_item(job_id)
+        if current.get("status") in FINAL_TERMINAL_STATUSES:
+            return None
+        if current.get("status") == "lookup_pending" and _lease_until(current) > int(time.time()):
+            raise RetryableLeaseError(f"final lookup lease is active for {job_id}") from error
+        raise RetryableLeaseError(f"final lookup claim raced for {job_id}") from error
+    return token
+
+
+def release_final_lookup(job_id: str, token: str, error: Exception) -> None:
+    """Release only our lease and keep lookup_pending retryable."""
+    try:
+        jobs_table.update_item(
+            Key={"job_id": job_id},
+            UpdateExpression="SET #e = :error, updated_at = :updated "
+                             "REMOVE lookup_claim_token, lookup_lease_until",
+            ConditionExpression="#s = :pending AND lookup_claim_token = :token",
+            ExpressionAttributeNames={"#s": "status", "#e": "error"},
+            ExpressionAttributeValues={
+                ":pending": "lookup_pending", ":token": token,
+                ":error": str(error)[:2000],
+                ":updated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            },
+        )
+    except ClientError as release_error:
+        if not _is_conditional_failure(release_error):
+            raise
+
+
+def incremental_allowed(job_id: str) -> bool:
+    return _job_item(job_id).get("status") in INCREMENTAL_STATUSES
 
 
 # ---------- normalize / score ----------
@@ -371,56 +464,111 @@ def build_catalog(job_id: str) -> dict[str, Any]:
 
 
 def process_job(job_id: str, incremental: bool = False) -> None:
-    catalog = build_catalog(job_id)
-    shelf_observations_added = update_shelf_confidence(catalog)
-    key = f"catalogs/{job_id}/catalog.json"
-    s3.put_object(
-        Bucket=BUCKET, Key=key,
-        Body=json.dumps(catalog, ensure_ascii=False, indent=2).encode("utf-8"),
-        ContentType="application/json; charset=utf-8",
-    )
-
-    entries = catalog.get("entries", [])
-    shelf_count = len({entry.get("shelf_id") for entry in entries if entry.get("shelf_id")})
-    book_count = sum(len(entry.get("books") or []) for entry in entries)
     if incremental:
-        jobs_table.update_item(
-            Key={"job_id": job_id},
-            UpdateExpression="SET catalog_key = :k, updated_at = :t, detected_shelf_count = :sc, "
-                             "detected_book_count = :bc ADD result_revision :one",
-            ExpressionAttributeValues={
-                ":k": key, ":t": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                ":sc": shelf_count, ":bc": book_count, ":one": 1,
-            },
+        if not incremental_allowed(job_id):
+            return
+        catalog = build_catalog(job_id)
+        update_shelf_confidence(catalog)
+        entries = catalog.get("entries", [])
+        shelf_count = len({entry.get("shelf_id") for entry in entries if entry.get("shelf_id")})
+        book_count = sum(len(entry.get("books") or []) for entry in entries)
+        # Every publication gets its own object.  A late incremental result
+        # must never overwrite the object referenced by a final job result.
+        key = f"catalogs/{job_id}/incremental/{uuid.uuid4().hex}.json"
+        s3.put_object(
+            Bucket=BUCKET, Key=key,
+            Body=json.dumps(catalog, ensure_ascii=False, indent=2).encode("utf-8"),
+            ContentType="application/json; charset=utf-8",
         )
+        try:
+            jobs_table.update_item(
+                Key={"job_id": job_id},
+                UpdateExpression="SET catalog_key = :k, updated_at = :t, detected_shelf_count = :sc, "
+                                 "detected_book_count = :bc ADD result_revision :one",
+                ConditionExpression="#s IN (:collecting, :processing)",
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={
+                    ":k": key, ":t": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    ":sc": shelf_count, ":bc": book_count, ":one": 1,
+                    ":collecting": "collecting", ":processing": "processing",
+                },
+            )
+        except ClientError as error:
+            if not _is_conditional_failure(error):
+                raise
+            return
         print(f"[lookup] partial {job_id} books={book_count} -> {key}")
-    else:
-        jobs_table.update_item(
-            Key={"job_id": job_id},
-            UpdateExpression="SET #s = :s, catalog_key = :k, updated_at = :t, shelf_observations_added = :soa, "
-                             "detected_shelf_count = :sc, detected_book_count = :bc",
-            ExpressionAttributeNames={"#s": "status"},
-            ExpressionAttributeValues={
-                ":s": "done", ":k": key,
-                ":t": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                ":soa": shelf_observations_added, ":sc": shelf_count, ":bc": book_count,
-            },
+        return
+
+    token = claim_final_lookup(job_id)
+    if token is None:
+        return
+    try:
+        catalog = build_catalog(job_id)
+        shelf_observations_added = update_shelf_confidence(catalog)
+        entries = catalog.get("entries", [])
+        shelf_count = len({entry.get("shelf_id") for entry in entries if entry.get("shelf_id")})
+        book_count = sum(len(entry.get("books") or []) for entry in entries)
+        # The claim token makes duplicate final deliveries harmless and gives
+        # each attempt an immutable S3 object for late incremental messages.
+        key = f"catalogs/{job_id}/final/{token}.json"
+        s3.put_object(
+            Bucket=BUCKET, Key=key,
+            Body=json.dumps(catalog, ensure_ascii=False, indent=2).encode("utf-8"),
+            ContentType="application/json; charset=utf-8",
         )
+        try:
+            jobs_table.update_item(
+                Key={"job_id": job_id},
+                UpdateExpression="SET #s = :s, catalog_key = :k, updated_at = :t, shelf_observations_added = :soa, "
+                                 "detected_shelf_count = :sc, detected_book_count = :bc "
+                                 "REMOVE lookup_claim_token, lookup_lease_until, #e",
+                ConditionExpression="#s = :pending AND lookup_claim_token = :token",
+                ExpressionAttributeNames={"#s": "status", "#e": "error"},
+                ExpressionAttributeValues={
+                    ":s": "done", ":pending": "lookup_pending", ":token": token, ":k": key,
+                    ":t": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    ":soa": shelf_observations_added, ":sc": shelf_count, ":bc": book_count,
+                },
+            )
+        except ClientError as error:
+            if not _is_conditional_failure(error):
+                raise
+            # Another attempt owns the publication now, or it already won and
+            # moved the job to done/canceled.  The unique object is harmless;
+            # never overwrite the owner or turn a duplicate into failed.
+            return
         print(f"[lookup] done {job_id} -> {key}")
+    except Exception as error:
+        release_final_lookup(job_id, token, error)
+        raise
 
 
 def handler(event, context):
     for rec in event.get("Records", []):
         body = json.loads(rec["body"])
+        job_id = body.get("job_id")
         try:
-            process_job(body["job_id"], bool(body.get("incremental")))
+            process_job(job_id, bool(body.get("incremental")))
+        except RetryableLeaseError:
+            # Keep the SQS message retryable; an active owner must not turn the
+            # job into failed while the lease is still valid.
+            raise
         except Exception as e:
             print(f"[lookup] ERROR: {e}", file=sys.stderr)
-            jobs_table.update_item(
-                Key={"job_id": body["job_id"]},
-                UpdateExpression="SET #s = :s, #e = :e",
-                ExpressionAttributeNames={"#s": "status", "#e": "error"},
-                ExpressionAttributeValues={":s": "failed", ":e": str(e)},
-            )
+            if job_id and bool(body.get("incremental")):
+                try:
+                    jobs_table.update_item(
+                        Key={"job_id": job_id},
+                        UpdateExpression="SET #e = :e",
+                        ConditionExpression="#s IN (:collecting, :processing)",
+                        ExpressionAttributeNames={"#s": "status", "#e": "error"},
+                        ExpressionAttributeValues={
+                            ":e": str(e)[:2000], ":collecting": "collecting", ":processing": "processing",
+                        },
+                    )
+                except ClientError as update_error:
+                    if not _is_conditional_failure(update_error):
+                        raise
             raise
     return {"ok": True}

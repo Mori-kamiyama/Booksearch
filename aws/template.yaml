@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: Booksearch (ホンノキ) backend on AWS — 4 Lambdas + S3 + DynamoDB + SQS
+Description: Booksearch (ホンノキ) backend on AWS — Lambdas + S3 + DynamoDB + SQS
 
 Parameters:
   ProjectName:
@@ -70,6 +70,8 @@ Resources:
     Properties:
       TableName: !Sub ${ProjectName}-jobs
       BillingMode: PAY_PER_REQUEST
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
       AttributeDefinitions:
         - AttributeName: job_id
           AttributeType: S
@@ -286,6 +288,38 @@ Resources:
           Properties:
             Queue: !GetAtt OcrQueue.Arn
             BatchSize: 1
+
+  LookupDispatcherFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ProjectName}-lookup-dispatcher
+      CodeUri: functions/lookup_dispatcher/
+      Handler: handler.handler
+      Runtime: python3.12
+      Architectures: [arm64]
+      MemorySize: 256
+      Timeout: 30
+      Policies:
+        - DynamoDBReadPolicy: { TableName: !Ref JobsTable }
+        - Statement:
+            Effect: Allow
+            Action: dynamodb:UpdateItem
+            Resource: !GetAtt JobsTable.Arn
+        - SQSSendMessagePolicy: { QueueName: !GetAtt LookupQueue.QueueName }
+      Events:
+        FromJobsStream:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt JobsTable.StreamArn
+            StartingPosition: LATEST
+            BatchSize: 10
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+        ReconcilePendingOutbox:
+          Type: Schedule
+          Properties:
+            Schedule: rate(5 minutes)
+            Enabled: true
 
   LookupFunction:
     Type: AWS::Serverless::Function

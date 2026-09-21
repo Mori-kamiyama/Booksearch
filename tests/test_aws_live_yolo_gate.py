@@ -8,13 +8,36 @@ import sys
 import types
 
 
+class FakeClientError(Exception):
+    def __init__(self, code="unused"):
+        self.response = {"Error": {"Code": code}}
+
+
 class FakeTable:
     def __init__(self) -> None:
         self.updates = []
 
+    def get_item(self, **kwargs):
+        return {"Item": {"status": "pending"}}
+
     def update_item(self, **kwargs):
         self.updates.append(kwargs)
         return {}
+
+
+class TerminalJobsTable(FakeTable):
+    def __init__(self) -> None:
+        super().__init__()
+        self.attributes = {"status": "done", "final_lookup_outbox_version": 1}
+
+    def update_item(self, **kwargs):
+        self.updates.append(kwargs)
+        if "attribute_not_exists(final_lookup_outbox_version)" in kwargs.get("ConditionExpression", ""):
+            raise FakeClientError("ConditionalCheckFailedException")
+        return {}
+
+    def get_item(self, **_kwargs):
+        return {"Item": self.attributes}
 
 
 class FakeResource:
@@ -30,27 +53,31 @@ class FakeSQS:
         self.messages.append(kwargs)
 
 
-def load_worker():
+def load_worker(monkeypatch):
     for key in ["BUCKET", "JOBS_TABLE", "CROPS_TABLE", "OCR_QUEUE_URL", "LOOKUP_QUEUE_URL"]:
-        os.environ[key] = key.lower()
+        monkeypatch.setenv(key, key.lower())
     fake_boto3 = types.ModuleType("boto3")
     fake_boto3.client = lambda name: FakeSQS() if name == "sqs" else object()
     fake_boto3.resource = lambda _name: FakeResource()
-    sys.modules["boto3"] = fake_boto3
+    monkeypatch.setitem(sys.modules, "boto3", fake_boto3)
     fake_ultralytics = types.ModuleType("ultralytics")
     fake_ultralytics.YOLO = object
-    sys.modules["ultralytics"] = fake_ultralytics
+    monkeypatch.setitem(sys.modules, "ultralytics", fake_ultralytics)
+    exceptions = types.ModuleType("botocore.exceptions")
+    exceptions.ClientError = FakeClientError
+    monkeypatch.setitem(sys.modules, "botocore", types.ModuleType("botocore"))
+    monkeypatch.setitem(sys.modules, "botocore.exceptions", exceptions)
     path = Path(__file__).parents[1] / "aws/functions/yolo_worker/handler.py"
     spec = importlib.util.spec_from_file_location("live_yolo_handler", path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
+    monkeypatch.setitem(sys.modules, spec.name, module)
     spec.loader.exec_module(module)
     return module
 
 
-def test_batch_queues_only_new_readable_crops() -> None:
-    worker = load_worker()
+def test_batch_queues_only_new_readable_crops(monkeypatch) -> None:
+    worker = load_worker(monkeypatch)
     worker.jobs_table = FakeTable()
     worker.sqs = FakeSQS()
 
@@ -72,6 +99,23 @@ def test_batch_queues_only_new_readable_crops() -> None:
     assert values[":ot"] == 1
 
 
+def test_duplicate_yolo_cannot_reopen_finalized_batch(monkeypatch) -> None:
+    worker = load_worker(monkeypatch)
+    worker.jobs_table = TerminalJobsTable()
+    worker.sqs = FakeSQS()
+
+    def process_frame(_job, _key, _index, _seen):
+        return [{
+            "crop_id": "crop-1", "crop_key": "crops/crop-1.jpg",
+            "status": "ocr_pending", "quality": {"readable": True, "reasons": []},
+        }], {"image_key": _key, "width": 100, "height": 100, "apriltag": {}}
+
+    worker.process_frame = process_frame
+    worker.process_job("job-1", ["frame-1.jpg"])
+
+    assert worker.sqs.messages == []
+
+
 class RecordingJobsTable:
     """Records updates and hands back the resulting live-session counters."""
 
@@ -84,8 +128,8 @@ class RecordingJobsTable:
         return {"Attributes": self.attributes}
 
 
-def test_live_frame_that_exhausts_retries_still_lets_the_session_finish() -> None:
-    worker = load_worker()
+def test_live_frame_that_exhausts_retries_still_lets_the_session_finish(monkeypatch) -> None:
+    worker = load_worker(monkeypatch)
     worker.sqs = FakeSQS()
     # The abandoned frame is the last outstanding work of a closed session.
     worker.jobs_table = RecordingJobsTable({
@@ -102,12 +146,17 @@ def test_live_frame_that_exhausts_retries_still_lets_the_session_finish() -> Non
     counted = worker.jobs_table.updates[0]["ExpressionAttributeValues"]
     assert counted[":frame"] == {"live/job-1/frames/a.jpg"}
     assert counted[":one"] == 1
-    # The final lookup must still be queued, otherwise the job hangs forever.
-    assert json.loads(worker.sqs.messages[0]["MessageBody"]) == {"job_id": "job-1", "incremental": False}
+    # The final lookup intent is persisted for the stream dispatcher; no direct
+    # SQS send remains in the worker.
+    assert worker.sqs.messages == []
+    final_values = worker.jobs_table.updates[-1]["ExpressionAttributeValues"]
+    assert final_values[":yes"] is True
+    assert final_values[":version"] == 1
+    assert final_values[":pending"] == "lookup_pending"
 
 
-def test_live_frame_is_retried_while_sqs_attempts_remain() -> None:
-    worker = load_worker()
+def test_live_frame_is_retried_while_sqs_attempts_remain(monkeypatch) -> None:
+    worker = load_worker(monkeypatch)
     worker.sqs = FakeSQS()
     worker.jobs_table = RecordingJobsTable()
     worker.process_job = lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("transient"))

@@ -115,6 +115,25 @@ def gemini_ocr(image_bytes: bytes, mime: str) -> list[dict[str, Any]]:
     return parse_titles(response.text or "")
 
 
+def mark_final_lookup_outbox(job_id: str, expected_status: str) -> bool:
+    """Atomically publish the durable final-lookup outbox transition."""
+    try:
+        jobs_table.update_item(
+            Key={"job_id": job_id},
+            UpdateExpression="SET final_lookup_queued = :yes, final_lookup_outbox_version = :version, #s = :pending",
+            ConditionExpression="attribute_not_exists(final_lookup_outbox_version) AND #s = :expected",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={
+                ":yes": True, ":version": 1, ":pending": "lookup_pending", ":expected": expected_status,
+            },
+        )
+        return True
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return False
+        raise
+
+
 def queue_final_lookup_if_ready(job_id: str, item: dict[str, Any]) -> None:
     if not item.get("scan_closed"):
         return
@@ -122,31 +141,7 @@ def queue_final_lookup_if_ready(job_id: str, item: dict[str, Any]) -> None:
         return
     if int(item.get("ocr_done", 0)) < int(item.get("ocr_total", 0)):
         return
-    try:
-        jobs_table.update_item(
-            Key={"job_id": job_id},
-            UpdateExpression="SET final_lookup_queued = :yes, #s = :pending",
-            ConditionExpression="attribute_not_exists(final_lookup_queued)",
-            ExpressionAttributeNames={"#s": "status"},
-            ExpressionAttributeValues={":yes": True, ":pending": "lookup_pending"},
-        )
-    except ClientError as exc:
-        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
-            return
-        raise
-    try:
-        sqs.send_message(
-            QueueUrl=LOOKUP_QUEUE_URL,
-            MessageBody=json.dumps({"job_id": job_id, "incremental": False}),
-        )
-    except Exception:
-        jobs_table.update_item(
-            Key={"job_id": job_id},
-            UpdateExpression="SET #s = :processing REMOVE final_lookup_queued",
-            ExpressionAttributeNames={"#s": "status"},
-            ExpressionAttributeValues={":processing": "processing"},
-        )
-        raise
+    mark_final_lookup_outbox(job_id, "processing")
 
 
 def process_one(job_id: str, crop_id: str, crop_key: str,
@@ -218,25 +213,18 @@ def advance_after_crop(job_id: str, item: dict[str, Any], incremental: bool) -> 
     )
     print(f"[ocr] progress {done}/{total}")
     if incremental:
+        # Persist the final intent before sending the refresh message.  A
+        # failed refresh send must not lose the durable final transition.
+        queue_final_lookup_if_ready(job_id, item)
         # Each completed crop refreshes the partial catalog. SQS coalesces the
         # work naturally, while the catalog write remains idempotent.
         sqs.send_message(
             QueueUrl=LOOKUP_QUEUE_URL,
             MessageBody=json.dumps({"job_id": job_id, "incremental": True}),
         )
-        queue_final_lookup_if_ready(job_id, item)
     elif total > 0 and done >= total:
-        # 最後の OCR が lookup_queue に投入
-        sqs.send_message(
-            QueueUrl=LOOKUP_QUEUE_URL,
-            MessageBody=json.dumps({"job_id": job_id}),
-        )
-        jobs_table.update_item(
-            Key={"job_id": job_id},
-            UpdateExpression="SET #s = :s",
-            ExpressionAttributeNames={"#s": "status"},
-            ExpressionAttributeValues={":s": "lookup_pending"},
-        )
+        # The JobsTable stream dispatcher sends the final lookup message.
+        mark_final_lookup_outbox(job_id, "ocr_pending")
 
 
 def abandon_crop(job_id: str, crop_id: str, reason: str, incremental: bool) -> None:

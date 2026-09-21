@@ -304,11 +304,12 @@ func liveWorkFinished(item map[string]ddbtypes.AttributeValue) bool {
 func queueFinalLookup(ctx context.Context, id string) error {
 	_, err := ddbClient.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(jobsTable), Key: map[string]ddbtypes.AttributeValue{"job_id": &ddbtypes.AttributeValueMemberS{Value: id}},
-		UpdateExpression:         aws.String("SET final_lookup_queued = :yes, #s = :pending"),
-		ConditionExpression:      aws.String("attribute_not_exists(final_lookup_queued)"),
+		UpdateExpression:         aws.String("SET final_lookup_queued = :yes, final_lookup_outbox_version = :version, #s = :pending"),
+		ConditionExpression:      aws.String("attribute_not_exists(final_lookup_outbox_version) AND #s = :processing"),
 		ExpressionAttributeNames: map[string]string{"#s": "status"},
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":yes": &ddbtypes.AttributeValueMemberBOOL{Value: true}, ":pending": &ddbtypes.AttributeValueMemberS{Value: "lookup_pending"},
+			":yes": &ddbtypes.AttributeValueMemberBOOL{Value: true}, ":version": &ddbtypes.AttributeValueMemberN{Value: "1"},
+			":pending": &ddbtypes.AttributeValueMemberS{Value: "lookup_pending"}, ":processing": &ddbtypes.AttributeValueMemberS{Value: "processing"},
 		},
 	})
 	if err != nil {
@@ -316,16 +317,6 @@ func queueFinalLookup(ctx context.Context, id string) error {
 			return nil
 		}
 		return fmt.Errorf("finalize live session: %w", err)
-	}
-	msg, _ := json.Marshal(map[string]any{"job_id": id, "incremental": false})
-	if _, err := sqsClient.SendMessage(ctx, &sqs.SendMessageInput{QueueUrl: aws.String(lookupQueueURL), MessageBody: aws.String(string(msg))}); err != nil {
-		_, _ = ddbClient.UpdateItem(ctx, &dynamodb.UpdateItemInput{
-			TableName: aws.String(jobsTable), Key: map[string]ddbtypes.AttributeValue{"job_id": &ddbtypes.AttributeValueMemberS{Value: id}},
-			UpdateExpression:          aws.String("SET #s = :processing REMOVE final_lookup_queued"),
-			ExpressionAttributeNames:  map[string]string{"#s": "status"},
-			ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{":processing": &ddbtypes.AttributeValueMemberS{Value: "processing"}},
-		})
-		return fmt.Errorf("queue final lookup: %w", err)
 	}
 	return nil
 }
