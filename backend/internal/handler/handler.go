@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"booksearch/backend/internal/db"
@@ -26,11 +27,12 @@ type Handler struct {
 	Jobs    *job.Manager
 	JobsDir string
 	TagMap  string
+	liveMu  sync.Mutex
 }
 
 func (h *Handler) SearchBooks(c *gin.Context) {
 	q := c.Query("q")
-	if q == "" {
+	if strings.TrimSpace(q) == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "q is required"})
 		return
 	}
@@ -38,15 +40,15 @@ func (h *Handler) SearchBooks(c *gin.Context) {
 	if l, err := strconv.Atoi(c.Query("limit")); err == nil && l > 0 {
 		limit = l
 	}
-	books, err := h.Store.Search(q, limit)
+	result, err := h.Store.SearchWithTotal(q, limit)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	if books == nil {
-		books = []db.Book{}
+	if result.Books == nil {
+		result.Books = []db.Book{}
 	}
-	c.JSON(http.StatusOK, gin.H{"books": books, "query": q})
+	c.JSON(http.StatusOK, gin.H{"books": result.Books, "query": q, "total": result.Total})
 }
 
 func (h *Handler) FeaturedBooks(c *gin.Context) {
@@ -62,6 +64,7 @@ func (h *Handler) FeaturedBooks(c *gin.Context) {
 	if books == nil {
 		books = []db.Book{}
 	}
+	c.Header("Cache-Control", "public, max-age=300, s-maxage=3600")
 	c.JSON(http.StatusOK, gin.H{"books": books})
 }
 
@@ -195,6 +198,7 @@ type liveSession struct {
 	CreatedAt  time.Time `json:"created_at"`
 	FrameCount int       `json:"frame_count"`
 	Status     string    `json:"status"`
+	JobID      string    `json:"job_id,omitempty"`
 }
 
 func (h *Handler) liveSessionPath(id string) string {
@@ -217,6 +221,8 @@ func (h *Handler) readLiveSession(id string) (*liveSession, error) {
 }
 
 func (h *Handler) StartLiveSession(c *gin.Context) {
+	h.liveMu.Lock()
+	defer h.liveMu.Unlock()
 	id := uuid.New().String()
 	dir := filepath.Join(h.JobsDir, "live", id, "frames")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -232,6 +238,8 @@ func (h *Handler) StartLiveSession(c *gin.Context) {
 }
 
 func (h *Handler) UploadLiveFrame(c *gin.Context) {
+	h.liveMu.Lock()
+	defer h.liveMu.Unlock()
 	id, frame := c.Param("id"), filepath.Base(c.Param("frame"))
 	s, err := h.readLiveSession(id)
 	if err != nil || s.Status != "collecting" {
@@ -265,6 +273,8 @@ func (h *Handler) UploadLiveFrame(c *gin.Context) {
 // keeps the uploaded frame ready for the batch pipeline started on complete;
 // production enqueues it for incremental YOLO/OCR processing at this point.
 func (h *Handler) CommitLiveFrame(c *gin.Context) {
+	h.liveMu.Lock()
+	defer h.liveMu.Unlock()
 	id := c.Param("id")
 	s, err := h.readLiveSession(id)
 	if err != nil || s.Status != "collecting" {
@@ -287,9 +297,19 @@ func (h *Handler) CommitLiveFrame(c *gin.Context) {
 }
 
 func (h *Handler) CompleteLiveSession(c *gin.Context) {
+	h.liveMu.Lock()
+	defer h.liveMu.Unlock()
 	id := c.Param("id")
 	s, err := h.readLiveSession(id)
-	if err != nil || s.Status != "collecting" {
+	if err != nil {
+		c.JSON(404, gin.H{"error": "live session not collecting"})
+		return
+	}
+	if s.Status != "collecting" {
+		if s.Status == "confirmed" && s.JobID != "" {
+			c.JSON(http.StatusAccepted, gin.H{"job_id": s.JobID, "accepted_frames": s.FrameCount})
+			return
+		}
 		c.JSON(404, gin.H{"error": "live session not collecting"})
 		return
 	}
@@ -306,12 +326,18 @@ func (h *Handler) CompleteLiveSession(c *gin.Context) {
 		return
 	}
 	s.Status = "confirmed"
-	_ = h.writeLiveSession(*s)
+	s.JobID = jobID
+	if err := h.writeLiveSession(*s); err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
 	h.Jobs.StartFrames(jobID, framesDir)
 	c.JSON(http.StatusAccepted, gin.H{"job_id": jobID, "accepted_frames": s.FrameCount})
 }
 
 func (h *Handler) CancelLiveSession(c *gin.Context) {
+	h.liveMu.Lock()
+	defer h.liveMu.Unlock()
 	id := c.Param("id")
 	s, err := h.readLiveSession(id)
 	if err != nil || s.Status != "collecting" {

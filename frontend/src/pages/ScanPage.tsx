@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, useRef } from 'react'
-import { ArrowLeft, BookMarked } from 'lucide-react'
+import { ArrowLeft, BookMarked, Camera, ImagePlus } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { apiFetch, apiUrl } from '../lib/api'
 import { frameMetrics, shouldSendFrame, type FrameGateState, type FrameSkipReason } from '../lib/liveFrameGate'
@@ -78,6 +78,17 @@ interface BookPop {
   key: string
   title: string
   cover?: string
+  matchLabel: string
+}
+
+const MAX_SCAN_UPLOAD_BYTES = 100 * 1024 * 1024
+const SUPPORTED_SCAN_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.mp4', '.mov', '.webm'])
+
+interface ActiveSession {
+  id: string
+  template: string
+  controller: AbortController
+  uploadFailure?: string
 }
 
 export default function ScanPage() {
@@ -91,8 +102,10 @@ export default function ScanPage() {
   const videoRef = useRef<HTMLVideoElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [recording, setRecording] = useState(false)
+  const [startingRecording, setStartingRecording] = useState(false)
   const [cameraStarting, setCameraStarting] = useState(false)
   const [stopping, setStopping] = useState(false)
+  const [finalizeRetryAvailable, setFinalizeRetryAvailable] = useState(false)
   const [liveJobId, setLiveJobId] = useState('')
   const [completedJobId, setCompletedJobId] = useState('')
   const [liveJob, setLiveJob] = useState<LiveJobState | null>(null)
@@ -129,12 +142,25 @@ export default function ScanPage() {
   const captureCanvasRef = useRef<HTMLCanvasElement>(null)
   const scanAnimationRef = useRef<number | null>(null)
   const scanGateRef = useRef<FrameGateState>({ lastSentAt: 0 })
-  const sessionRef = useRef<{ id: string; template: string } | null>(null)
+  const sessionRef = useRef<ActiveSession | null>(null)
+  const sessionGenerationRef = useRef(0)
+  const recordingStartInFlightRef = useRef(false)
+  const recordingStartAbortRef = useRef<AbortController | null>(null)
+  const uploadAbortRef = useRef<AbortController | null>(null)
+  const uploadGenerationRef = useRef(0)
   const frameNumberRef = useRef(0)
   const lastEvaluationRef = useRef(0)
+  const pendingFrameEncodesRef = useRef<Set<Promise<void>>>(new Set())
   const pendingUploadsRef = useRef<Set<Promise<void>>>(new Set())
   const [scanStats, setScanStats] = useState({ evaluated: 0, sent: 0, skipped: {} as Partial<Record<FrameSkipReason, number>> })
   const navigate = useNavigate()
+  const goBack = () => {
+    uploadGenerationRef.current += 1
+    uploadAbortRef.current?.abort()
+    uploadAbortRef.current = null
+    if (window.history.state?.idx > 0) navigate(-1)
+    else navigate('/')
+  }
 
   useEffect(() => {
     if (!shelfAnnouncement) return
@@ -150,8 +176,9 @@ export default function ScanPage() {
       let finished = false
       try {
         const response = await apiFetch(`/api/jobs/${liveJobId}`)
-        if (response.ok && !cancelled) {
+        if (response.ok) {
           const data = await response.json() as LiveJobState
+          if (cancelled) return
           setLiveJob(data)
           finished = ['done', 'failed', 'no_detection', 'no_readable_crops'].includes(data.status)
         }
@@ -230,11 +257,11 @@ export default function ScanPage() {
       announcedTagSetsRef.current.add(event.key)
       const time = new Date().toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
       setShelfEvents(events => [{ id: event.key, label, time }, ...events].slice(0, 6))
-      setLiveStatus(`新しい棚を検知しました。${label}を記録しました。`)
+      setLiveStatus(`新しい棚のタグを確認しました。${label}の本を読み取っています。`)
       setShelfAnnouncement({
         id: now,
         title: '新しい棚を検知しました！',
-        detail: `${label}は確認済みです。次の棚へ移動してください。`,
+        detail: `${label}のタグを確認しました。本の読み取り結果を処理しています。`,
       })
     } else {
       setLiveStatus(`認識済みの棚を追跡中です。${label}`)
@@ -242,7 +269,8 @@ export default function ScanPage() {
   }, [])
 
   const detectFrame = useCallback(async () => {
-    if (!trackingEnabledRef.current) return
+    const sessionId = sessionRef.current?.id
+    if (!trackingEnabledRef.current || !sessionId || document.hidden) return
     if (detectingRef.current) return
     const video = videoRef.current
     const canvas = canvasRef.current
@@ -265,15 +293,15 @@ export default function ScanPage() {
       form.append('image', blob, 'live-scan-frame.jpg')
       const response = await apiFetch('/api/tags/detect', { method: 'POST', body: form })
       if (!response.ok) throw new Error(await response.text())
-      if (!trackingEnabledRef.current) return
       const data = (await response.json()) as LiveDetectResponse
+      if (!trackingEnabledRef.current || sessionRef.current?.id !== sessionId) return
       if (data.map_id && data.map_id !== shelfTagMapRef.current.map_id) {
         throw new Error(`配置データの版が一致しません: ${data.map_id}`)
       }
       const tags = data.tags ?? []
       setDetectedTags(tags)
       const usable = tags.find(tag => tag.mapped && tag.orientation_status !== 'mismatch')
-      if (!browserDetectionActiveRef.current) {
+      if (trackingEnabledRef.current && sessionRef.current?.id === sessionId && !browserDetectionActiveRef.current) {
         if (usable) {
           setLiveStatus(`tag ${usable.tag_id} を認識中。${usable.placement ?? '棚の位置を確認できます。'}`)
         } else if (tags.length > 0) {
@@ -286,7 +314,7 @@ export default function ScanPage() {
           .map(tag => tag.tag_id))
       }
     } catch (detectionError) {
-      if (!browserDetectionActiveRef.current) {
+      if (trackingEnabledRef.current && sessionRef.current?.id === sessionId && !browserDetectionActiveRef.current) {
         setLiveStatus(`ライブ検出に失敗しました: ${detectionError instanceof Error ? detectionError.message : String(detectionError)}`)
       }
     } finally {
@@ -296,7 +324,8 @@ export default function ScanPage() {
   }, [trackDetectedTags])
 
   const detectBrowserFrame = useCallback(async () => {
-    if (!trackingEnabledRef.current) return
+    const sessionId = sessionRef.current?.id
+    if (!trackingEnabledRef.current || !sessionId || document.hidden) return
     if (browserDetectingRef.current) return
     const video = videoRef.current
     const canvas = browserCanvasRef.current
@@ -312,7 +341,7 @@ export default function ScanPage() {
       if (!context) return
       context.drawImage(video, 0, 0, canvas.width, canvas.height)
       const tags = await detectBrowserAprilTags(canvas)
-      if (!trackingEnabledRef.current) return
+      if (!trackingEnabledRef.current || sessionRef.current?.id !== sessionId) return
       setOpencvState('ready')
       browserDetectionActiveRef.current = true
       if (tags.length > 0) {
@@ -324,8 +353,8 @@ export default function ScanPage() {
 
       // Browser detection is usable on its own. The backend remains an
       // optional authoritative orientation/quadrant/shelf assignment pass.
-      if (tags.length > 0) void detectFrame()
     } catch (browserError) {
+      if (!trackingEnabledRef.current || sessionRef.current?.id !== sessionId) return
       setOpencvState('fallback')
       browserDetectionActiveRef.current = false
       const detail = browserError instanceof Error ? browserError.message : String(browserError)
@@ -353,6 +382,13 @@ export default function ScanPage() {
 
   const stopCamera = useCallback(() => {
     cameraRequestRef.current += 1
+    sessionGenerationRef.current += 1
+    recordingStartAbortRef.current?.abort()
+    recordingStartAbortRef.current = null
+    recordingStartInFlightRef.current = false
+    uploadGenerationRef.current += 1
+    uploadAbortRef.current?.abort()
+    uploadAbortRef.current = null
     stopTagDetection()
     streamRef.current?.getTracks().forEach(track => track.stop())
     streamRef.current = null
@@ -362,8 +398,15 @@ export default function ScanPage() {
     stableTagTrackerRef.current.reset()
     const abandoned = sessionRef.current
     sessionRef.current = null
-    if (abandoned) void apiFetch(`/api/scan/sessions/${abandoned.id}/cancel`, { method: 'POST' })
+    abandoned?.controller.abort()
+    if (abandoned) {
+      void apiFetch(`/api/scan/sessions/${abandoned.id}/cancel`, { method: 'POST' }).catch(() => undefined)
+    }
     setRecording(false)
+    setStartingRecording(false)
+    setFinalizeRetryAvailable(false)
+    setStopping(false)
+    setUploading(false)
     setCameraReady(false)
   }, [stopTagDetection])
 
@@ -406,7 +449,7 @@ export default function ScanPage() {
       stopCamera()
       return false
     } finally {
-      setCameraStarting(false)
+      if (requestId === cameraRequestRef.current) setCameraStarting(false)
     }
   }, [stopCamera])
 
@@ -426,17 +469,36 @@ export default function ScanPage() {
     scanAnimationRef.current = null
   }
 
+  const isCurrentSession = (session: ActiveSession): boolean => (
+    sessionRef.current?.id === session.id && !session.controller.signal.aborted
+  )
+
   const startRecording = async () => {
-    if (!videoRef.current?.srcObject) return
+    if (!videoRef.current?.srcObject || recording || stopping || recordingStartInFlightRef.current) return
+    const generation = ++sessionGenerationRef.current
+    const requestAbort = new AbortController()
+    recordingStartAbortRef.current = requestAbort
+    recordingStartInFlightRef.current = true
+    setStartingRecording(true)
     try {
-      const res = await apiFetch('/api/scan/sessions', { method: 'POST' })
+      const res = await apiFetch('/api/scan/sessions', { method: 'POST', signal: requestAbort.signal })
       if (!res.ok) throw new Error(await res.text())
       const session = await res.json() as { session_id: string; frame_upload_url_template?: string; frame_upload_url_endpoint?: string }
-      sessionRef.current = { id: session.session_id, template: session.frame_upload_url_template ?? session.frame_upload_url_endpoint ?? '' }
+      if (generation !== sessionGenerationRef.current || requestAbort.signal.aborted || !videoRef.current?.srcObject) {
+        void apiFetch(`/api/scan/sessions/${session.session_id}/cancel`, { method: 'POST' }).catch(() => undefined)
+        return
+      }
+      const activeSession: ActiveSession = {
+        id: session.session_id,
+        template: session.frame_upload_url_template ?? session.frame_upload_url_endpoint ?? '',
+        controller: new AbortController(),
+      }
+      sessionRef.current = activeSession
       setLiveJobId(session.session_id)
       setCompletedJobId('')
       setLiveJob(null)
       setStopping(false)
+      setFinalizeRetryAvailable(false)
       setLastQualityIssue(null)
       frameNumberRef.current = 0; lastEvaluationRef.current = 0
       scanGateRef.current = { lastSentAt: 0 }
@@ -461,7 +523,11 @@ export default function ScanPage() {
       detectTimerRef.current = window.setInterval(() => void detectFrame(), 1600)
       browserDetectTimerRef.current = window.setInterval(() => void detectBrowserFrame(), 650)
       const loop = (now: number) => {
-        if (!sessionRef.current) return
+        if (!isCurrentSession(activeSession)) return
+        if (document.hidden) {
+          scanAnimationRef.current = requestAnimationFrame(loop)
+          return
+        }
         if (now - lastEvaluationRef.current >= 1000 / 15) {
           lastEvaluationRef.current = now
           const video = videoRef.current; const canvas = scanCanvasRef.current
@@ -472,12 +538,15 @@ export default function ScanPage() {
               ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
               const evaluated = frameMetrics(ctx.getImageData(0, 0, canvas.width, canvas.height), scanGateRef.current.previous)
               const reason = shouldSendFrame(evaluated.metrics, now, scanGateRef.current)
-              scanGateRef.current.previous = evaluated.sample
               if (reason) {
                 setScanStats(s => ({ ...s, evaluated: s.evaluated + 1, skipped: { ...s.skipped, [reason]: (s.skipped[reason] ?? 0) + 1 } }))
                 if (reason === 'blurred' || reason === 'glare') setLastQualityIssue({ reason, at: Date.now() })
               }
               else {
+                // Keep the comparison baseline at the last frame accepted for
+                // upload. Recording a rate-limited no-tag frame here would
+                // make an unchanged shelf stay skipped forever.
+                scanGateRef.current.previous = evaluated.sample
                 scanGateRef.current.lastSentAt = now
                 const frame = `frame_${String(++frameNumberRef.current).padStart(6, '0')}.jpg`
                 const capture = captureCanvasRef.current
@@ -486,32 +555,71 @@ export default function ScanPage() {
                 capture.width = captureWidth
                 capture.height = Math.round(video.videoHeight * captureWidth / video.videoWidth)
                 capture.getContext('2d')?.drawImage(video, 0, 0, capture.width, capture.height)
-                capture.toBlob(blob => {
-                  if (!blob || !sessionRef.current) return
-                  const activeSession = sessionRef.current
-                  const upload = (async () => {
-                    let url = activeSession.template.replace('{frame_id}', frame)
-                    let frameKey = frame
-                    if (!activeSession.template.includes('{frame_id}')) {
-                      const init = await apiFetch(activeSession.template, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ filename: frame }) })
-                      if (!init.ok) throw new Error(`frame init ${init.status}`)
-                      const initialized = await init.json() as { upload_url: string; frame_key?: string }
-                      url = initialized.upload_url
-                      frameKey = initialized.frame_key ?? frame
+                const frameEncoding = new Promise<void>(resolve => {
+                  capture.toBlob(blob => {
+                    if (!blob || !isCurrentSession(activeSession)) {
+                      if (!blob && isCurrentSession(activeSession)) activeSession.uploadFailure = '画像を生成できませんでした'
+                      resolve()
+                      return
                     }
-                    const put = await fetch(apiUrl(url), { method: 'PUT', headers: { 'Content-Type': 'image/jpeg' }, body: blob })
-                    if (!put.ok) throw new Error(`frame upload ${put.status}`)
-                    const commit = await apiFetch(`/api/scan/sessions/${activeSession.id}/commit-frame`, {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ frame_key: frameKey }),
-                    })
-                    if (!commit.ok) throw new Error(`frame commit ${commit.status}`)
-                    setScanStats(s => ({ ...s, evaluated: s.evaluated + 1, sent: s.sent + 1 }))
-                  })().catch(e => setError(`候補フレームの保存に失敗しました: ${String(e)}`))
-                  pendingUploadsRef.current.add(upload)
-                  void upload.finally(() => pendingUploadsRef.current.delete(upload))
-                }, 'image/jpeg', 0.82)
+                    const upload = (async () => {
+                      if (!isCurrentSession(activeSession)) return
+                      let url = activeSession.template.replace('{frame_id}', frame)
+                      let frameKey = frame
+                      if (!activeSession.template.includes('{frame_id}')) {
+                        const init = await apiFetch(activeSession.template, {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ filename: frame }),
+                          signal: activeSession.controller.signal,
+                        })
+                        if (!init.ok) throw new Error(`frame init ${init.status}`)
+                        const initialized = await init.json() as { upload_url: string; frame_key?: string }
+                        url = initialized.upload_url
+                        frameKey = initialized.frame_key ?? frame
+                      }
+                      if (!isCurrentSession(activeSession)) return
+                      const putController = new AbortController()
+                      const abortPut = () => putController.abort()
+                      const putTimeout = window.setTimeout(() => putController.abort(), 30_000)
+                      activeSession.controller.signal.addEventListener('abort', abortPut, { once: true })
+                      let put: Response
+                      try {
+                        put = await fetch(apiUrl(url), {
+                          method: 'PUT',
+                          headers: { 'Content-Type': 'image/jpeg' },
+                          body: blob,
+                          signal: putController.signal,
+                        })
+                      } finally {
+                        window.clearTimeout(putTimeout)
+                        activeSession.controller.signal.removeEventListener('abort', abortPut)
+                      }
+                      if (!put.ok) throw new Error(`frame upload ${put.status}`)
+                      if (!isCurrentSession(activeSession)) return
+                      const commit = await apiFetch(`/api/scan/sessions/${activeSession.id}/commit-frame`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ frame_key: frameKey }),
+                        signal: activeSession.controller.signal,
+                      })
+                      if (!commit.ok) throw new Error(`frame commit ${commit.status}`)
+                      if (isCurrentSession(activeSession)) setScanStats(s => ({ ...s, evaluated: s.evaluated + 1, sent: s.sent + 1 }))
+                    })()
+                    pendingUploadsRef.current.add(upload)
+                    void upload.then(
+                      () => pendingUploadsRef.current.delete(upload),
+                      e => {
+                        pendingUploadsRef.current.delete(upload)
+                        activeSession.uploadFailure = String(e)
+                        if (isCurrentSession(activeSession)) setError(`候補フレームの保存に失敗しました: ${String(e)}`)
+                      },
+                    )
+                    resolve()
+                  }, 'image/jpeg', 0.82)
+                })
+                pendingFrameEncodesRef.current.add(frameEncoding)
+                void frameEncoding.then(() => pendingFrameEncodesRef.current.delete(frameEncoding))
               }
             }
           }
@@ -519,32 +627,75 @@ export default function ScanPage() {
         scanAnimationRef.current = requestAnimationFrame(loop)
       }
       scanAnimationRef.current = requestAnimationFrame(loop)
-    } catch (e) { setError(`ライブスキャンを開始できませんでした: ${String(e)}`) }
+    } catch (e) {
+      if (!requestAbort.signal.aborted && generation === sessionGenerationRef.current) {
+        setError(`ライブスキャンを開始できませんでした: ${String(e)}`)
+      }
+    } finally {
+      if (generation === sessionGenerationRef.current) {
+        recordingStartInFlightRef.current = false
+        recordingStartAbortRef.current = null
+        setStartingRecording(false)
+      }
+    }
   }
 
   const stopRecording = async () => {
-    const session = sessionRef.current; stopFrameLoop(); stopTagDetection(); setRecording(false); setStopping(true)
-    if (!session) return
+    const session = sessionRef.current
+    if (!session || stopping || startingRecording) return
+    stopFrameLoop()
+    stopTagDetection()
+    setRecording(false)
+    setStopping(true)
     try {
+      // A canvas.toBlob callback can run after requestAnimationFrame was
+      // cancelled. Wait for those callbacks before completing the session so
+      // their uploads cannot arrive after finalize.
+      await Promise.all([...pendingFrameEncodesRef.current])
       await Promise.all([...pendingUploadsRef.current])
+      if (!isCurrentSession(session)) return
+      if (session.uploadFailure) throw new Error(`候補フレームの保存に失敗しています: ${session.uploadFailure}`)
       const res = await apiFetch(`/api/scan/sessions/${session.id}/complete`, { method: 'POST' })
       if (!res.ok) throw new Error(await res.text())
       const data = await res.json() as { job_id: string }
+      if (!isCurrentSession(session)) return
       sessionRef.current = null
+      session.controller.abort()
+      sessionGenerationRef.current += 1
       setLiveJobId(data.job_id)
       setCompletedJobId(data.job_id)
+      setFinalizeRetryAvailable(false)
       setLiveStatus('録画を終了しました。リザルトから認識結果を確認できます。')
+      setStopping(false)
       navigate(`/jobs/${data.job_id}`)
     } catch (e) {
-      setRecording(true)
-      setError(`スキャン確定に失敗しました。再確定またはキャンセルできます: ${String(e)}`)
+      if (isCurrentSession(session)) {
+        setRecording(false)
+        setFinalizeRetryAvailable(true)
+        setError(session.uploadFailure
+          ? '保存できなかったフレームがあります。キャンセルして撮り直してください。'
+          : `スキャン確定に失敗しました。もう一度確定するか、キャンセルしてください: ${String(e)}`)
+      }
     } finally {
-      setStopping(false)
+      if (isCurrentSession(session)) setStopping(false)
     }
   }
 
   const cancelRecording = async () => {
-    const session = sessionRef.current; stopFrameLoop(); stopTagDetection(); setRecording(false); sessionRef.current = null
+    const session = sessionRef.current
+    sessionGenerationRef.current += 1
+    recordingStartAbortRef.current?.abort()
+    recordingStartAbortRef.current = null
+    recordingStartInFlightRef.current = false
+    stopFrameLoop()
+    stopTagDetection()
+    setRecording(false)
+    setStartingRecording(false)
+    setStopping(false)
+    setFinalizeRetryAvailable(false)
+    setError('')
+    sessionRef.current = null
+    session?.controller.abort()
     stableTagTrackerRef.current.reset()
     announcedTagSetsRef.current.clear()
     announcedBookKeysRef.current.clear()
@@ -556,11 +707,20 @@ export default function ScanPage() {
     setLiveJobId('')
     setLiveJob(null)
     setCompletedJobId('')
-    if (session) await apiFetch(`/api/scan/sessions/${session.id}/cancel`, { method: 'POST' })
+    if (session) {
+      try {
+        await apiFetch(`/api/scan/sessions/${session.id}/cancel`, { method: 'POST' })
+      } catch {
+        // Cancellation is best effort after local state has already been reset.
+      }
+    }
   }
 
   const submit = async () => {
     if (!file) return
+    const generation = ++uploadGenerationRef.current
+    const controller = new AbortController()
+    uploadAbortRef.current = controller
     setUploading(true)
     setError('')
     setProgress(0)
@@ -571,32 +731,61 @@ export default function ScanPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ filename: file.name, content_type: contentType }),
+        signal: controller.signal,
       })
       if (!initRes.ok) throw new Error(`init ${initRes.status}: ${await initRes.text()}`)
       const init = (await initRes.json()) as { job_id: string; upload_url: string; content_type: string }
 
       // 2. S3 へ直接 PUT（XHR で進捗付き）
-      await putWithProgress(init.upload_url, file, init.content_type, setProgress)
+      await putWithProgress(init.upload_url, file, init.content_type, setProgress, controller.signal)
 
       // 3. 処理開始を通知
       const startRes = await apiFetch('/api/scan/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ job_id: init.job_id }),
+        signal: controller.signal,
       })
       if (!startRes.ok) throw new Error(`start ${startRes.status}: ${await startRes.text()}`)
 
+      if (generation !== uploadGenerationRef.current || controller.signal.aborted) return
       navigate(`/jobs/${init.job_id}`)
     } catch (e) {
-      setError(`アップロードに失敗しました: ${e instanceof Error ? e.message : String(e)}`)
+      if (!controller.signal.aborted && generation === uploadGenerationRef.current) {
+        setError(`アップロードに失敗しました: ${e instanceof Error ? e.message : String(e)}`)
+      }
     } finally {
-      setUploading(false)
+      if (generation === uploadGenerationRef.current) {
+        uploadAbortRef.current = null
+        setUploading(false)
+      }
     }
   }
 
   const chooseFile = (selected: File | null) => {
+    if (uploading || stopping || cameraStarting || startingRecording) return
+    if (!selected) return
+    const validationError = validateScanFile(selected)
+    if (validationError) {
+      setFile(null)
+      setFilePreview('')
+      setError(validationError)
+      setProgress(0)
+      return
+    }
+    setError('')
+    setProgress(0)
     setFile(selected)
-    if (selected) setMode('upload')
+    setMode('upload')
+  }
+
+  const returnToCamera = () => {
+    if (uploading || stopping || cameraStarting || startingRecording) return
+    setFile(null)
+    setFilePreview('')
+    setError('')
+    setProgress(0)
+    setMode('camera')
   }
 
   const primaryAction = async () => {
@@ -604,6 +793,8 @@ export default function ScanPage() {
       void submit()
     } else if (completedJobId) {
       navigate(`/jobs/${completedJobId}`)
+    } else if (finalizeRetryAvailable) {
+      void stopRecording()
     } else if (recording) {
       void stopRecording()
     } else if (!cameraReady) {
@@ -615,21 +806,34 @@ export default function ScanPage() {
   }
 
   const liveBooks = useMemo(() => {
-    const books: Array<{ key: string; title: string; cover?: string; shelf?: string | null }> = []
-    const seen = new Set<string>()
+    const books: Array<{ key: string; title: string; cover?: string; shelf?: string | null; matchLabel: string; definitive: boolean }> = []
+    const byKey = new Map<string, typeof books[number]>()
     for (const entry of liveJob?.catalog?.entries ?? []) {
       for (const book of entry.books ?? []) {
         const candidate = book.book_lookup?.candidates?.[0]
         const title = candidate?.title || book.title
         if (!title) continue
-        const key = String(candidate?.library_db_id ?? title.trim().toLocaleLowerCase('ja-JP'))
-        if (seen.has(key)) continue
-        seen.add(key)
-        books.push({ key, title, cover: candidate?.thumbnail || fallbackCoverForTitle(title), shelf: entry.shelf_id })
+        const libraryDbId = positiveLibraryDbId(candidate?.library_db_id) ? candidate?.library_db_id : null
+        const definitive = candidate?.match_confidence === 'auto' && libraryDbId != null
+        const key = libraryDbId != null
+          ? `id:${libraryDbId}`
+          : `title:${title.trim().toLocaleLowerCase('ja-JP')}`
+        const next = {
+          key,
+          title,
+          cover: candidate?.thumbnail || fallbackCoverForTitle(title),
+          shelf: entry.shelf_id,
+          matchLabel: definitive ? '自動照合' : candidate ? '照合候補・要確認' : '未照合',
+          definitive,
+        }
+        const previous = byKey.get(key)
+        if (!previous || (!previous.definitive && definitive)) byKey.set(key, next)
       }
     }
-    return books
+    return [...byKey.values()]
   }, [liveJob])
+
+  const definitiveLiveBookCount = liveBooks.filter(book => book.definitive).length
 
   // Each newly identified book pops up once with its cover and title, so the
   // operator can see what the scan actually recognized while still filming.
@@ -669,15 +873,15 @@ export default function ScanPage() {
                 : activeTagIds.length > 0
                   ? [currentShelfLabel, '本棚を確認しています…']
                   : recording && trackedTags.length > 0
-                    ? ['次の棚を探しています', `${trackedTags.length}個の棚を確認済みです。タグが見えると記録を再開します。`]
+                    ? ['次の棚を探しています', `${trackedTags.length}個のタグを検出しています。映像を解析中です。`]
                     : recording
-                      ? ['棚のタグを画面に入れてください', 'タグが見えている間だけ本を記録します。']
+                      ? ['棚のタグを画面に入れてください', 'タグが見えると棚を特定できます。']
                       : [detecting || browserDetecting ? '棚を検知しています…' : currentShelfLabel, liveStatus]
   const visibleTrackedTags = trackedTags.slice(0, 4)
 
   return (
     <div className="min-h-screen bg-[#1e1e1e] md:grid md:place-items-center">
-      <div className="relative h-[100dvh] min-h-[674px] w-full overflow-hidden bg-[#1e1e1e] p-0">
+      <div className="relative h-[100dvh] min-h-[100dvh] min-[640px]:min-h-[674px] w-full overflow-hidden bg-[#1e1e1e] p-0">
         <div className="relative h-full w-full overflow-hidden bg-[#292929]">
           {mode === 'camera' ? (
             <>
@@ -707,14 +911,26 @@ export default function ScanPage() {
 
           <div className="absolute inset-0 bg-gradient-to-b from-black/20 via-transparent to-black/25" />
 
-          <button type="button" onClick={() => navigate(-1)} aria-label="戻る" className="tap-soft absolute left-7 top-6 z-10 grid size-10 place-items-center rounded-full bg-white text-[#1e1e1e]">
+          <button type="button" onClick={goBack} aria-label="戻る" className="tap-soft absolute left-7 top-6 z-10 grid size-10 place-items-center rounded-full bg-white text-[#1e1e1e]">
             <ArrowLeft className="size-6" />
           </button>
+
+          {mode === 'upload' && (
+            <button
+              type="button"
+              onClick={returnToCamera}
+              disabled={uploading || stopping || cameraStarting || startingRecording}
+              className="tap-soft absolute right-7 top-6 z-10 inline-flex min-h-10 items-center gap-2 rounded-full bg-white px-3 text-xs font-semibold text-[#1e1e1e] shadow-sm disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Camera className="size-4" />
+              カメラに戻る（選択解除）
+            </button>
+          )}
 
           <div
             key={shelfAnnouncement?.id ?? `guide-${statusLines[0]}`}
             className={`absolute bottom-[204px] left-1/2 z-20 flex min-h-[63px] w-[calc(100%-56px)] max-w-[560px] -translate-x-1/2 flex-col justify-center rounded-xl bg-[#1e1e1e] px-4 py-3 text-base leading-[19px] text-white shadow-[20px_8px_0_rgba(30,30,30,0.83)] ${shelfAnnouncement ? 'scan-status-popup' : ''}`}
-            aria-live="assertive"
+            aria-live={shelfAnnouncement ? 'polite' : 'off'}
           >
             <p>{statusLines[0]}</p>
             <p className="text-white/90">{statusLines[1]}</p>
@@ -734,7 +950,9 @@ export default function ScanPage() {
 
           {mode === 'camera' && liveBooks.length > 0 && (
             <p className="absolute right-7 top-6 z-10 rounded-full bg-black/60 px-3 py-2 text-xs font-semibold text-white backdrop-blur-md">
-              見つかった本 {liveBooks.length}冊
+              {definitiveLiveBookCount > 0
+                ? `自動照合 ${definitiveLiveBookCount}冊`
+                : `照合候補 ${liveBooks.length}冊`}
             </p>
           )}
 
@@ -747,14 +965,17 @@ export default function ScanPage() {
                       ? <img src={pop.cover} alt="" className="max-h-full max-w-full object-contain" />
                       : <BookMarked className="size-6 text-[#087f5b]" />}
                   </div>
-                  <p className="line-clamp-3 text-xs leading-4 text-[#1e1e1e]">{pop.title}</p>
+                  <div className="min-w-0">
+                    <p className="line-clamp-3 text-xs leading-4 text-[#1e1e1e]">{pop.title}</p>
+                    <p className="mt-1 text-[10px] leading-3 text-[#087f5b]">{pop.matchLabel}</p>
+                  </div>
                 </article>
               ))}
             </div>
           )}
 
           {mode === 'camera' && trackedTags.length > 0 && bookPops.length === 0 && (
-            <div className="absolute inset-x-7 bottom-[286px] z-10 mx-auto max-w-[560px]" aria-live="polite">
+            <div className="absolute inset-x-7 bottom-[286px] z-10 mx-auto max-w-[560px]" aria-live="off">
               <div className="mb-2 flex items-center justify-between text-xs font-medium text-white drop-shadow">
                 <span>認識済みタグ</span>
                 <span>{trackedTags.length}件</span>
@@ -784,15 +1005,17 @@ export default function ScanPage() {
             <button
               type="button"
               onClick={() => void primaryAction()}
-              disabled={(mode === 'upload' && !file) || uploading || stopping || cameraStarting}
-              aria-label={completedJobId ? 'リザルトを見る' : mode === 'upload' ? '選択したファイルを解析' : recording ? 'スキャンを終了' : cameraReady ? 'ライブスキャンを開始' : 'カメラを開始してライブスキャンを開始'}
+              disabled={(mode === 'upload' && !file) || uploading || stopping || cameraStarting || startingRecording}
+              aria-label={completedJobId ? 'リザルトを見る' : mode === 'upload' ? '選択したファイルを解析' : finalizeRetryAvailable ? 'スキャンを確定して再試行' : recording ? 'スキャンを終了' : startingRecording ? 'スキャンを開始しています' : cameraReady ? 'ライブスキャンを開始' : 'カメラを開始してライブスキャンを開始'}
               className={`tap-card grid place-items-center disabled:opacity-50 ${completedJobId ? 'h-16 min-w-[196px] rounded-full bg-[#087f5b] px-8 text-xl font-semibold text-white shadow-xl' : 'size-[100px]'}`}
             >
               {completedJobId ? 'リザルト' : (
                 <span
                   className={`grid place-items-center transition-all duration-200 ease-out ${recording || stopping ? 'size-16 rounded-[20px] bg-[#ff3b30] shadow-lg' : 'size-[90px] rounded-full bg-white'}`}
                 >
-                  {mode === 'upload' && !recording ? (
+                  {finalizeRetryAvailable ? (
+                    <span className="text-sm font-semibold text-[#1e1e1e]">再確定</span>
+                  ) : mode === 'upload' && !recording ? (
                     <span className="text-sm font-semibold text-[#1e1e1e]">解析</span>
                   ) : recording || stopping ? (
                     <span className="block size-6 rounded-[5px] bg-white" aria-label="スキャンを終了" />
@@ -802,23 +1025,41 @@ export default function ScanPage() {
             </button>
 
             {!recording && !completedJobId && (
-              <button type="button" onClick={() => fileInputRef.current?.click()} aria-label="画像または動画を選択" className="tap-card h-[61px] w-[58px] rounded-xl bg-white shadow-sm" />
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={uploading || stopping || cameraStarting || startingRecording}
+                aria-label="画像または動画を選択"
+                className="tap-card flex h-[61px] w-[58px] flex-col items-center justify-center gap-1 rounded-xl bg-white text-[#1e1e1e] shadow-sm disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <ImagePlus className="size-5" />
+                <span className="text-[10px] font-semibold leading-none">選択</span>
+              </button>
             )}
           </div>
 
-          {recording && !stopping && (
+          {(recording || finalizeRetryAvailable) && !stopping && (
             <button type="button" onClick={() => void cancelRecording()} className="tap-soft absolute bottom-6 left-1/2 -translate-x-1/2 text-xs text-white/75 underline">
               キャンセル
             </button>
           )}
 
-          <input ref={fileInputRef} type="file" accept="image/*,video/*" className="hidden" onChange={event => chooseFile(event.target.files?.[0] ?? null)} />
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".jpg,.jpeg,.png,.webp,.mp4,.mov,.webm"
+            className="hidden"
+            onChange={event => {
+              chooseFile(event.target.files?.[0] ?? null)
+              event.currentTarget.value = ''
+            }}
+          />
           <canvas ref={canvasRef} className="hidden" />
           <canvas ref={browserCanvasRef} className="hidden" />
           <canvas ref={scanCanvasRef} className="hidden" />
           <canvas ref={captureCanvasRef} className="hidden" />
 
-          <div className="sr-only" aria-live="polite">
+          <div className="sr-only" aria-live="off">
             Webタグ検知: {opencvState}。評価 {scanStats.evaluated}、送信 {scanStats.sent}。検出タグ {detectedTags.map(tag => tag.tag_id).join(', ')}
           </div>
         </div>
@@ -827,28 +1068,60 @@ export default function ScanPage() {
   )
 }
 
+function positiveLibraryDbId(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0
+}
+
+function validateScanFile(file: File): string | null {
+  if (file.size > MAX_SCAN_UPLOAD_BYTES) {
+    return 'ファイルが大きすぎます。100MB以下の画像または動画を選択してください。'
+  }
+  const extension = file.name.slice(file.name.lastIndexOf('.')).toLowerCase()
+  const supportedType = file.type.startsWith('image/') || file.type.startsWith('video/')
+  if (!supportedType && !SUPPORTED_SCAN_EXTENSIONS.has(extension)) {
+    return '対応していない形式です。JPG、PNG、WebP、MP4、MOV、WebMを選択してください。'
+  }
+  if (!SUPPORTED_SCAN_EXTENSIONS.has(extension) && file.type !== '') {
+    return '対応していない形式です。JPG、PNG、WebP、MP4、MOV、WebMを選択してください。'
+  }
+  return null
+}
+
 function putWithProgress(
   url: string,
   file: File,
   contentType: string,
   onProgress: (pct: number) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest()
+    const abort = () => xhr.abort()
+    const cleanup = () => signal?.removeEventListener('abort', abort)
+    if (signal?.aborted) {
+      reject(new DOMException('Upload aborted', 'AbortError'))
+      return
+    }
     xhr.open('PUT', url)
     xhr.setRequestHeader('Content-Type', contentType)
+    xhr.timeout = 30_000
     xhr.upload.onprogress = e => {
       if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100))
     }
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) {
         onProgress(100)
+        cleanup()
         resolve()
       } else {
+        cleanup()
         reject(new Error(`S3 PUT ${xhr.status}: ${xhr.responseText.slice(0, 200)}`))
       }
     }
-    xhr.onerror = () => reject(new Error('S3 PUT network error'))
+    xhr.onerror = () => { cleanup(); reject(new Error('S3 PUT network error')) }
+    xhr.ontimeout = () => { cleanup(); reject(new Error('S3 PUT timeout')) }
+    xhr.onabort = () => { cleanup(); reject(new DOMException('Upload aborted', 'AbortError')) }
+    signal?.addEventListener('abort', abort, { once: true })
     xhr.send(file)
   })
 }

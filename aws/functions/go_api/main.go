@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -228,9 +229,33 @@ func liveSessionFrameCommit(ctx context.Context, req events.APIGatewayV2HTTPRequ
 }
 func liveSessionComplete(ctx context.Context, path string) (events.APIGatewayV2HTTPResponse, error) {
 	id := liveSessionID(path, "/complete")
-	out, err := ddbClient.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String(jobsTable), Key: map[string]ddbtypes.AttributeValue{"job_id": &ddbtypes.AttributeValueMemberS{Value: id}}})
-	if err != nil || out.Item == nil {
+	out, err := ddbClient.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String(jobsTable), Key: map[string]ddbtypes.AttributeValue{"job_id": &ddbtypes.AttributeValueMemberS{Value: id}}, ConsistentRead: aws.Bool(true)})
+	if err != nil {
+		return errJSON(500, "session lookup: "+err.Error()), nil
+	}
+	if out.Item == nil {
 		return errJSON(404, "session not found"), nil
+	}
+	status, _ := out.Item["status"].(*ddbtypes.AttributeValueMemberS)
+	if status != nil && status.Value != "collecting" {
+		// Completion is retryable after a transient final-lookup enqueue failure.
+		// Reuse the current counters and queue the lookup once the workers have
+		// finished; completed/queued sessions are already idempotently complete.
+		switch status.Value {
+		case "processing":
+			if liveWorkFinished(out.Item) {
+				if err := queueFinalLookup(ctx, id); err != nil {
+					return errJSON(500, err.Error()), nil
+				}
+			}
+		case "lookup_pending", "done", "no_detection", "no_readable_crops":
+			// These states are already closed or have their final lookup queued.
+		case "canceled":
+			return errJSON(409, "session canceled"), nil
+		default:
+			return errJSON(409, "session is not completable"), nil
+		}
+		return okJSON(202, map[string]any{"job_id": id, "status": status.Value}), nil
 	}
 	committed, _ := out.Item["committed_frame_keys"].(*ddbtypes.AttributeValueMemberSS)
 	if committed == nil || len(committed.Value) == 0 {
@@ -250,6 +275,9 @@ func liveSessionComplete(ctx context.Context, path string) (events.APIGatewayV2H
 		ReturnValues: ddbtypes.ReturnValueAllNew,
 	})
 	if err != nil {
+		if strings.Contains(err.Error(), "ConditionalCheckFailedException") {
+			return errJSON(409, "session state changed; retry completion"), nil
+		}
 		return errJSON(500, err.Error()), nil
 	}
 	if liveWorkFinished(closed.Attributes) {
@@ -303,20 +331,33 @@ func queueFinalLookup(ctx context.Context, id string) error {
 }
 func liveSessionCancel(ctx context.Context, path string) (events.APIGatewayV2HTTPResponse, error) {
 	id := liveSessionID(path, "/cancel")
-	out, getErr := ddbClient.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String(jobsTable), Key: map[string]ddbtypes.AttributeValue{"job_id": &ddbtypes.AttributeValueMemberS{Value: id}}})
-	if getErr != nil || out.Item == nil {
+	out, getErr := ddbClient.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String(jobsTable), Key: map[string]ddbtypes.AttributeValue{"job_id": &ddbtypes.AttributeValueMemberS{Value: id}}, ConsistentRead: aws.Bool(true)})
+	if getErr != nil {
+		return errJSON(500, "session lookup: "+getErr.Error()), nil
+	}
+	if out.Item == nil {
 		return errJSON(404, "session not found"), nil
 	}
-	if frames, ok := out.Item["frame_keys"].(*ddbtypes.AttributeValueMemberL); ok {
+	status, _ := out.Item["status"].(*ddbtypes.AttributeValueMemberS)
+	if status != nil && status.Value != "collecting" {
+		if status.Value == "canceled" {
+			return okJSON(200, map[string]any{"session_id": id, "status": "canceled"}), nil
+		}
+		return errJSON(409, "session already closed"), nil
+	}
+	updated, err := ddbClient.UpdateItem(ctx, &dynamodb.UpdateItemInput{TableName: aws.String(jobsTable), Key: map[string]ddbtypes.AttributeValue{"job_id": &ddbtypes.AttributeValueMemberS{Value: id}}, UpdateExpression: aws.String("SET #s = :s"), ConditionExpression: aws.String("#s = :collecting"), ExpressionAttributeNames: map[string]string{"#s": "status"}, ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{":s": &ddbtypes.AttributeValueMemberS{Value: "canceled"}, ":collecting": &ddbtypes.AttributeValueMemberS{Value: "collecting"}}, ReturnValues: ddbtypes.ReturnValueAllNew})
+	if err != nil {
+		if strings.Contains(err.Error(), "ConditionalCheckFailedException") {
+			return okJSON(200, map[string]any{"session_id": id, "status": "already_closed"}), nil
+		}
+		return errJSON(500, err.Error()), nil
+	}
+	if frames, ok := updated.Attributes["frame_keys"].(*ddbtypes.AttributeValueMemberL); ok {
 		for _, v := range frames.Value {
 			if s, ok := v.(*ddbtypes.AttributeValueMemberS); ok {
 				_, _ = s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String(s.Value)})
 			}
 		}
-	}
-	_, err := ddbClient.UpdateItem(ctx, &dynamodb.UpdateItemInput{TableName: aws.String(jobsTable), Key: map[string]ddbtypes.AttributeValue{"job_id": &ddbtypes.AttributeValueMemberS{Value: id}}, UpdateExpression: aws.String("SET #s = :s"), ConditionExpression: aws.String("#s = :collecting"), ExpressionAttributeNames: map[string]string{"#s": "status"}, ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{":s": &ddbtypes.AttributeValueMemberS{Value: "canceled"}, ":collecting": &ddbtypes.AttributeValueMemberS{Value: "collecting"}}})
-	if err != nil {
-		return errJSON(500, err.Error()), nil
 	}
 	return okJSON(200, map[string]any{"session_id": id, "status": "canceled"}), nil
 }
@@ -390,7 +431,7 @@ func parseRequest(raw json.RawMessage) (events.APIGatewayV2HTTPRequest, string, 
 // ---- /api/books/search ----
 func searchBooks(ctx context.Context, req events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {
 	q := req.QueryStringParameters["q"]
-	if q == "" {
+	if strings.TrimSpace(q) == "" {
 		return errJSON(400, "q is required"), nil
 	}
 	limit := 20
@@ -402,13 +443,17 @@ func searchBooks(ctx context.Context, req events.APIGatewayV2HTTPRequest) (event
 	if bookStore == nil {
 		return errJSON(503, "library DB not available"), nil
 	}
-	books, err := bookStore.Search(q, limit)
+	result, err := bookStore.SearchWithTotal(q, limit)
 	if err != nil {
 		return errJSON(500, err.Error()), nil
 	}
+	books := result.Books
+	if books == nil {
+		books = []Book{}
+	}
 	attachShelfCandidates(ctx, books)
 	attachCoverCache(ctx, books)
-	return okJSON(200, map[string]any{"books": books, "query": q}), nil
+	return okJSON(200, map[string]any{"books": books, "query": q, "total": result.Total}), nil
 }
 
 // ---- /api/books/featured ----
@@ -427,7 +472,9 @@ func featuredBooks(ctx context.Context, req events.APIGatewayV2HTTPRequest) (eve
 		return errJSON(500, err.Error()), nil
 	}
 	attachShelfCandidates(ctx, books)
-	return okJSON(200, map[string]any{"books": books}), nil
+	response := okJSON(200, map[string]any{"books": books})
+	response.Headers["Cache-Control"] = "public, max-age=300, s-maxage=3600"
+	return response, nil
 }
 
 // ---- /api/books/{id} ----
@@ -708,19 +755,27 @@ func normalizedISBN(raw string) string {
 }
 
 func fetchShelfCandidates(ctx context.Context, bookID int) ([]ShelfCandidate, error) {
-	out, err := ddbClient.Query(ctx, &dynamodb.QueryInput{
-		TableName:              aws.String(shelfCandidatesTable),
-		KeyConditionExpression: aws.String("book_id = :b"),
-		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":b": &ddbtypes.AttributeValueMemberN{Value: strconv.Itoa(bookID)},
-		},
-	})
-	if err != nil {
-		return nil, err
-	}
-	candidates := make([]ShelfCandidate, 0, len(out.Items))
-	for _, item := range out.Items {
-		candidates = append(candidates, shelfCandidateFromItem(item))
+	candidates := make([]ShelfCandidate, 0)
+	var startKey map[string]ddbtypes.AttributeValue
+	for {
+		out, err := ddbClient.Query(ctx, &dynamodb.QueryInput{
+			TableName:              aws.String(shelfCandidatesTable),
+			KeyConditionExpression: aws.String("book_id = :b"),
+			ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+				":b": &ddbtypes.AttributeValueMemberN{Value: strconv.Itoa(bookID)},
+			},
+			ExclusiveStartKey: startKey,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range out.Items {
+			candidates = append(candidates, shelfCandidateFromItem(item))
+		}
+		if len(out.LastEvaluatedKey) == 0 {
+			break
+		}
+		startKey = out.LastEvaluatedKey
 	}
 	return candidates, nil
 }
@@ -729,17 +784,34 @@ func listShelfCandidates(ctx context.Context) (events.APIGatewayV2HTTPResponse, 
 	if shelfCandidatesTable == "" {
 		return okJSON(200, map[string]any{"candidates": []any{}}), nil
 	}
-	out, err := ddbClient.Scan(ctx, &dynamodb.ScanInput{
-		TableName: aws.String(shelfCandidatesTable),
-		Limit:     aws.Int32(500),
+	candidates := make([]ShelfCandidate, 0)
+	var startKey map[string]ddbtypes.AttributeValue
+	for {
+		out, err := ddbClient.Scan(ctx, &dynamodb.ScanInput{
+			TableName:         aws.String(shelfCandidatesTable),
+			Limit:             aws.Int32(500),
+			ExclusiveStartKey: startKey,
+		})
+		if err != nil {
+			return errJSON(500, err.Error()), nil
+		}
+		for _, item := range out.Items {
+			candidates = append(candidates, shelfCandidateFromItem(item))
+		}
+		if len(out.LastEvaluatedKey) == 0 {
+			break
+		}
+		startKey = out.LastEvaluatedKey
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].ShelfID != candidates[j].ShelfID {
+			return candidates[i].ShelfID < candidates[j].ShelfID
+		}
+		if candidates[i].Confidence != candidates[j].Confidence {
+			return candidates[i].Confidence > candidates[j].Confidence
+		}
+		return candidates[i].BookID < candidates[j].BookID
 	})
-	if err != nil {
-		return errJSON(500, err.Error()), nil
-	}
-	candidates := make([]ShelfCandidate, 0, len(out.Items))
-	for _, item := range out.Items {
-		candidates = append(candidates, shelfCandidateFromItem(item))
-	}
 	if bookStore != nil {
 		ids := make([]int, 0, len(candidates))
 		for _, candidate := range candidates {

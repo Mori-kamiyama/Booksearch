@@ -40,6 +40,7 @@ export function shouldSendFrame(metrics: FrameMetrics, now: number, state: Frame
   // produce crops from OCR even when AprilTags are not detected.
   if (now - state.lastSentAt < options.noTagSendIntervalMs) return 'rate_limited'
   if (!state.previous) return null
+  if (metrics.difference < options.minDifference) return 'unchanged'
   return null
 }
 

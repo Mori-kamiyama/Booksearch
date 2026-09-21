@@ -1,6 +1,7 @@
+import { CoverImage } from '../components/book'
 import { useEffect, useState } from 'react'
 import { ArrowUpLeft } from 'lucide-react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import { apiFetch, apiUrl } from '../lib/api'
 import { formatShelfLabel } from '../lib/shelf'
 import { fallbackCoverForTitle, figmaResultBooks } from '../data/figmaBooks'
@@ -51,7 +52,9 @@ interface Diagnostics {
 
 interface JobState {
   job_id: string
-  status: 'collecting' | 'processing' | 'pending' | 'running' | 'ocr_pending' | 'lookup_pending' | 'no_detection' | 'no_readable_crops' | 'done' | 'failed' | 'uploading'
+  // Keep this open at the API boundary: the backend may add a status before
+  // this client is updated. Unknown values are rendered as an explicit state.
+  status: string
   error?: string
   catalog?: Catalog
   diagnostics?: Diagnostics
@@ -66,82 +69,136 @@ interface JobState {
 
 export default function JobPage() {
   const navigate = useNavigate()
+  const goBack = () => { if ((window.history.state?.idx ?? 0) > 0) navigate(-1); else navigate('/') }
   const { id } = useParams<{ id: string }>()
   const [job, setJob] = useState<JobState | null>(null)
-  const [pollError, setPollError] = useState('')
+  const [pollError, setPollError] = useState<{ id: string | undefined; message: string } | null>(null)
+  const [retryCount, setRetryCount] = useState(0)
 
   useEffect(() => {
-    let timer: ReturnType<typeof setInterval>
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const controller = new AbortController()
+
+    setJob(null)
+    setPollError(null)
+
     const poll = async () => {
       try {
-        const res = await apiFetch(`/api/jobs/${id}`)
+        const res = await apiFetch(`/api/jobs/${id}`, { signal: controller.signal })
         if (!res.ok) {
           throw new Error(`ジョブ取得に失敗しました (${res.status})`)
         }
         const data: JobState = await res.json()
+        if (cancelled) return
         setJob(data)
-        setPollError('')
-        if (['done', 'failed', 'no_detection', 'no_readable_crops'].includes(data.status)) {
-          clearInterval(timer)
+        setPollError(null)
+        if (!isTerminalStatus(data.status)) {
+          timer = setTimeout(() => void poll(), 2000)
         }
       } catch (e) {
-        const fallback = fallbackJob(id)
+        if (cancelled || controller.signal.aborted) return
+        // DEV's fixture is useful when the API is unavailable, but an HTTP
+        // error is an actual job error and must remain visible to the user.
+        const fallback = e instanceof TypeError ? fallbackJob(id) : null
         if (fallback) {
           setJob(fallback)
-          setPollError('')
-          clearInterval(timer)
+          setPollError(null)
         } else {
-          setPollError(e instanceof Error ? e.message : 'ジョブ取得に失敗しました')
+          setPollError({
+            id,
+            message: e instanceof Error ? e.message : 'ジョブ取得に失敗しました',
+          })
+          // Keep retrying transient failures, but only schedule the next
+          // request after this one has settled.
+          timer = setTimeout(() => void poll(), 2000)
         }
       }
     }
-    timer = setInterval(poll, 2000)
     void poll()
-    return () => clearInterval(timer)
-  }, [id])
+    return () => {
+      cancelled = true
+      controller.abort()
+      if (timer !== undefined) clearTimeout(timer)
+    }
+  }, [id, retryCount])
 
-  if (!job) return <ScanResultLoading onBack={() => navigate(-1)} />
+  const currentJob = job?.job_id === id ? job : null
+  const currentPollError = pollError && pollError.id === id ? pollError.message : ''
 
-  const entries = job.catalog?.entries ?? []
+  if (!currentJob && currentPollError) {
+    return (
+      <JobLoadError
+        error={currentPollError}
+        onBack={goBack}
+        onRetry={() => {
+          setJob(null)
+          setPollError(null)
+          setRetryCount(count => count + 1)
+        }}
+      />
+    )
+  }
+
+  if (!currentJob) return <ScanResultLoading onBack={goBack} />
+
+  const entries = currentJob.catalog?.entries ?? []
   const groups = groupResultBooks(entries)
   // detected_book_count counts every OCR hit, so the same spine seen in ten
   // frames reads as ten books. The metric follows the deduplicated list.
   const bookCount = groups.reduce((n, group) => n + group.books.length, 0)
   const shelfIds = new Set(entries.map(entry => entry.shelf_id).filter(Boolean))
-  const shelfCount = Number(job.detected_shelf_count ?? (shelfIds.size || (entries.length > 0 ? 1 : 0)))
-  const processing = ['collecting', 'processing', 'pending', 'running', 'ocr_pending', 'lookup_pending'].includes(job.status)
+  const shelfCount = Number(currentJob.detected_shelf_count ?? shelfIds.size)
+  const processing = isProcessingStatus(currentJob.status)
+  const uploading = currentJob.status === 'uploading'
 
   return (
     <div className="min-h-screen bg-white">
       <div className="relative mx-auto min-h-screen w-full max-w-[402px] overflow-hidden pb-12">
-        <button type="button" onClick={() => navigate(-1)} aria-label="戻る" className="tap-soft absolute left-7 top-6 grid size-10 place-items-center rounded-full bg-white text-[#1e1e1e]">
+        <button type="button" onClick={goBack} aria-label="戻る" className="tap-soft absolute left-7 top-6 grid size-10 place-items-center rounded-full bg-white text-[#1e1e1e]">
           <ArrowUpLeft className="size-6" />
         </button>
 
-        {pollError && <p className="mx-7 mt-[82px] rounded-xl bg-red-50 p-3 text-sm text-red-700">{pollError}</p>}
+        {currentPollError && <p className="mx-7 mt-[82px] rounded-xl bg-red-50 p-3 text-sm text-red-700">{currentPollError}</p>}
 
         {processing ? (
           <div className="flex min-h-[674px] flex-col items-center justify-center gap-6 px-7 text-center">
             <div className="size-12 animate-spin rounded-full border-4 border-[#d9d9d9] border-t-[#087f5b]" />
-            <h1 className="text-4xl font-semibold leading-[44px] text-[#087f5b]">解析中</h1>
-            <p className="text-base leading-[19px] text-ink">棚と本を確認しています…<br />このままお待ちください</p>
-            <StatusBadge status={job.status} />
+            <h1 className="text-4xl font-semibold leading-[44px] text-[#087f5b]">{uploading ? 'アップロード中' : '解析中'}</h1>
+            <p className="text-base leading-[19px] text-ink">{uploading ? <>画像をアップロードしています…<br />このままお待ちください</> : <>棚と本を確認しています…<br />このままお待ちください</>}</p>
+            <StatusBadge status={currentJob.status} />
           </div>
-        ) : job.status === 'failed' ? (
+        ) : currentJob.status === 'failed' ? (
           <div className="flex min-h-[674px] flex-col items-center justify-center gap-6 px-7 text-center">
             <h1 className="text-4xl font-semibold leading-[44px] text-red-600">エラー</h1>
-            <p className="text-base leading-normal text-ink">解析に失敗しました。<br />{job.error || 'もう一度スキャンしてください。'}</p>
+            <p className="text-base leading-normal text-ink">解析に失敗しました。<br />{currentJob.error || 'もう一度スキャンしてください。'}</p>
             <button type="button" onClick={() => navigate('/scan')} className="tap-card rounded-full bg-[#087f5b] px-6 py-3 text-white">スキャンへ戻る</button>
           </div>
-        ) : (
+        ) : currentJob.status === 'no_detection' ? (
+          <NoResultState
+            status={currentJob.status}
+            title="本を検出できませんでした"
+            message="撮影画像から本の候補が見つかりませんでした。撮影距離や向きを変えてもう一度お試しください。"
+            diagnostics={currentJob.diagnostics ?? currentJob.latest_diagnostics}
+            onScan={() => navigate('/scan')}
+          />
+        ) : currentJob.status === 'no_readable_crops' ? (
+          <NoResultState
+            status={currentJob.status}
+            title="読み取れる画像がありませんでした"
+            message="本の候補は見つかりましたが、読み取りに使える画像がありませんでした。明るさや撮影距離を変えてもう一度お試しください。"
+            diagnostics={currentJob.diagnostics ?? currentJob.latest_diagnostics}
+            onScan={() => navigate('/scan')}
+          />
+        ) : currentJob.status === 'done' ? (
           <div className="pt-[104px]">
             <section className="flex flex-col items-center gap-7 px-7 text-center">
               <h1 className="w-full text-4xl font-semibold leading-[44px] text-[#087f5b]">終了</h1>
               <p className="w-full text-base leading-[19px] text-ink">スキャンありがとうございました！！</p>
-              <div className="flex w-full items-baseline justify-center gap-4 whitespace-nowrap text-ink">
+              <div className="flex w-full flex-wrap items-baseline justify-center gap-4 whitespace-nowrap text-ink">
                 <Metric value={shelfCount} label="棚検知" />
-                <Metric value={bookCount} label="冊検知" />
-                <p><span className="text-base">平均</span><span className="text-4xl font-semibold leading-[44px] text-[#087f5b]">{job.average_seconds ?? '—'}</span><span className="text-base">秒</span></p>
+                <Metric value={bookCount} label="件の認識候補" />
+                <p><span className="text-base">平均</span><span className="text-4xl font-semibold leading-[44px] text-[#087f5b]">{currentJob.average_seconds ?? '—'}</span><span className="text-base">秒</span></p>
               </div>
             </section>
 
@@ -162,10 +219,72 @@ export default function JobPage() {
               <p className="px-7 text-center text-sm text-ink-muted">本を検出できませんでした。撮影距離を変えてもう一度お試しください。</p>
             )}
 
-            <div className="mx-7 mt-10"><DiagnosticsPanel diag={job.diagnostics ?? job.latest_diagnostics} /></div>
+            <div className="mx-7 mt-10"><DiagnosticsPanel diag={currentJob.diagnostics ?? currentJob.latest_diagnostics} /></div>
+            <div className="mt-10 flex justify-center gap-3 px-7">
+              <Link to="/" className="tap-card rounded-full border border-[#087f5b] px-5 py-3 text-sm font-semibold text-[#087f5b]">本を検索する</Link>
+              <Link to="/scan" className="tap-card rounded-full bg-[#087f5b] px-5 py-3 text-sm font-semibold text-white">もう一度スキャン</Link>
+            </div>
           </div>
+        ) : (
+          <UnknownStatusState status={currentJob.status} onBack={goBack} />
         )}
       </div>
+    </div>
+  )
+}
+
+function isProcessingStatus(status: string): boolean {
+  return ['collecting', 'processing', 'pending', 'running', 'ocr_pending', 'lookup_pending', 'uploading'].includes(status)
+}
+
+function isTerminalStatus(status: string): boolean {
+  return ['done', 'failed', 'no_detection', 'no_readable_crops'].includes(status)
+}
+
+function JobLoadError({ error, onBack, onRetry }: { error: string; onBack: () => void; onRetry: () => void }) {
+  return (
+    <div className="relative mx-auto min-h-screen w-full max-w-[402px] bg-white">
+      <button type="button" onClick={onBack} aria-label="戻る" className="tap-soft absolute left-7 top-6 grid size-10 place-items-center rounded-full bg-white"><ArrowUpLeft className="size-6" /></button>
+      <div className="flex min-h-[674px] flex-col items-center justify-center gap-5 px-7 text-center">
+        <h1 className="text-3xl font-semibold text-red-600">結果を読み込めませんでした</h1>
+        <p className="text-base leading-normal text-ink">{error}</p>
+        <button type="button" onClick={onRetry} className="tap-card rounded-full bg-[#087f5b] px-6 py-3 text-white">再試行</button>
+      </div>
+    </div>
+  )
+}
+
+function NoResultState({
+  status,
+  title,
+  message,
+  diagnostics,
+  onScan,
+}: {
+  status: string
+  title: string
+  message: string
+  diagnostics?: Diagnostics
+  onScan: () => void
+}) {
+  return (
+    <div className="flex min-h-[674px] flex-col items-center gap-5 px-7 pt-[150px] text-center">
+      <StatusBadge status={status} />
+      <h1 className="text-3xl font-semibold leading-[40px] text-[#087f5b]">{title}</h1>
+      <p className="text-base leading-normal text-ink">{message}</p>
+      <button type="button" onClick={onScan} className="tap-card rounded-full bg-[#087f5b] px-6 py-3 text-white">スキャンへ戻る</button>
+      <div className="w-full text-left"><DiagnosticsPanel diag={diagnostics} /></div>
+    </div>
+  )
+}
+
+function UnknownStatusState({ status, onBack }: { status: string; onBack: () => void }) {
+  return (
+    <div className="flex min-h-[674px] flex-col items-center justify-center gap-5 px-7 text-center">
+      <StatusBadge status={status} />
+      <h1 className="text-3xl font-semibold leading-[40px] text-orange-600">解析状態を確認できません</h1>
+      <p className="text-base leading-normal text-ink">未対応の状態「{status}」が返されました。時間をおいて再度確認してください。</p>
+      <button type="button" onClick={onBack} className="tap-card rounded-full bg-[#087f5b] px-6 py-3 text-white">戻る</button>
     </div>
   )
 }
@@ -177,6 +296,9 @@ function Metric({ value, label }: { value: number; label: string }) {
 interface ResultBook {
   title: string
   cover?: string
+  libraryDbId?: number
+  matchConfidence?: string
+  matchLabel: string
 }
 
 function groupResultBooks(entries: CatalogEntry[]): { shelf: string; books: ResultBook[] }[] {
@@ -190,15 +312,54 @@ function groupResultBooks(entries: CatalogEntry[]): { shelf: string; books: Resu
       if (!title) continue
       // A live scan sees the same spine across many frames, so each book is
       // shown once per shelf instead of once per crop.
-      const key = String(top?.library_db_id ?? title.trim().toLocaleLowerCase('ja-JP'))
-      if (books.has(key)) continue
-      books.set(key, { title, cover: top?.thumbnail || fallbackCoverForTitle(title) })
+      const libraryDbId = top?.library_db_id
+      const key = resultBookKey(top, title)
+      const candidate = {
+        title,
+        cover: top?.thumbnail || fallbackCoverForTitle(title),
+        libraryDbId,
+        matchConfidence: top?.match_confidence,
+        matchLabel: resultMatchLabel(top),
+      }
+      const existing = books.get(key)
+      if (!existing || resultBookRank(candidate) > resultBookRank(existing)) {
+        books.set(key, candidate)
+      }
     }
     groups.set(shelf, books)
   }
   return [...groups.entries()]
     .filter(([, books]) => books.size > 0)
     .map(([shelf, books]) => ({ shelf, books: [...books.values()] }))
+}
+
+function normalizeResultTitle(title: string): string {
+  return title.trim().toLocaleLowerCase('ja-JP')
+}
+
+function hasPositiveLibraryDbId(candidate: Candidate | undefined): candidate is Candidate & { library_db_id: number } {
+  return Number.isInteger(candidate?.library_db_id) && (candidate?.library_db_id ?? 0) > 0
+}
+
+function isConfidentLibraryMatch(candidate: Candidate | undefined): candidate is Candidate & { library_db_id: number } {
+  return candidate?.match_confidence === 'auto' && hasPositiveLibraryDbId(candidate)
+}
+
+function resultBookKey(candidate: Candidate | undefined, title: string): string {
+  return hasPositiveLibraryDbId(candidate)
+    ? `id:${candidate.library_db_id}`
+    : `title:${normalizeResultTitle(title)}`
+}
+
+function resultMatchLabel(candidate: Candidate | undefined): string {
+  return isConfidentLibraryMatch(candidate) ? '自動照合' : candidate ? '照合候補・要確認' : '未照合'
+}
+
+function resultBookRank(book: ResultBook): number {
+  if (book.matchConfidence === 'auto' && Number.isInteger(book.libraryDbId) && (book.libraryDbId ?? 0) > 0) return 3
+  if (Number.isInteger(book.libraryDbId) && (book.libraryDbId ?? 0) > 0) return 2
+  if (book.matchConfidence) return 1
+  return 0
 }
 
 function devShelfLabel(boxId: string): string | null {
@@ -209,14 +370,20 @@ function devShelfLabel(boxId: string): string | null {
 }
 
 function ResultBookCard({ book }: { book: ResultBook }) {
-  return (
-    <article className="flex w-[108px] min-w-0 flex-col items-center gap-[5px] text-center">
+  const className = 'flex w-[108px] max-w-full min-w-0 flex-col items-center gap-[5px] text-center'
+  const content = (
+    <>
       <div className="flex h-[128px] w-[90px] items-end justify-center">
-        {book.cover ? <img src={book.cover} alt="" className="max-h-full max-w-full object-contain" /> : <div className="h-full w-[80px] bg-[#d9d9d9]" />}
+        {book.cover ? <CoverImage src={book.cover} className="max-h-full max-w-full object-contain" fallbackClassName="grid h-full w-full place-items-center bg-zinc-100" /> : <div className="h-full w-[80px] bg-[#d9d9d9]" />}
       </div>
       <p className="line-clamp-2 w-full text-[11px] leading-[13px] text-ink">{book.title}</p>
-    </article>
+      <span className={`text-[10px] leading-[12px] ${book.matchLabel === '自動照合' ? 'text-[#087f5b]' : 'text-ink-muted'}`}>{book.matchLabel}</span>
+    </>
   )
+  if (book.matchLabel === '自動照合' && Number.isInteger(book.libraryDbId) && (book.libraryDbId ?? 0) > 0) {
+    return <Link to={`/books/${book.libraryDbId}`} aria-label={book.title} className={`${className} text-inherit no-underline`}>{content}</Link>
+  }
+  return <article className={className}>{content}</article>
 }
 
 function ScanResultLoading({ onBack }: { onBack: () => void }) {
@@ -314,6 +481,7 @@ function StatusBadge({ status }: { status: string }) {
     running: 'bg-blue-100 text-blue-800',
     ocr_pending: 'bg-blue-100 text-blue-800',
     lookup_pending: 'bg-blue-100 text-blue-800',
+    uploading: 'bg-blue-100 text-blue-800',
     no_detection: 'bg-gray-100 text-gray-700',
     no_readable_crops: 'bg-gray-100 text-gray-700',
     done: 'bg-green-100 text-green-800',
@@ -326,13 +494,14 @@ function StatusBadge({ status }: { status: string }) {
     running: '処理中',
     ocr_pending: 'OCR中',
     lookup_pending: 'DB照合中',
+    uploading: 'アップロード中',
     no_detection: '検出なし',
     no_readable_crops: '読取なし',
     done: '完了',
     failed: 'エラー',
   }
   return (
-    <span className={`text-xs font-bold px-3 py-1 rounded-full ${map[status] ?? ''}`}>
+    <span className={`text-xs font-bold px-3 py-1 rounded-full ${map[status] ?? 'bg-orange-100 text-orange-800'}`}>
       {label[status] ?? status}
     </span>
   )
@@ -428,7 +597,7 @@ function BookRow({ book }: { book: BookEntry }) {
     <div className="flex gap-3 items-start border border-gray-100 rounded-lg p-3">
       <div className="flex h-14 w-10 shrink-0 items-end justify-center">
         {top?.thumbnail ? (
-          <img src={top.thumbnail} alt="" className="max-h-full max-w-full rounded object-contain" />
+          <CoverImage src={top.thumbnail} className="max-h-full max-w-full rounded object-contain" />
         ) : (
           <div className="h-full w-full rounded bg-gray-100" />
         )}

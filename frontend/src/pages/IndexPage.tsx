@@ -1,6 +1,8 @@
+import { candidateCounts } from '../lib/candidateCounts'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { ErrorState } from '../components/common'
+import { CoverImage } from '../components/book'
 import { LibraryMap } from '../components/shelf'
 import { apiUrl, getIndexBooks, getShelfCandidates } from '../lib/api'
 import type { ShelfCandidate } from '../lib/types'
@@ -22,36 +24,67 @@ export default function IndexPage() {
   const [view, setView] = useState<ViewMode>(() => viewModeFromParam(params.get('view')))
   const [candidates, setCandidates] = useState<ShelfCandidate[]>([])
   const [indexBooks, setIndexBooks] = useState<IndexBook[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState(false)
+  const [candidatesLoading, setCandidatesLoading] = useState(true)
+  const [indexBooksLoading, setIndexBooksLoading] = useState(true)
+  const [candidatesError, setCandidatesError] = useState(false)
+  const [indexBooksError, setIndexBooksError] = useState(false)
+  const mountedRef = useRef(false)
+  const candidatesRequestIdRef = useRef(0)
+  const indexBooksRequestIdRef = useRef(0)
 
-  const load = useCallback(async () => {
-    setLoading(true)
-    setError(false)
+  const loadCandidates = useCallback(async () => {
+    const requestId = ++candidatesRequestIdRef.current
+    const isCurrent = () => mountedRef.current && candidatesRequestIdRef.current === requestId
+    if (!isCurrent()) return
+    setCandidatesLoading(true)
+    setCandidatesError(false)
     try {
-      const [loadedCandidates, loadedBooks] = await withDevTimeout(Promise.all([
-        getShelfCandidates(),
-        getIndexBooks(),
-      ]))
-      const displayCandidates = indexCandidatesForDisplay(loadedCandidates)
-      setCandidates(displayCandidates)
+      const loadedCandidates = await withDevTimeout(getShelfCandidates())
+      if (!isCurrent()) return
+      setCandidates(indexCandidatesForDisplay(loadedCandidates))
+    } catch (loadError) {
+      if (!isCurrent()) return
+      const fallback = shouldUseDevFallback(loadError) ? fallbackIndexCandidates() : []
+      if (fallback.length > 0) setCandidates(fallback)
+      setCandidatesError(fallback.length === 0)
+    } finally {
+      if (isCurrent()) setCandidatesLoading(false)
+    }
+  }, [])
+
+  const loadIndexBooks = useCallback(async () => {
+    const requestId = ++indexBooksRequestIdRef.current
+    const isCurrent = () => mountedRef.current && indexBooksRequestIdRef.current === requestId
+    if (!isCurrent()) return
+    setIndexBooksLoading(true)
+    setIndexBooksError(false)
+    try {
+      const loadedBooks = await withDevTimeout(getIndexBooks())
+      if (!isCurrent()) return
       setIndexBooks(loadedBooks.map(book => ({
         id: book.id,
         title: book.title,
         title_reading: book.title_reading,
         cover: book.thumbnail || fallbackCoverForTitle(book.title),
       })))
-    } catch {
-      const fallback = fallbackIndexCandidates()
-      setCandidates(fallback)
-      setIndexBooks(uniqueBooks(fallback))
-      setError(fallback.length === 0)
+    } catch (loadError) {
+      if (!isCurrent()) return
+      const fallback = shouldUseDevFallback(loadError) ? fallbackIndexCandidates() : []
+      if (fallback.length > 0) setIndexBooks(uniqueBooks(fallback))
+      setIndexBooksError(fallback.length === 0)
     } finally {
-      setLoading(false)
+      if (isCurrent()) setIndexBooksLoading(false)
     }
   }, [])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
+  useEffect(() => { loadCandidates() }, [loadCandidates])
+  useEffect(() => { loadIndexBooks() }, [loadIndexBooks])
   useEffect(() => { setView(viewModeFromParam(params.get('view'))) }, [params])
 
   const changeView = (next: ViewMode) => {
@@ -64,9 +97,21 @@ export default function IndexPage() {
       <div className="mx-auto flex w-full max-w-[402px] flex-col items-center gap-3 px-7 pb-16 pt-[42px] md:max-w-[760px] md:gap-8 md:pt-[54px] lg:max-w-[886px]">
         <h1 className="w-full text-center text-4xl font-normal leading-normal text-ink">索引</h1>
         <ViewToggle value={view} onChange={changeView} />
-        {loading && <IndexSkeleton />}
-        {!loading && error && <div className="w-full"><ErrorState message="索引を読み込めませんでした。" onRetry={load} /></div>}
-        {!loading && !error && (view === 'map' ? <MapView candidates={candidates} /> : <ListView books={indexBooks} />)}
+        {view === 'map' && candidatesError && candidates.length > 0 && (
+          <div className="w-full"><ErrorState message="棚の索引を更新できませんでした。" onRetry={loadCandidates} /></div>
+        )}
+        {view === 'list' && indexBooksError && indexBooks.length > 0 && (
+          <div className="w-full"><ErrorState message="蔵書の索引を更新できませんでした。" onRetry={loadIndexBooks} /></div>
+        )}
+        {view === 'map' ? (
+          candidatesLoading && candidates.length === 0 ? <IndexSkeleton />
+            : candidatesError && candidates.length === 0 ? <div className="w-full"><ErrorState message="棚の索引を読み込めませんでした。" onRetry={loadCandidates} /></div>
+              : <MapView candidates={candidates} />
+        ) : (
+          indexBooksLoading && indexBooks.length === 0 ? <IndexSkeleton />
+            : indexBooksError && indexBooks.length === 0 ? <div className="w-full"><ErrorState message="蔵書の索引を読み込めませんでした。" onRetry={loadIndexBooks} /></div>
+              : <ListView books={indexBooks} />
+        )}
       </div>
     </div>
   )
@@ -78,11 +123,11 @@ function viewModeFromParam(value: string | null): ViewMode {
 
 function ViewToggle({ value, onChange }: { value: ViewMode; onChange: (view: ViewMode) => void }) {
   return (
-    <div className="grid h-[28px] w-[156px] shrink-0 grid-cols-2 overflow-hidden rounded-full border border-[#087f5b] text-center text-sm leading-[26px]" role="tablist" aria-label="索引の表示切替">
-      <button type="button" role="tab" aria-selected={value === 'map'} onClick={() => onChange('map')} className={`tap-soft rounded-full ${value === 'map' ? 'bg-[#087f5b] text-white' : 'text-ink'}`}>
+    <div className="grid h-[28px] w-[156px] shrink-0 grid-cols-2 overflow-hidden rounded-full border border-[#087f5b] text-center text-sm leading-[26px]" role="group" aria-label="索引の表示切替">
+      <button type="button" aria-pressed={value === 'map'} onClick={() => onChange('map')} className={`tap-soft rounded-full ${value === 'map' ? 'bg-[#087f5b] text-white' : 'text-ink'}`}>
         Map
       </button>
-      <button type="button" role="tab" aria-selected={value === 'list'} onClick={() => onChange('list')} className={`tap-soft rounded-full ${value === 'list' ? 'bg-[#087f5b] text-white' : 'text-ink'}`}>
+      <button type="button" aria-pressed={value === 'list'} onClick={() => onChange('list')} className={`tap-soft rounded-full ${value === 'list' ? 'bg-[#087f5b] text-white' : 'text-ink'}`}>
         リスト
       </button>
     </div>
@@ -114,22 +159,9 @@ function MapView({ candidates }: { candidates: ShelfCandidate[] }) {
     return uniqueBooks(scoped)
   }, [candidates, selectedUnit, selectedShelf])
 
-  const cellCounts = useMemo(() => {
-    const counts: Record<string, number> = {}
-    for (const candidate of candidates) {
-      counts[candidate.shelf_id] = (counts[candidate.shelf_id] ?? 0) + 1
-    }
-    return counts
-  }, [candidates])
+  const cellCounts = useMemo(() => candidateCounts(candidates, 'cell'), [candidates])
 
-  const unitCounts = useMemo(() => {
-    const counts: Record<string, number> = {}
-    for (const candidate of candidates) {
-      const unitId = getSlot(candidate.shelf_id)?.unit
-      if (unitId) counts[unitId] = (counts[unitId] ?? 0) + 1
-    }
-    return counts
-  }, [candidates])
+  const unitCounts = useMemo(() => candidateCounts(candidates, 'unit'), [candidates])
 
   const selectUnit = (unitId: string) => {
     setSelectedUnit(unitId)
@@ -174,43 +206,42 @@ function UnitCellGrid({ unitId, cellCounts, selectedShelf, onSelectShelf }: {
 }) {
   const unit = getUnit(unitId)
   if (!unit) return null
-  const mobileCell = 18.9
-  const desktopCell = 39.4
-  const mobileGap = 3
-  const desktopGap = 4
-  const mobileWidth = unit.cols * mobileCell + (unit.cols - 1) * mobileGap
-  const desktopWidth = unit.cols * desktopCell + (unit.cols - 1) * desktopGap
+  const cellSize = 44
+  const gap = 4
+  const gridWidth = unit.cols * cellSize + (unit.cols - 1) * gap
   return (
-    <div
-      className="grid max-w-full gap-[3px] md:gap-1"
-      style={{
-        gridTemplateColumns: `repeat(${unit.cols}, minmax(0, 1fr))`,
-        width: `clamp(${mobileWidth}px, 100%, ${desktopWidth}px)`,
-      }}
-    >
-      {Array.from({ length: unit.rows }, (_, rowIndex) => {
-        const row = unit.rows - rowIndex
-        return Array.from({ length: unit.cols }, (_, colIndex) => {
-          const displayCol = colIndex + 1
-          const shelfId = shelfIdForDisplayCell(unit, displayCol, row)
-          if (isDisplayCellEmpty(unit, displayCol, row)) {
-            return <div key={shelfId} className="aspect-square" />
-          }
-          const active = selectedShelf === shelfId
-          const count = cellCounts[shelfId] ?? 0
-          return (
-            <button
-              key={shelfId}
-              type="button"
-              onClick={() => onSelectShelf(active ? null : shelfId)}
-              aria-label={`${formatShelfLabel(shelfId)} ${count}冊`}
-              aria-pressed={active}
-              style={active ? { backgroundColor: '#363636' } : undefined}
-              className={`tap-soft aspect-square transition ${active ? 'bg-[#363636] ring-2 ring-[#8a8a8a] ring-offset-1' : indexCellTone(count)}`}
-            />
-          )
-        })
-      })}
+    <div className="w-full overflow-x-auto pb-1">
+      <div
+        className="grid gap-1"
+        style={{
+          gridTemplateColumns: `repeat(${unit.cols}, ${cellSize}px)`,
+          width: `${gridWidth}px`,
+        }}
+      >
+        {Array.from({ length: unit.rows }, (_, rowIndex) => {
+          const row = unit.rows - rowIndex
+          return Array.from({ length: unit.cols }, (_, colIndex) => {
+            const displayCol = colIndex + 1
+            const shelfId = shelfIdForDisplayCell(unit, displayCol, row)
+            if (isDisplayCellEmpty(unit, displayCol, row)) {
+              return <div key={shelfId} className="aspect-square" />
+            }
+            const active = selectedShelf === shelfId
+            const count = cellCounts[shelfId] ?? 0
+            return (
+              <button
+                key={shelfId}
+                type="button"
+                onClick={() => onSelectShelf(active ? null : shelfId)}
+                aria-label={`${formatShelfLabel(shelfId)} ${count}冊`}
+                aria-pressed={active}
+                style={active ? { backgroundColor: '#363636' } : undefined}
+                className={`tap-soft aspect-square transition ${active ? 'bg-[#363636] ring-2 ring-[#8a8a8a] ring-offset-1' : indexCellTone(count)}`}
+              />
+            )
+          })
+        })}
+      </div>
     </div>
   )
 }
@@ -226,9 +257,16 @@ function indexCellTone(count: number): string {
 
 
 function ListView({ books }: { books: IndexBook[] }) {
+  const [visibleCount, setVisibleCount] = useState(120)
   const groups = useMemo(() => {
-    return groupBooksForIndex(books)
-  }, [books])
+    const sorted = groupBooksForIndex(books)
+    let remaining = visibleCount
+    return sorted.flatMap(group => {
+      const visible = group.books.slice(0, Math.max(0, remaining))
+      remaining -= visible.length
+      return visible.length ? [{ ...group, books: visible }] : []
+    })
+  }, [books, visibleCount])
 
   return (
     <section className="flex w-full flex-col gap-4">
@@ -243,6 +281,7 @@ function ListView({ books }: { books: IndexBook[] }) {
           <BookGrid books={group.books} />
         </div>
       ))}
+      {visibleCount < books.length && <button type="button" className="min-h-11 rounded-lg border border-line p-3 text-primary" onClick={() => setVisibleCount(count => count + 120)}>さらに表示（{Math.min(visibleCount, books.length)} / {books.length}冊）</button>}
     </section>
   )
 }
@@ -253,10 +292,13 @@ function BookGrid({ books }: { books: IndexBook[] }) {
     <div className="grid w-full grid-cols-3 gap-x-[5px] gap-y-[13px] md:grid-cols-4 md:gap-x-8 md:gap-y-7">
       {books.map(book => (
         <button key={book.id} type="button" onClick={() => navigate(`/books/${book.id}`)} className="tap-card flex min-w-0 flex-col items-center gap-[5px] rounded-lg md:gap-[7px]">
-          <div className="flex h-[160px] w-[93px] items-end justify-center md:h-[150px] md:w-[112px]">
-            {book.cover
-              ? <img src={book.cover} alt="" className="max-h-full max-w-full bg-[#d9d9d9] object-contain" loading="lazy" />
-              : <div className="h-[131px] w-[93px] bg-[#d9d9d9] md:h-[150px] md:w-[112px]" />}
+          <div className="flex h-[160px] w-[93px] max-w-full items-end justify-center md:h-[150px] md:w-[112px]">
+            <CoverImage
+              src={book.cover}
+              alt=""
+              className="max-h-full max-w-full bg-[#d9d9d9] object-contain"
+              fallbackClassName="grid h-[131px] w-[93px] place-items-center bg-[#d9d9d9] md:h-[150px] md:w-[112px]"
+            />
           </div>
           <span className="line-clamp-2 w-full text-center text-[10px] leading-normal text-ink md:text-[11px] md:leading-[13px]">{book.title}</span>
         </button>
@@ -317,4 +359,9 @@ function withDevTimeout<T>(promise: Promise<T>): Promise<T> {
     promise,
     new Promise<T>((_, reject) => window.setTimeout(() => reject(new Error('dev fallback timeout')), 1200)),
   ])
+}
+
+function shouldUseDevFallback(error: unknown): boolean {
+  if (!import.meta.env.DEV) return false
+  return error instanceof TypeError || (error instanceof Error && error.message === 'dev fallback timeout')
 }

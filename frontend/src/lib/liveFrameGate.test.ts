@@ -9,6 +9,8 @@ describe('live frame gate', () => {
     expect(shouldSendFrame(sharp, 6000, { previous: new Uint8Array([1]), lastSentAt: 0 })).toBeNull()
     // Immediately after is rate limited.
     expect(shouldSendFrame(sharp, 6500, { previous: new Uint8Array([1]), lastSentAt: 6000 })).toBe('rate_limited')
+    // A static no-tag frame is also skipped after the slow-send interval.
+    expect(shouldSendFrame({ ...sharp, difference: 1 }, 12000, { previous: new Uint8Array([1]), lastSentAt: 6000 })).toBe('unchanged')
   })
   it('still gates by tag grace period when tag was recently seen', () => {
     const sharp = { blur: 99, difference: 99, glareRatio: 0 }

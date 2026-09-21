@@ -1,5 +1,6 @@
-import { ExternalLink, X } from 'lucide-react'
-import type { FormEvent } from 'react'
+import { BookOpen, ExternalLink, X } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import type { FormEvent, KeyboardEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import type { Book, ShelfCandidate } from '../lib/types'
 import { confidenceLevel, formatShelfLabel, getSlot, getUnitId, shortShelfLabel, splitShelfId } from '../lib/shelf'
@@ -28,28 +29,47 @@ export function SearchBar({
   onSubmit: () => void
   autoFocus?: boolean
 }) {
+  const inputRef = useRef<HTMLInputElement>(null)
   const submit = (event: FormEvent) => {
     event.preventDefault()
     onSubmit()
   }
+  const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    // Enter commits the IME composition; it must not submit a search yet.
+    if (event.key === 'Enter' && (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229)) event.preventDefault()
+  }
+  const clear = () => {
+    onChange('')
+    window.requestAnimationFrame(() => inputRef.current?.focus())
+  }
   return (
     <form
       onSubmit={submit}
+      aria-label="蔵書を検索"
       className="flex w-full items-center gap-2 rounded-[24px] bg-white px-[14px] py-3 shadow-[0_3px_2.9px_rgba(0,0,0,0.1)] focus-within:ring-2 focus-within:ring-primary-soft"
     >
-      <SearchIcon className="size-6 shrink-0 text-[#087f5b]" />
+      <label htmlFor="book-search-input" className="sr-only">本を検索</label>
+      <button type="submit" aria-label="検索" className="grid size-6 shrink-0 place-items-center text-[#087f5b]">
+        <SearchIcon className="size-6" />
+      </button>
       <input
+        ref={inputRef}
+        id="book-search-input"
+        type="search"
         value={value}
         onChange={event => onChange(event.target.value)}
+        onKeyDown={handleKeyDown}
         autoFocus={autoFocus}
+        enterKeyHint="search"
+        autoComplete="off"
         placeholder="蟹工船"
-        className="min-w-0 flex-1 border-0 bg-transparent p-0 text-base text-ink outline-none placeholder:text-black/50"
+        className="min-w-0 flex-1 border-0 bg-transparent p-0 text-base text-ink outline-none placeholder:text-black/50 [&::-webkit-search-cancel-button]:appearance-none"
       />
       {value && (
         <button
           type="button"
           aria-label="検索語を消す"
-          onClick={() => onChange('')}
+          onClick={clear}
           className="grid size-8 shrink-0 place-items-center rounded-full text-ink-muted hover:bg-zinc-100"
         >
           <X className="size-4" />
@@ -105,12 +125,44 @@ export function BookHero({ book }: { book: Book }) {
   )
 }
 
-function BookCover({ book, size }: { book: Book; size: 'sm' | 'lg' }) {
+export function CoverImage({
+  src,
+  alt = '',
+  className = '',
+  fallbackClassName = '',
+}: {
+  src?: string | null
+  alt?: string
+  className?: string
+  fallbackClassName?: string
+}) {
+  const [imageFailed, setImageFailed] = useState(false)
+  useEffect(() => setImageFailed(false), [src])
+  if (!src || imageFailed) {
+    return (
+      <div className={fallbackClassName || className} aria-label={alt || '表紙なし'} aria-hidden={!alt}>
+        <BookOpen className="size-6 text-ink-muted" aria-hidden="true" />
+      </div>
+    )
+  }
+  return <img src={src} alt={alt} onError={() => setImageFailed(true)} className={className} loading="lazy" />
+}
+
+export function BookCover({ book, size }: { book: Book; size: 'sm' | 'lg' }) {
   const stageCls = size === 'lg' ? 'h-32 w-24' : 'h-20 w-14'
-  if (book.thumbnail) {
+  const [imageFailed, setImageFailed] = useState(false)
+  useEffect(() => setImageFailed(false), [book.thumbnail])
+  const cover = imageFailed ? null : book.thumbnail
+  if (cover) {
     return (
       <div className={`${stageCls} flex shrink-0 items-end justify-center`}>
-        <img src={book.thumbnail} alt="" className="max-h-full max-w-full rounded-lg border border-line bg-zinc-100 object-contain" loading="lazy" />
+        <img
+          src={cover}
+          alt=""
+          onError={() => setImageFailed(true)}
+          className="max-h-full max-w-full rounded-lg border border-line bg-zinc-100 object-contain"
+          loading="lazy"
+        />
       </div>
     )
   }
@@ -196,7 +248,7 @@ export function shelfBookFromCandidate(candidate: ShelfCandidate): Book {
     class_number: '',
     registration_number: '',
     isbn: '',
-    thumbnail: null,
+    thumbnail: candidate.thumbnail ?? null,
     info_link: null,
     shelf_candidates: [candidate],
   }

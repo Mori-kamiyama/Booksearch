@@ -28,6 +28,50 @@ func TestFeaturedReturnsBooksWithCovers(t *testing.T) {
 	}
 }
 
+func TestFeaturedIsStableWithinWeek(t *testing.T) {
+	store, err := OpenBookStore("library.db")
+	if err != nil {
+		t.Fatalf("open library DB: %v", err)
+	}
+	defer store.db.Close()
+
+	first, err := store.Featured(5)
+	if err != nil {
+		t.Fatalf("first featured books: %v", err)
+	}
+	if err := store.db.Close(); err != nil {
+		t.Fatalf("close DB after cache fill: %v", err)
+	}
+	second, err := store.Featured(5)
+	if err != nil {
+		t.Fatalf("second featured books: %v", err)
+	}
+	if len(first) != len(second) {
+		t.Fatalf("featured result lengths differ: %d vs %d", len(first), len(second))
+	}
+	for i := range first {
+		if first[i].ID != second[i].ID {
+			t.Fatalf("featured order changed at %d: %d vs %d", i, first[i].ID, second[i].ID)
+		}
+	}
+}
+
+func TestSearchEscapesLikeWildcards(t *testing.T) {
+	store, err := OpenBookStore("library.db")
+	if err != nil {
+		t.Fatalf("open library DB: %v", err)
+	}
+	defer store.db.Close()
+
+	result, err := store.SearchWithTotal("%", 5)
+	if err != nil {
+		t.Fatalf("search literal wildcard: %v", err)
+	}
+	if result.Total != 0 || len(result.Books) != 0 {
+		t.Fatalf("wildcard-only search matched books: total=%d books=%d", result.Total, len(result.Books))
+	}
+}
+
 func TestIndexEntriesIncludeTitles(t *testing.T) {
 	store, err := OpenBookStore("library.db")
 	if err != nil {

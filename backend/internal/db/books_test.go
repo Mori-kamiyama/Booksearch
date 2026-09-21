@@ -174,13 +174,57 @@ func TestSearch_NoResults(t *testing.T) {
 func TestSearch_EmptyQuery(t *testing.T) {
 	store := setupDB(t)
 
-	// 空クエリは空文字列 LIKE '%%' になるので全件マッチする
 	books, err := store.Search("", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(books) != 2 {
-		t.Errorf("empty query should match all 2 books, got %d", len(books))
+	if len(books) != 0 {
+		t.Errorf("empty query should match no books, got %d", len(books))
+	}
+}
+
+func TestSearch_SplitsTermsAndEscapesWildcards(t *testing.T) {
+	store := setupDB(t)
+
+	books, err := store.Search("Go言語 プログラミング", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(books) != 1 || books[0].ID != 1 {
+		t.Fatalf("AND search got %#v, want book 1", books)
+	}
+	for _, query := range []string{"%", "_", "!!!"} {
+		books, err := store.Search(query, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(books) != 0 {
+			t.Errorf("query %q should not match all books, got %d", query, len(books))
+		}
+	}
+}
+
+func TestSearch_ISBNNormalizationAndTotal(t *testing.T) {
+	store := setupDB(t)
+
+	result, err := store.SearchWithTotal("978-987-654-3210", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Total != 1 || len(result.Books) != 1 || result.Books[0].ID != 2 {
+		t.Fatalf("ISBN search got total=%d books=%#v, want total=1/book 2", result.Total, result.Books)
+	}
+
+	first, err := store.SearchWithTotal("プログラミング", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.SearchWithTotal("プログラミング", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Total != 2 || len(first.Books) != 1 || len(second.Books) != 1 || first.Books[0].ID != second.Books[0].ID {
+		t.Fatalf("stable limited search got first=%#v second=%#v", first, second)
 	}
 }
 

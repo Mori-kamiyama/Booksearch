@@ -3,7 +3,11 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"hash/fnv"
+	"sort"
 	"strings"
+	"sync"
+	"time"
 	"unicode"
 
 	"golang.org/x/text/unicode/norm"
@@ -24,6 +28,98 @@ func normalizeQuery(value string) string {
 		b.WriteRune(r)
 	}
 	return b.String()
+}
+
+type searchTerm struct {
+	normalized string
+	isbn       string
+}
+
+type SearchResult struct {
+	Books []Book
+	Total int
+}
+
+func searchTerms(query string) []searchTerm {
+	var terms []searchTerm
+	for _, raw := range strings.Fields(norm.NFKC.String(query)) {
+		term := normalizeQuery(raw)
+		if term == "" || !hasSearchContent(term) {
+			continue
+		}
+		isbn := normalizeISBN(raw)
+		if len(isbn) < 10 {
+			isbn = ""
+		}
+		terms = append(terms, searchTerm{normalized: term, isbn: isbn})
+	}
+	return terms
+}
+
+func hasSearchContent(value string) bool {
+	for _, r := range value {
+		if unicode.IsLetter(r) || unicode.IsNumber(r) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeISBN(value string) string {
+	var b strings.Builder
+	for _, r := range value {
+		if r >= '0' && r <= '9' {
+			b.WriteRune(r)
+		} else if r == 'x' || r == 'X' {
+			b.WriteRune('X')
+		}
+	}
+	return b.String()
+}
+
+func escapeLike(value string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(value)
+}
+
+func searchWhere(terms []searchTerm) (string, []any) {
+	clauses := make([]string, 0, len(terms))
+	args := make([]any, 0, len(terms)*3)
+	for _, term := range terms {
+		pattern := "%" + escapeLike(term.normalized) + "%"
+		isbnPattern := pattern
+		if term.isbn != "" {
+			isbnPattern = "%" + escapeLike(term.isbn) + "%"
+		}
+		clauses = append(clauses, `(COALESCE(b.title_norm,'') LIKE ? ESCAPE '\' OR COALESCE(b.authors_norm,'') LIKE ? ESCAPE '\' OR COALESCE(b.isbn_norm,'') LIKE ? ESCAPE '\')`)
+		args = append(args, pattern, pattern, isbnPattern)
+	}
+	return strings.Join(clauses, " AND "), args
+}
+
+func searchOrder(terms []searchTerm) (string, []any) {
+	joined := make([]string, 0, len(terms))
+	for _, term := range terms {
+		joined = append(joined, term.normalized)
+	}
+	full := strings.Join(joined, "")
+	first := joined[0]
+	order := `CASE `
+	args := make([]any, 0, 6)
+	if len(terms) == 1 && terms[0].isbn != "" {
+		order += `WHEN LOWER(b.isbn_norm) = LOWER(?) THEN 500 `
+		args = append(args, terms[0].isbn)
+	}
+	order += `WHEN b.title_norm = ? THEN 400 `
+	args = append(args, full)
+	order += `WHEN b.title_norm LIKE ? ESCAPE '\' THEN 300 `
+	args = append(args, escapeLike(first)+"%")
+	order += `WHEN b.authors_norm LIKE ? ESCAPE '\' THEN 200 `
+	args = append(args, escapeLike(first)+"%")
+	order += `WHEN b.title_norm LIKE ? ESCAPE '\' THEN 100 `
+	args = append(args, "%"+escapeLike(full)+"%")
+	order += `WHEN b.authors_norm LIKE ? ESCAPE '\' THEN 50 ELSE 0 END DESC, b.title_norm COLLATE NOCASE ASC, b.id ASC`
+	args = append(args, "%"+escapeLike(full)+"%")
+	return order, args
 }
 
 func isStrippedPunct(r rune) bool {
@@ -81,7 +177,10 @@ type BookIndexBook struct {
 }
 
 type BookStore struct {
-	db *sql.DB
+	db            *sql.DB
+	featuredMu    sync.Mutex
+	featuredWeek  string
+	featuredBooks []Book
 }
 
 func OpenBookStore(path string) (*BookStore, error) {
@@ -98,7 +197,26 @@ func OpenBookStore(path string) (*BookStore, error) {
 }
 
 func (s *BookStore) Search(query string, limit int) ([]Book, error) {
-	q := "%" + normalizeQuery(strings.TrimSpace(query)) + "%"
+	result, err := s.SearchWithTotal(query, limit)
+	return result.Books, err
+}
+
+func (s *BookStore) SearchWithTotal(query string, limit int) (SearchResult, error) {
+	terms := searchTerms(query)
+	if len(terms) == 0 {
+		return SearchResult{Books: []Book{}, Total: 0}, nil
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	where, whereArgs := searchWhere(terms)
+	var total int
+	if err := s.db.QueryRow("SELECT COUNT(DISTINCT b.id) FROM books b WHERE "+where, whereArgs...).Scan(&total); err != nil {
+		return SearchResult{}, err
+	}
+	order, orderArgs := searchOrder(terms)
+	args := append(append([]any{}, whereArgs...), orderArgs...)
+	args = append(args, limit)
 	rows, err := s.db.Query(`
 		SELECT b.id, b.title, COALESCE(b.authors,''), COALESCE(b.publisher,''),
 		       COALESCE(b.published_date,''), COALESCE(b.class_number,''),
@@ -106,17 +224,17 @@ func (s *BookStore) Search(query string, limit int) ([]Book, error) {
 		       bc.thumbnail, bc.info_link
 		FROM books b
 		LEFT JOIN book_covers bc ON b.id = bc.book_id
-		WHERE b.title_norm LIKE ?
-		   OR b.authors_norm LIKE ?
-		   OR b.isbn_norm = ?
-		LIMIT ?`,
-		q, q, strings.TrimSpace(query), limit,
+		WHERE `+where+` ORDER BY `+order+` LIMIT ?`, args...,
 	)
 	if err != nil {
-		return nil, err
+		return SearchResult{}, err
 	}
 	defer rows.Close()
-	return scanBooks(rows)
+	books, err := scanBooks(rows)
+	if err != nil {
+		return SearchResult{}, err
+	}
+	return SearchResult{Books: books, Total: total}, nil
 }
 
 func (s *BookStore) Featured(limit int) ([]Book, error) {
@@ -126,6 +244,17 @@ func (s *BookStore) Featured(limit int) ([]Book, error) {
 	if limit > 20 {
 		limit = 20
 	}
+	weekKey := featuredWeekKey()
+	s.featuredMu.Lock()
+	if s.featuredWeek == weekKey {
+		books := cloneBooks(s.featuredBooks)
+		s.featuredMu.Unlock()
+		if len(books) > limit {
+			books = books[:limit]
+		}
+		return books, nil
+	}
+	defer s.featuredMu.Unlock()
 	rows, err := s.db.Query(`
 		SELECT b.id, b.title, COALESCE(b.authors,''), COALESCE(b.publisher,''),
 		       COALESCE(b.published_date,''), COALESCE(b.class_number,''),
@@ -134,13 +263,43 @@ func (s *BookStore) Featured(limit int) ([]Book, error) {
 		FROM books b
 		JOIN book_covers bc ON b.id = bc.book_id
 		WHERE bc.thumbnail IS NOT NULL AND bc.thumbnail != ''
-		ORDER BY RANDOM()
-		LIMIT ?`, limit)
+		ORDER BY b.id`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	return scanBooks(rows)
+	books, err := scanBooks(rows)
+	if err != nil {
+		return nil, err
+	}
+	seed := weekKey
+	sort.SliceStable(books, func(i, j int) bool {
+		return featuredSortKey(seed, books[i].ID) < featuredSortKey(seed, books[j].ID)
+	})
+	s.featuredWeek = weekKey
+	s.featuredBooks = cloneBooks(books)
+	books = cloneBooks(books)
+	if len(books) > limit {
+		books = books[:limit]
+	}
+	return books, nil
+}
+
+func featuredWeekKey() string {
+	year, week := time.Now().UTC().ISOWeek()
+	return fmt.Sprintf("%d-%d", year, week)
+}
+
+func cloneBooks(books []Book) []Book {
+	cloned := make([]Book, len(books))
+	copy(cloned, books)
+	return cloned
+}
+
+func featuredSortKey(seed string, id int) uint64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(fmt.Sprintf("%s:%d", seed, id)))
+	return h.Sum64()
 }
 
 func (s *BookStore) GetByID(id int) (*Book, error) {

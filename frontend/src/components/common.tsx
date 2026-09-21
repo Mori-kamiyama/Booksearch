@@ -1,8 +1,8 @@
 import { AlertCircle, ArrowLeft, BookOpen, Menu, Map, Search, Upload, X } from 'lucide-react'
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import type { ReactNode } from 'react'
+import type { KeyboardEvent, ReactNode } from 'react'
 
 export function BrandMark({ className = '' }: { className?: string }) {
   return (
@@ -16,20 +16,24 @@ export function BrandMark({ className = '' }: { className?: string }) {
 export function RakutenCredit({ className = '' }: { className?: string }) {
   return (
     <div className={className}>
-      <a href="https://developers.rakuten.com/" target="_blank">Supported by Rakuten Developers</a>
+      <a href="https://developers.rakuten.com/" target="_blank" rel="noreferrer">Supported by Rakuten Developers</a>
     </div>
   )
 }
 
 export function PageHeader({ title, back = false }: { title: string; back?: boolean }) {
   const navigate = useNavigate()
+  const goBack = () => {
+    if (typeof window.history.state?.idx === 'number' && window.history.state.idx > 0) navigate(-1)
+    else navigate('/')
+  }
   return (
     <div className="mb-5 flex min-h-11 items-center gap-3">
       {back && (
         <button
           type="button"
           aria-label="戻る"
-          onClick={() => navigate(-1)}
+          onClick={goBack}
           className="grid size-11 shrink-0 place-items-center rounded-lg border border-line bg-white text-ink-muted"
         >
           <ArrowLeft className="size-5" />
@@ -59,6 +63,23 @@ export function EmptyState({
       <p className="font-semibold text-ink">{title}</p>
       <p className="mt-1 text-sm text-ink-muted">{hint}</p>
       {action && <div className="mt-4">{action}</div>}
+    </div>
+  )
+}
+
+export function NotFoundPage() {
+  return (
+    <div className="mx-auto w-full max-w-xl">
+      <PageHeader title="ページが見つかりません" />
+      <EmptyState
+        title="お探しのページは見つかりませんでした"
+        hint="URLを確認するか、ホームからもう一度お探しください。"
+        action={(
+          <Link to="/" className="inline-flex min-h-11 items-center justify-center rounded-lg bg-primary px-4 text-sm font-bold text-white">
+            ホームへ戻る
+          </Link>
+        )}
+      />
     </div>
   )
 }
@@ -136,10 +157,21 @@ export function SiteHeader() {
   const navigate = useNavigate()
   const isHome = location.pathname === '/'
   const [menuOpen, setMenuOpen] = useState(false)
+  const menuButtonRef = useRef<HTMLButtonElement>(null)
+  const wasOpenRef = useRef(false)
+  const goBack = () => {
+    if (typeof window.history.state?.idx === 'number' && window.history.state.idx > 0) navigate(-1)
+    else navigate('/')
+  }
 
   useEffect(() => {
     setMenuOpen(false)
   }, [location.pathname])
+
+  useEffect(() => {
+    if (!menuOpen && wasOpenRef.current) menuButtonRef.current?.focus()
+    wasOpenRef.current = menuOpen
+  }, [menuOpen])
 
   return (
     <header className={`fixed left-0 top-0 w-full z-20 transition-all ${isHome ? 'bg-transparent backdrop-blur-none border-b border-transparent' : 'bg-white/60 backdrop-blur-xl border-b border-line/40'}`}>
@@ -147,7 +179,7 @@ export function SiteHeader() {
         <div className="size-11 md:w-auto h-auto">
           {!isHome && (
             <>
-              <button type="button" aria-label="戻る" onClick={() => navigate(-1)} className="tap-soft grid size-11 place-items-center text-ink md:hidden">
+              <button type="button" aria-label="戻る" onClick={goBack} className="tap-soft grid size-11 place-items-center text-ink md:hidden">
                 <ArrowLeft className="size-6" />
               </button>
               <Link to="/" className="hidden md:block">
@@ -156,7 +188,7 @@ export function SiteHeader() {
             </>
           )}
         </div>
-        <button type="button" aria-label="メニューを開く" aria-expanded={menuOpen} onClick={() => setMenuOpen(true)} className="tap-soft grid size-11 place-items-center rounded-full text-ink hover:bg-zinc-100 md:fixed md:right-[calc(32px-(100vw-100%))] md:top-[22px] md:z-20">
+        <button ref={menuButtonRef} type="button" aria-label="メニューを開く" aria-expanded={menuOpen} onClick={() => setMenuOpen(true)} className="tap-soft grid size-11 place-items-center rounded-full text-ink hover:bg-zinc-100 md:fixed md:right-[calc(32px-(100vw-100%))] md:top-[22px] md:z-20">
           <Menu className="size-6 md:h-6 md:w-[31px]" />
         </button>
       </div>
@@ -166,13 +198,32 @@ export function SiteHeader() {
 }
 
 function MenuDrawer({ onClose }: { onClose: () => void }) {
+  const navRef = useRef<HTMLElement>(null)
+  const closeButtonRef = useRef<HTMLButtonElement>(null)
+
   useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose()
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
+    closeButtonRef.current?.focus()
   }, [onClose])
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      onClose()
+      return
+    }
+    if (event.key !== 'Tab') return
+    const focusable = navRef.current?.querySelectorAll<HTMLElement>('a[href], button:not([disabled])')
+    if (!focusable || focusable.length === 0) return
+    const first = focusable[0]
+    const last = focusable[focusable.length - 1]
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault()
+      last.focus()
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault()
+      first.focus()
+    }
+  }
 
   const items = [
     { to: '/', label: 'さがす' },
@@ -191,9 +242,9 @@ function MenuDrawer({ onClose }: { onClose: () => void }) {
   return createPortal(
     <div className="fixed inset-0 z-30">
       <button type="button" aria-label="メニューを閉じる" onClick={onClose} className="absolute inset-0 cursor-default bg-black/30" />
-      <nav aria-label="メインメニュー" className="absolute right-0 top-0 flex h-full w-72 max-w-[80vw] flex-col bg-white px-7 pb-8 shadow-xl md:px-8">
+      <nav ref={navRef} aria-label="メインメニュー" onKeyDown={handleKeyDown} className="absolute right-0 top-0 flex h-full w-72 max-w-[80vw] flex-col bg-white px-7 pb-8 shadow-xl md:px-8">
         <div className="flex h-[72px] items-center justify-end md:h-[88px]">
-          <button type="button" aria-label="メニューを閉じる" onClick={onClose} className="tap-soft grid size-11 place-items-center rounded-full text-ink hover:bg-zinc-100">
+          <button ref={closeButtonRef} type="button" aria-label="メニューを閉じる" onClick={onClose} className="tap-soft grid size-11 place-items-center rounded-full text-ink hover:bg-zinc-100">
             <X className="size-6" />
           </button>
         </div>

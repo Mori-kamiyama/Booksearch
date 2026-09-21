@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -498,21 +499,66 @@ func TestLiveScanCompleteCreatesOneBatchJob(t *testing.T) {
 		t.Fatalf("frames must not create processing jobs before confirmation: %v", before)
 	}
 
-	complete, err := http.Post(env.server.URL+"/api/scan/sessions/"+id+"/complete", "application/json", nil)
-	if err != nil {
-		t.Fatal(err)
+	responses := make(chan map[string]any, 2)
+	errors := make(chan error, 2)
+	var completes sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		completes.Add(1)
+		go func() {
+			defer completes.Done()
+			complete, requestErr := http.Post(env.server.URL+"/api/scan/sessions/"+id+"/complete", "application/json", nil)
+			if requestErr != nil {
+				errors <- requestErr
+				return
+			}
+			defer complete.Body.Close()
+			if complete.StatusCode != http.StatusAccepted {
+				errors <- fmt.Errorf("complete: want 202, got %d", complete.StatusCode)
+				return
+			}
+			var result map[string]any
+			if decodeErr := json.NewDecoder(complete.Body).Decode(&result); decodeErr != nil {
+				errors <- decodeErr
+				return
+			}
+			responses <- result
+		}()
 	}
-	defer complete.Body.Close()
-	if complete.StatusCode != http.StatusAccepted {
-		t.Fatalf("complete: want 202, got %d", complete.StatusCode)
+	completes.Wait()
+	close(responses)
+	close(errors)
+	for requestErr := range errors {
+		t.Fatal(requestErr)
 	}
-	var result map[string]any
-	json.NewDecoder(complete.Body).Decode(&result)
+	var results []map[string]any
+	for result := range responses {
+		results = append(results, result)
+	}
+	if len(results) != 2 {
+		t.Fatalf("concurrent complete responses: got %d", len(results))
+	}
+	result := results[0]
 	if result["accepted_frames"] != float64(2) {
 		t.Fatalf("accepted_frames: got %v", result["accepted_frames"])
 	}
 	if result["job_id"] == "" {
 		t.Fatal("missing batch job_id")
+	}
+	if results[1]["job_id"] != result["job_id"] {
+		t.Fatalf("concurrent complete job_ids differ: %v vs %v", result["job_id"], results[1]["job_id"])
+	}
+	retry, err := http.Post(env.server.URL+"/api/scan/sessions/"+id+"/complete", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer retry.Body.Close()
+	if retry.StatusCode != http.StatusAccepted {
+		t.Fatalf("complete retry: want 202, got %d", retry.StatusCode)
+	}
+	var retryResult map[string]any
+	json.NewDecoder(retry.Body).Decode(&retryResult)
+	if retryResult["job_id"] != result["job_id"] {
+		t.Fatalf("complete retry job_id: got %v, want %v", retryResult["job_id"], result["job_id"])
 	}
 }
 

@@ -1,5 +1,5 @@
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom'
-import { useEffect } from 'react'
+import { Component, useEffect, type ErrorInfo, type ReactNode } from 'react'
 import SearchPage from './pages/SearchPage'
 import SearchResultsPage from './pages/SearchResultsPage'
 import ScanPage from './pages/ScanPage'
@@ -10,14 +10,49 @@ import BookDetailPage from './pages/BookDetailPage'
 import IndexPage from './pages/IndexPage'
 import MapPage from './pages/MapPage'
 import ShelfDetailPage from './pages/ShelfDetailPage'
-import { SiteFooter, SiteHeader } from './components/common'
+import { NotFoundPage, SiteFooter, SiteHeader } from './components/common'
 
 export default function App() {
   return (
     <BrowserRouter>
-      <AppShell />
+      <AppErrorBoundary>
+        <AppShell />
+      </AppErrorBoundary>
     </BrowserRouter>
   )
+}
+
+interface AppErrorBoundaryState {
+  hasError: boolean
+}
+
+class AppErrorBoundary extends Component<{ children: ReactNode }, AppErrorBoundaryState> {
+  state: AppErrorBoundaryState = { hasError: false }
+
+  static getDerivedStateFromError(): AppErrorBoundaryState {
+    return { hasError: true }
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error('Unhandled application error', error, info)
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <main className="grid min-h-screen place-items-center bg-white px-7 text-center">
+          <div>
+            <h1 className="text-xl font-bold text-ink">ページを表示できませんでした</h1>
+            <p className="mt-2 text-sm text-ink-muted">ホームへ戻って、もう一度お試しください。</p>
+            <a href="/" className="mt-5 inline-flex min-h-11 items-center justify-center rounded-lg bg-primary px-4 text-sm font-bold text-white">
+              ホームへ戻る
+            </a>
+          </div>
+        </main>
+      )
+    }
+    return this.props.children
+  }
 }
 
 function AppShell() {
@@ -28,18 +63,13 @@ function AppShell() {
   const needsHeaderPadding = !isScanFlow && !isHome
 
   useEffect(() => {
-    document.documentElement.classList.toggle('home-scroll-lock', isHome)
-    document.body.classList.toggle('home-scroll-lock', isHome)
-    return () => {
-      document.documentElement.classList.remove('home-scroll-lock')
-      document.body.classList.remove('home-scroll-lock')
-    }
-  }, [isHome])
+    document.title = documentTitleForPath(pathname)
+  }, [pathname])
 
   return (
-    <div className={`min-h-screen flex flex-col ${usesFigmaLayout ? 'bg-white' : 'bg-surface'} ${isHome ? 'h-svh overflow-hidden' : ''}`}>
+    <div className={`min-h-screen flex flex-col ${usesFigmaLayout ? 'bg-white' : 'bg-surface'}`}>
       {!isScanFlow && <SiteHeader />}
-      <main className={`flex-grow ${usesFigmaLayout ? 'w-full' : 'mx-auto w-full max-w-5xl px-4 pb-6'} ${isHome ? 'h-svh overflow-hidden' : ''} ${needsHeaderPadding ? (usesFigmaLayout ? 'pt-[72px] md:pt-[88px]' : 'pt-[96px] md:pt-[120px]') : ''}`}>
+      <main className={`flex-grow ${usesFigmaLayout ? 'w-full' : 'mx-auto w-full max-w-5xl px-4 pb-6'} ${needsHeaderPadding ? (usesFigmaLayout ? 'pt-[72px] md:pt-[88px]' : 'pt-[96px] md:pt-[120px]') : ''}`}>
         <Routes>
           <Route path="/" element={<SearchPage />} />
           <Route path="/search" element={<SearchResultsPage />} />
@@ -53,9 +83,24 @@ function AppShell() {
           <Route path="/admin/tags" element={<TagPlacementPage />} />
           <Route path="/shelves" element={<Navigate to="/admin/shelves" replace />} />
           <Route path="/tag-placement" element={<Navigate to="/admin/tags" replace />} />
+          <Route path="*" element={<NotFoundPage />} />
         </Routes>
       </main>
       {!isScanFlow && <SiteFooter />}
     </div>
   )
+}
+
+function documentTitleForPath(pathname: string): string {
+  if (pathname === '/') return 'ホンノキ｜図書室の本を探す'
+  if (pathname === '/search') return '検索結果｜ホンノキ'
+  if (pathname.startsWith('/books/')) return '本の詳細｜ホンノキ'
+  if (pathname === '/index') return '索引｜ホンノキ'
+  if (pathname === '/map') return '図書室マップ｜ホンノキ'
+  if (pathname.startsWith('/map/')) return '棚区画｜ホンノキ'
+  if (pathname === '/scan') return '本棚をスキャン｜ホンノキ'
+  if (pathname.startsWith('/jobs/')) return 'スキャン結果｜ホンノキ'
+  if (pathname === '/admin/shelves' || pathname === '/shelves') return '棚の管理｜ホンノキ'
+  if (pathname === '/admin/tags' || pathname === '/tag-placement') return 'タグ配置｜ホンノキ'
+  return 'ホンノキ'
 }
