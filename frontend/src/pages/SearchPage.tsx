@@ -3,7 +3,7 @@ import { ScanLine } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { CoverImage, SearchBar } from '../components/book'
 import { fallbackCoverForTitle } from '../data/figmaBooks'
-import { getFeaturedBooks } from '../lib/api'
+import { getFeaturedBooks, subscribeFeaturedBooks } from '../lib/api'
 import type { Book } from '../lib/types'
 import { BrandMark, RakutenCredit } from '../components/common'
 
@@ -18,13 +18,19 @@ export default function SearchPage() {
 
   useEffect(() => {
     let cancelled = false
+    const unsubscribe = subscribeFeaturedBooks(5, books => {
+      if (!cancelled) {
+        setFeatured(books)
+        setFeaturedError(false)
+      }
+    })
     setFeaturedLoading(true)
     setFeaturedError(false)
     getFeaturedBooks(5)
       .then(books => { if (!cancelled) setFeatured(books) })
       .catch(() => { if (!cancelled) setFeaturedError(true) })
       .finally(() => { if (!cancelled) setFeaturedLoading(false) })
-    return () => { cancelled = true }
+    return () => { cancelled = true; unsubscribe() }
   }, [retry])
 
   const runSearch = () => {

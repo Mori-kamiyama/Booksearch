@@ -16,6 +16,8 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
+import uuid
 from typing import Any
 
 import boto3
@@ -38,6 +40,8 @@ sm = boto3.client("secretsmanager")
 ddb = boto3.resource("dynamodb")
 jobs_table = ddb.Table(JOBS_TABLE)
 crops_table = ddb.Table(CROPS_TABLE)
+tasks_table = ddb.Table(os.environ["SCAN_TASKS_TABLE"]) if os.environ.get("SCAN_TASKS_TABLE") else None
+transaction_client = boto3.client("dynamodb") if tasks_table else None
 fingerprints_table = ddb.Table(FINGERPRINTS_TABLE) if FINGERPRINTS_TABLE else None
 
 _gemini_key: str | None = None
@@ -147,6 +151,10 @@ def queue_final_lookup_if_ready(job_id: str, item: dict[str, Any]) -> None:
 def process_one(job_id: str, crop_id: str, crop_key: str,
                 fingerprint_scope: str | None = None, phash: str | None = None,
                 incremental: bool = False) -> None:
+    if tasks_table:
+        crop = crops_table.get_item(Key={"job_id": job_id, "crop_id": crop_id}, ConsistentRead=True).get("Item") or {}
+        if crop.get("task_id"):
+            return process_durable_crop(crop, incremental)
     print(f"[ocr] job_id={job_id} crop_id={crop_id}")
     obj = s3.get_object(Bucket=BUCKET, Key=crop_key)
     raw = obj["Body"].read()
@@ -233,6 +241,10 @@ def abandon_crop(job_id: str, crop_id: str, reason: str, incremental: bool) -> N
     ocr_done must reach ocr_total for the job to ever leave `processing`, so a
     crop that exhausted its SQS attempts is recorded as failed and counted.
     """
+    if tasks_table:
+        crop = crops_table.get_item(Key={"job_id": job_id, "crop_id": crop_id}, ConsistentRead=True).get("Item") or {}
+        if crop.get("task_id"):
+            return process_durable_crop(crop, incremental, abandoned=reason)
     print(f"[ocr] abandoning crop {job_id}/{crop_id}: {reason}", file=sys.stderr)
     try:
         crops_table.update_item(
@@ -265,6 +277,8 @@ def handler(event, context):
                 body["job_id"], body["crop_id"], body["crop_key"],
                 body.get("fingerprint_scope"), body.get("phash"), incremental,
             )
+        except OCRLeaseBusy:
+            raise
         except Exception as e:
             print(f"[ocr] ERROR: {e}", file=sys.stderr)
             receive_count = int(rec.get("attributes", {}).get("ApproximateReceiveCount", "1"))
@@ -272,3 +286,121 @@ def handler(event, context):
                 raise
             abandon_crop(body["job_id"], body["crop_id"], str(e), incremental)
     return {"ok": True}
+
+
+class OCRLeaseBusy(RuntimeError):
+    pass
+
+
+def _get_job(job_id):
+    return jobs_table.get_item(Key={"job_id": job_id}, ConsistentRead=True).get("Item") or {}
+
+
+def _active_job(job):
+    return job.get("status") in {"collecting", "processing", "ocr_pending"}
+
+
+def _release_ocr(crop, claim):
+    try:
+        crops_table.update_item(
+            Key={"job_id": crop["job_id"], "crop_id": crop["crop_id"]},
+            UpdateExpression="REMOVE ocr_claim_token, ocr_lease_until",
+            ConditionExpression="ocr_claim_token = :claim",
+            ExpressionAttributeValues={":claim": claim},
+        )
+    except ClientError as error:
+        if error.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+            raise
+
+
+def _finish_ocr(crop, claim, titles, error):
+    """Commit the result and its job count together, including abandoned crops."""
+    from boto3.dynamodb.types import TypeSerializer
+    values = {":done": "ocr_done", ":pending": "ocr_pending", ":claim": claim, ":titles": titles}
+    expression = "SET #s = :done, titles = :titles"
+    if error:
+        expression += ", #e = :error"
+        values[":error"] = str(error)[:2000]
+    expression += " REMOVE ocr_claim_token, ocr_lease_until" + ("" if error else ", #e")
+    operations = [
+        {"Update": {"TableName": CROPS_TABLE,
+                    "Key": {"job_id": crop["job_id"], "crop_id": crop["crop_id"]},
+                    "UpdateExpression": expression,
+                    "ConditionExpression": "#s = :pending AND ocr_claim_token = :claim",
+                    "ExpressionAttributeNames": {"#s": "status", "#e": "ocr_error"},
+                    "ExpressionAttributeValues": values}},
+        {"Update": {"TableName": JOBS_TABLE, "Key": {"job_id": crop["job_id"]},
+                    "UpdateExpression": "ADD ocr_done :one",
+                    "ConditionExpression": "#s IN (:collecting, :processing, :pending) AND ocr_done < ocr_total",
+                    "ExpressionAttributeNames": {"#s": "status"},
+                    "ExpressionAttributeValues": {":one": 1, ":collecting": "collecting", ":processing": "processing", ":pending": "ocr_pending"}}},
+        {"ConditionCheck": {"TableName": tasks_table.name,
+                    "Key": {"job_id": crop["job_id"], "task_id": crop["task_id"]},
+                    "ConditionExpression": "#state = :done AND detection_token = :token",
+                    "ExpressionAttributeNames": {"#state": "state"},
+                    "ExpressionAttributeValues": {":done": "done", ":token": crop["detection_token"]}}},
+    ]
+    serializer = TypeSerializer()
+    for operation in operations:
+        content = next(iter(operation.values()))
+        for key in ("Key", "ExpressionAttributeValues"):
+            content[key] = {name: serializer.serialize(value) for name, value in content[key].items()}
+    try:
+        transaction_client.transact_write_items(TransactItems=operations)
+        return True
+    except ClientError as failure:
+        if failure.response.get("Error", {}).get("Code") != "TransactionCanceledException":
+            raise
+        current = crops_table.get_item(Key={"job_id": crop["job_id"], "crop_id": crop["crop_id"]}, ConsistentRead=True).get("Item") or {}
+        if current.get("status") == "ocr_done" or not _active_job(_get_job(crop["job_id"])):
+            return False
+        raise
+
+
+def process_durable_crop(crop, incremental, abandoned=None):
+    job_id = crop["job_id"]
+    job = _get_job(job_id)
+    task = tasks_table.get_item(Key={"job_id": job_id, "task_id": crop["task_id"]}, ConsistentRead=True).get("Item") or {}
+    if not _active_job(job) or task.get("state") != "done" or task.get("detection_token") != crop.get("detection_token"):
+        return
+    if crop.get("status") == "ocr_done":
+        advance_after_crop(job_id, job, incremental)
+        return
+    if crop.get("status") != "ocr_pending":
+        return
+    claim = uuid.uuid4().hex
+    try:
+        crops_table.update_item(
+            Key={"job_id": job_id, "crop_id": crop["crop_id"]},
+            UpdateExpression="SET ocr_claim_token = :claim, ocr_lease_until = :until",
+            ConditionExpression="#s = :pending AND (attribute_not_exists(ocr_lease_until) OR ocr_lease_until <= :now)",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={":claim": claim, ":until": int(time.time()) + 180, ":now": int(time.time()), ":pending": "ocr_pending"},
+        )
+    except ClientError as failure:
+        if failure.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            raise OCRLeaseBusy("crop is already claimed") from failure
+        raise
+    try:
+        titles = []
+        error = abandoned
+        if not abandoned:
+            raw = s3.get_object(Bucket=BUCKET, Key=crop["crop_key"])["Body"].read()
+            try:
+                titles = gemini_ocr(raw, "image/jpeg" if crop["crop_key"].endswith((".jpg", ".jpeg")) else "image/png")
+            except Exception as failure:
+                error = str(failure)
+        committed = _finish_ocr(crop, claim, titles, error)
+        if committed and not error and titles and crop.get("fingerprint_scope") and crop.get("phash") and fingerprints_table:
+            try:
+                fingerprints_table.put_item(Item={
+                    "fingerprint_scope": crop["fingerprint_scope"], "phash": crop["phash"], "job_id": job_id,
+                    "crop_id": crop["crop_id"], "crop_key": crop["crop_key"], "titles": titles,
+                })
+            except Exception as failure:
+                print(f"[ocr] optional fingerprint cache failed: {failure}", file=sys.stderr)
+        if committed:
+            advance_after_crop(job_id, _get_job(job_id), incremental)
+    except Exception:
+        _release_ocr(crop, claim)
+        raise

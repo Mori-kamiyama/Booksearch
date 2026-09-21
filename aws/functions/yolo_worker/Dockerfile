@@ -17,5 +17,6 @@ COPY assets/ ${LAMBDA_TASK_ROOT}/assets/
 
 # Handler
 COPY handler.py ${LAMBDA_TASK_ROOT}/
+COPY durable.py ${LAMBDA_TASK_ROOT}/
 
 CMD ["handler.handler"]

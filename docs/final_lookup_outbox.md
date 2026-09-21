@@ -1,5 +1,7 @@
 # スキャン確定処理の配送と復旧
 
+後続の受付→YOLO→OCRの耐久性対応と最新の検証結果は [scan_delivery_and_featured_cache.md](scan_delivery_and_featured_cache.md) を参照。本書の対象外・検証件数はA22実施時の記録。
+
 ## 防ぐ障害
 
 ライブスキャン確定時に、DynamoDB の `final_lookup_queued` だけが保存され、SQS への送信前に Lambda が終了すると検索結果が完成しなかった。送信エラー時のフラグ巻き戻しも別の書き込みなので、停止への保証にならない。

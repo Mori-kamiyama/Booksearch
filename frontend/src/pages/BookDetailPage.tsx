@@ -5,7 +5,7 @@ import { CoverImage, SearchBar } from '../components/book'
 import { EmptyState, ErrorState } from '../components/common'
 import { LibraryMap, ShelfLocationLabel } from '../components/shelf'
 import { fallbackCoverForTitle } from '../data/figmaBooks'
-import { getBook, getFeaturedBooks } from '../lib/api'
+import { getBook, getFeaturedBooks, subscribeFeaturedBooks } from '../lib/api'
 import type { Book, ShelfCandidate } from '../lib/types'
 
 const fallbackSummary = 'データがありません。'
@@ -42,12 +42,14 @@ export default function BookDetailPage() {
 
   useEffect(() => {
     let cancelled = false
+    const applyRecommendations = (books: Book[]) => {
+      if (!cancelled) setRecommendations(books.filter(b => String(b.id) !== id).slice(0, 6))
+    }
+    const unsubscribe = subscribeFeaturedBooks(7, applyRecommendations)
     getFeaturedBooks(7)
-      .then(books => {
-        if (!cancelled) setRecommendations(books.filter(b => String(b.id) !== id).slice(0, 6))
-      })
+      .then(applyRecommendations)
       .catch(() => { if (!cancelled) setRecommendations([]) })
-    return () => { cancelled = true }
+    return () => { cancelled = true; unsubscribe() }
   }, [id])
 
   const topCandidate = useMemo(() => [...(book?.shelf_candidates ?? [])].sort((a, b) => b.confidence - a.confidence)[0], [book])

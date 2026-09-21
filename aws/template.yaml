@@ -24,6 +24,8 @@ Globals:
         PROJECT_NAME: !Ref ProjectName
         BUCKET: !Ref AssetsBucket
         JOBS_TABLE: !Ref JobsTable
+        SCAN_TASKS_TABLE: !Ref ScanTasksTable
+        YOLO_QUEUE_URL: !Ref YoloQueue
         CROPS_TABLE: !Ref CropsTable
         CROP_FINGERPRINTS_TABLE: !Ref CropFingerprintsTable
         SHELF_OBSERVATIONS_TABLE: !Ref ShelfObservationsTable
@@ -78,6 +80,24 @@ Resources:
       KeySchema:
         - AttributeName: job_id
           KeyType: HASH
+
+  ScanTasksTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${ProjectName}-scan-tasks
+      BillingMode: PAY_PER_REQUEST
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      AttributeDefinitions:
+        - AttributeName: job_id
+          AttributeType: S
+        - AttributeName: task_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: job_id
+          KeyType: HASH
+        - AttributeName: task_id
+          KeyType: RANGE
 
   CropsTable:
     Type: AWS::DynamoDB::Table
@@ -212,6 +232,7 @@ Resources:
         Variables:
           YOLO_QUEUE_URL: !Ref YoloQueue
       Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref ScanTasksTable }
         - S3CrudPolicy: { BucketName: !Ref AssetsBucket }
         - DynamoDBCrudPolicy: { TableName: !Ref JobsTable }
         - DynamoDBReadPolicy: { TableName: !Ref CropsTable }
@@ -219,6 +240,12 @@ Resources:
         - SQSSendMessagePolicy: { QueueName: !GetAtt YoloQueue.QueueName }
         - SQSSendMessagePolicy: { QueueName: !GetAtt LookupQueue.QueueName }
       Events:
+        WeeklyFeatured:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 0 ? * MON *)
+            Input: '{"source":"booksearch.featured.refresh"}'
+            Enabled: true
         AnyRoot:
           Type: HttpApi
           Properties:
@@ -232,6 +259,9 @@ Resources:
             Method: ANY
             Path: /
 
+    Metadata:
+      BuildMethod: makefile
+
   YoloFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -242,6 +272,7 @@ Resources:
       Timeout: 600
       EphemeralStorage: { Size: 2048 }
       Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref ScanTasksTable }
         - S3CrudPolicy: { BucketName: !Ref AssetsBucket }
         - DynamoDBCrudPolicy: { TableName: !Ref JobsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref CropsTable }
@@ -273,6 +304,7 @@ Resources:
         Variables:
           GEMINI_MODEL: !Ref GeminiModel
       Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref ScanTasksTable }
         - S3CrudPolicy: { BucketName: !Ref AssetsBucket }
         - DynamoDBCrudPolicy: { TableName: !Ref JobsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref CropsTable }
@@ -300,6 +332,11 @@ Resources:
       MemorySize: 256
       Timeout: 30
       Policies:
+        - S3ReadPolicy: { BucketName: !Ref AssetsBucket }
+        - DynamoDBReadPolicy: { TableName: !Ref ScanTasksTable }
+        - DynamoDBReadPolicy: { TableName: !Ref CropsTable }
+        - SQSSendMessagePolicy: { QueueName: !GetAtt YoloQueue.QueueName }
+        - SQSSendMessagePolicy: { QueueName: !GetAtt OcrQueue.QueueName }
         - DynamoDBReadPolicy: { TableName: !Ref JobsTable }
         - Statement:
             Effect: Allow
@@ -307,6 +344,13 @@ Resources:
             Resource: !GetAtt JobsTable.Arn
         - SQSSendMessagePolicy: { QueueName: !GetAtt LookupQueue.QueueName }
       Events:
+        FromScanTasksStream:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt ScanTasksTable.StreamArn
+            StartingPosition: TRIM_HORIZON
+            BatchSize: 10
+            FunctionResponseTypes: [ReportBatchItemFailures]
         FromJobsStream:
           Type: DynamoDB
           Properties:
@@ -330,6 +374,7 @@ Resources:
       MemorySize: 1024
       Timeout: 120
       Policies:
+        - DynamoDBReadPolicy: { TableName: !Ref ScanTasksTable }
         - S3CrudPolicy: { BucketName: !Ref AssetsBucket }
         - DynamoDBCrudPolicy: { TableName: !Ref JobsTable }
         - DynamoDBReadPolicy: { TableName: !Ref CropsTable }

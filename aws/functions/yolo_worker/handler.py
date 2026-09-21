@@ -37,6 +37,7 @@ CROPS_TABLE = os.environ["CROPS_TABLE"]
 FINGERPRINTS_TABLE = os.environ.get("CROP_FINGERPRINTS_TABLE")
 OCR_QUEUE_URL = os.environ["OCR_QUEUE_URL"]
 LOOKUP_QUEUE_URL = os.environ["LOOKUP_QUEUE_URL"]
+SCAN_TASKS_TABLE = os.environ.get("SCAN_TASKS_TABLE", "")
 TASK_ROOT = os.environ.get("LAMBDA_TASK_ROOT", ".")
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 # Must match the YoloQueue RedrivePolicy so the last attempt is recognized
@@ -53,6 +54,7 @@ sqs = boto3.client("sqs")
 ddb = boto3.resource("dynamodb")
 jobs_table = ddb.Table(JOBS_TABLE)
 crops_table = ddb.Table(CROPS_TABLE)
+scan_tasks_table = ddb.Table(SCAN_TASKS_TABLE) if SCAN_TASKS_TABLE else None
 fingerprints_table = ddb.Table(FINGERPRINTS_TABLE) if FINGERPRINTS_TABLE else None
 
 
@@ -300,7 +302,8 @@ def persistent_duplicate(scope: str | None, phash: int) -> dict[str, Any] | None
 
 
 def process_frame(job_id: str, image_key: str, frame_index: int,
-                  seen_hashes: list[tuple[int, str]], local_path: str | None = None
+                  seen_hashes: list[tuple[int, str]], local_path: str | None = None,
+                  *, task_id: str | None = None, detection_token: str | None = None,
                   ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     print(f"[yolo] job_id={job_id} image_key={image_key}")
     local_image = local_path or f"/tmp/{job_id}_{frame_index:04d}{Path(image_key).suffix or '.jpg'}"
@@ -332,7 +335,16 @@ def process_frame(job_id: str, image_key: str, frame_index: int,
             print(f"[yolo] apriltag failed: {e}")
             tag_diag = {"error": str(e)}
 
-    image_stem = f"frame_{frame_index:06d}_{Path(image_key).stem[:12]}"
+    # Durable task attempts get an attempt-scoped crop namespace. Legacy jobs
+    # retain their historical IDs so old queue messages remain compatible.
+    if task_id and detection_token:
+        namespace = "".join(
+            c if c.isalnum() or c in "-_" else "_"
+            for c in f"task_{task_id}_{detection_token}"
+        )
+        image_stem = f"{namespace}_frame_{frame_index:06d}_{Path(image_key).stem[:12]}"
+    else:
+        image_stem = f"frame_{frame_index:06d}_{Path(image_key).stem[:12]}"
     crop_records: list[dict[str, Any]] = []
     for i, (xyxy, score) in enumerate(boxes, 1):
         box = clamp_box(tuple(xyxy), (width, height))
@@ -381,11 +393,28 @@ def process_frame(job_id: str, image_key: str, frame_index: int,
             "fingerprint_scope": scope,
             "phash": f"{phash:016x}",
         }
+        if task_id and detection_token:
+            item["task_id"] = task_id
+            item["detection_token"] = detection_token
+            item["requires_ocr"] = status == "ocr_pending"
         if ocr_error:
             item["ocr_error"] = ocr_error
             item["existing_ocr_ref"] = duplicate_ref
             item["titles"] = titles
-        crops_table.put_item(Item=ddb_safe(item))
+        if task_id and detection_token:
+            try:
+                crops_table.put_item(
+                    Item=ddb_safe(item),
+                    ConditionExpression="attribute_not_exists(job_id)",
+                )
+            except ClientError as exc:
+                # A retry of the same leased task may have already persisted
+                # this immutable attempt-scoped crop. It is safe to reuse the
+                # deterministic result; a different token has a different ID.
+                if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                    raise
+        else:
+            crops_table.put_item(Item=ddb_safe(item))
         crop_records.append(item)
         if quality["readable"] and not duplicate_ref:
             seen_hashes.append((phash, crop_id))
@@ -641,9 +670,53 @@ def ddb_safe(item):
     return conv(item)
 
 
+def process_task(body: dict[str, Any]) -> None:
+    """Run the durable ScanTasksTable contract for task_id messages."""
+    from durable import process_task as run_durable_task
+
+    run_durable_task(body, worker=sys.modules[__name__])
+
+
 def handler(event, context):
     for rec in event.get("Records", []):
         body = json.loads(rec["body"])
+        if body.get("task_id"):
+            try:
+                process_task(body)
+            except Exception as e:
+                from durable import TaskBusy, TaskExecutionError, abandon_task
+
+                print(f"[yolo] durable task ERROR: {e}", file=sys.stderr)
+                if isinstance(e, TaskBusy):
+                    # An unexpired lease belongs to another invocation. Do
+                    # not convert a visibility retry into a false failure.
+                    raise
+                if not isinstance(e, TaskExecutionError):
+                    raise
+                if not e.abandonable:
+                    # Manifest/transaction/storage failures are retryable.
+                    # Only detector failures at the final receive attempt may
+                    # be converted into a zero-crop task completion.
+                    raise
+                receive_count = int(rec.get("attributes", {}).get("ApproximateReceiveCount", "1"))
+                if receive_count < MAX_RECEIVE_COUNT:
+                    raise
+                abandoned = abandon_task(
+                    body, str(e), e.lease_token, worker=sys.modules[__name__],
+                )
+                if not abandoned:
+                    latest_task = scan_tasks_table.get_item(
+                        Key={"job_id": body["job_id"], "task_id": body["task_id"]},
+                        ConsistentRead=True,
+                    ).get("Item") or {}
+                    latest_job = jobs_table.get_item(
+                        Key={"job_id": body["job_id"]}, ConsistentRead=True,
+                    ).get("Item") or {}
+                    if latest_task.get("state") != "done" and latest_job.get("status") not in {
+                        "canceled", "done", "failed", "no_detection", "no_readable_crops", "lookup_pending",
+                    }:
+                        raise
+            continue
         incremental = bool(body.get("incremental"))
         image_keys = body.get("image_keys") or [body["image_key"]]
         try:

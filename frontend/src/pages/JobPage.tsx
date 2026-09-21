@@ -61,6 +61,7 @@ interface JobState {
   // Live scans write per-frame diagnostics under a different key.
   latest_diagnostics?: Diagnostics
   crop_total?: number | string
+  failed_frames?: number
   ocr_done?: number | string
   average_seconds?: number
   detected_shelf_count?: number
@@ -160,6 +161,12 @@ export default function JobPage() {
         </button>
 
         {currentPollError && <p className="mx-7 mt-[82px] rounded-xl bg-red-50 p-3 text-sm text-red-700">{currentPollError}</p>}
+
+        {Number(currentJob.failed_frames) > 0 && (
+          <p role="status" className="mx-7 mt-[82px] rounded-xl bg-orange-50 p-3 text-sm text-orange-800">
+            一部の画像（{currentJob.failed_frames}件）を解析できませんでした。結果に含まれていない本は、もう一度撮影してください。
+          </p>
+        )}
 
         {processing ? (
           <div className="flex min-h-[674px] flex-col items-center justify-center gap-6 px-7 text-center">

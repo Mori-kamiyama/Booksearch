@@ -45,6 +45,7 @@ s3 = boto3.client("s3")
 ddb = boto3.resource("dynamodb")
 jobs_table = ddb.Table(JOBS_TABLE)
 crops_table = ddb.Table(CROPS_TABLE)
+tasks_table = ddb.Table(os.environ["SCAN_TASKS_TABLE"]) if os.environ.get("SCAN_TASKS_TABLE") else None
 shelf_observations_table = ddb.Table(SHELF_OBSERVATIONS_TABLE) if SHELF_OBSERVATIONS_TABLE else None
 shelf_candidates_table = ddb.Table(SHELF_CANDIDATES_TABLE) if SHELF_CANDIDATES_TABLE else None
 
@@ -258,7 +259,7 @@ def fetch_crops(job_id: str) -> list[dict[str, Any]]:
     items = []
     last_key = None
     while True:
-        kwargs = {"KeyConditionExpression": Key("job_id").eq(job_id)}
+        kwargs = {"KeyConditionExpression": Key("job_id").eq(job_id), "ConsistentRead": True}
         if last_key:
             kwargs["ExclusiveStartKey"] = last_key
         out = crops_table.query(**kwargs)
@@ -266,8 +267,23 @@ def fetch_crops(job_id: str) -> list[dict[str, Any]]:
         last_key = out.get("LastEvaluatedKey")
         if not last_key:
             break
-    items.sort(key=lambda x: x.get("crop_id", ""))
-    return items
+    accepted = []
+    task_cache = {}
+    for crop in items:
+        task_id = crop.get("task_id")
+        if task_id:
+            if not tasks_table:
+                continue
+            if task_id not in task_cache:
+                task_cache[task_id] = tasks_table.get_item(
+                    Key={"job_id": job_id, "task_id": task_id}, ConsistentRead=True,
+                ).get("Item") or {}
+            task = task_cache[task_id]
+            if task.get("state") != "done" or task.get("detection_token") != crop.get("detection_token"):
+                continue
+        accepted.append(crop)
+    accepted.sort(key=lambda x: x.get("crop_id", ""))
+    return accepted
 
 
 def jsonify(obj):
@@ -385,7 +401,7 @@ def update_shelf_confidence(catalog: dict[str, Any]) -> int:
 
 # ---------- main ----------
 def build_catalog(job_id: str) -> dict[str, Any]:
-    job_resp = jobs_table.get_item(Key={"job_id": job_id})
+    job_resp = jobs_table.get_item(Key={"job_id": job_id}, ConsistentRead=True)
     job = job_resp.get("Item", {})
     crops = fetch_crops(job_id)
     print(f"[lookup] job_id={job_id} crops={len(crops)}")

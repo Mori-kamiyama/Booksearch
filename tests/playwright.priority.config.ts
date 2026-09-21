@@ -4,7 +4,7 @@ import { defineConfig, devices } from '@playwright/test'
 // the spec; no production service or scan writes are used.
 export default defineConfig({
   testDir: './ui-regression',
-  testMatch: 'priority-fixes.spec.ts',
+  testMatch: ['priority-fixes.spec.ts', 'featured-persistence.spec.ts'],
   timeout: 15_000,
   expect: { timeout: 5_000 },
   fullyParallel: true,

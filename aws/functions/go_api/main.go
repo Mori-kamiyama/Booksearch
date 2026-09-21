@@ -74,6 +74,19 @@ func main() {
 }
 
 func handler(ctx context.Context, raw json.RawMessage) (events.APIGatewayV2HTTPResponse, error) {
+	var scheduled struct {
+		Source string `json:"source"`
+	}
+	_ = json.Unmarshal(raw, &scheduled)
+	if scheduled.Source == "booksearch.featured.refresh" {
+		if bookStore == nil {
+			return events.APIGatewayV2HTTPResponse{}, fmt.Errorf("featured library unavailable")
+		}
+		if err := bookStore.RefreshFeatured(); err != nil {
+			return events.APIGatewayV2HTTPResponse{}, err
+		}
+		return okJSON(200, map[string]any{"status": "refreshed"}), nil
+	}
 	req, method, path := parseRequest(raw)
 
 	if method == "OPTIONS" {
@@ -198,32 +211,26 @@ func liveSessionFrameCommit(ctx context.Context, req events.APIGatewayV2HTTPRequ
 	}
 
 	keySet := &ddbtypes.AttributeValueMemberSS{Value: []string{payload.FrameKey}}
-	_, err := ddbClient.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+	err := persistDetectionTask(ctx, ddbtypes.TransactWriteItem{Update: &ddbtypes.Update{
 		TableName: aws.String(jobsTable), Key: map[string]ddbtypes.AttributeValue{"job_id": &ddbtypes.AttributeValueMemberS{Value: id}},
 		UpdateExpression:         aws.String("SET updated_at = :u ADD committed_frame_keys :keys, accepted_frames :one"),
-		ConditionExpression:      aws.String("#s = :collecting AND (attribute_not_exists(committed_frame_keys) OR NOT contains(committed_frame_keys, :key))"),
+		ConditionExpression:      aws.String("#s = :collecting AND contains(frame_keys, :key) AND (attribute_not_exists(committed_frame_keys) OR NOT contains(committed_frame_keys, :key))"),
 		ExpressionAttributeNames: map[string]string{"#s": "status"},
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 			":keys": keySet, ":key": &ddbtypes.AttributeValueMemberS{Value: payload.FrameKey},
 			":one": &ddbtypes.AttributeValueMemberN{Value: "1"}, ":collecting": &ddbtypes.AttributeValueMemberS{Value: "collecting"},
 			":u": &ddbtypes.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)},
 		},
-	})
+	}}, detectionTask(id, frameTaskID(payload.FrameKey), payload.FrameKey, time.Now().UTC().Format(time.RFC3339), true))
 	if err != nil {
-		if strings.Contains(err.Error(), "ConditionalCheckFailedException") {
+		saved, readErr := savedDetectionTask(ctx, id, frameTaskID(payload.FrameKey))
+		if readErr == nil && saved {
 			return okJSON(200, map[string]any{"session_id": id, "frame_key": payload.FrameKey, "status": "already_committed"}), nil
 		}
+		if strings.Contains(err.Error(), "TransactionCanceledException") {
+			return errJSON(409, "session is no longer accepting frames"), nil
+		}
 		return errJSON(500, "commit frame: "+err.Error()), nil
-	}
-
-	msg, _ := json.Marshal(map[string]any{"job_id": id, "image_keys": []string{payload.FrameKey}, "incremental": true})
-	if _, err := sqsClient.SendMessage(ctx, &sqs.SendMessageInput{QueueUrl: aws.String(yoloQueueURL), MessageBody: aws.String(string(msg))}); err != nil {
-		_, _ = ddbClient.UpdateItem(ctx, &dynamodb.UpdateItemInput{
-			TableName: aws.String(jobsTable), Key: map[string]ddbtypes.AttributeValue{"job_id": &ddbtypes.AttributeValueMemberS{Value: id}},
-			UpdateExpression:          aws.String("ADD accepted_frames :minusOne DELETE committed_frame_keys :keys"),
-			ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{":keys": keySet, ":minusOne": &ddbtypes.AttributeValueMemberN{Value: "-1"}},
-		})
-		return errJSON(500, "queue frame: "+err.Error()), nil
 	}
 	return okJSON(202, map[string]any{"session_id": id, "frame_key": payload.FrameKey, "status": "processing"}), nil
 }
@@ -896,7 +903,7 @@ func scan(ctx context.Context, req events.APIGatewayV2HTTPRequest) (events.APIGa
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
-	if _, err := ddbClient.PutItem(ctx, &dynamodb.PutItemInput{
+	if err := persistDetectionTask(ctx, ddbtypes.TransactWriteItem{Put: &ddbtypes.Put{
 		TableName: aws.String(jobsTable),
 		Item: map[string]ddbtypes.AttributeValue{
 			"job_id":     &ddbtypes.AttributeValueMemberS{Value: jobID},
@@ -905,16 +912,8 @@ func scan(ctx context.Context, req events.APIGatewayV2HTTPRequest) (events.APIGa
 			"created_at": &ddbtypes.AttributeValueMemberS{Value: now},
 			"updated_at": &ddbtypes.AttributeValueMemberS{Value: now},
 		},
-	}); err != nil {
+	}}, detectionTask(jobID, "batch", key, now, false)); err != nil {
 		return errJSON(500, "ddb put: "+err.Error()), nil
-	}
-
-	msg, _ := json.Marshal(map[string]string{"job_id": jobID, "image_key": key})
-	if _, err := sqsClient.SendMessage(ctx, &sqs.SendMessageInput{
-		QueueUrl:    aws.String(yoloQueueURL),
-		MessageBody: aws.String(string(msg)),
-	}); err != nil {
-		return errJSON(500, "sqs send: "+err.Error()), nil
 	}
 
 	return okJSON(202, map[string]any{"job_id": jobID}), nil
@@ -992,13 +991,24 @@ func scanStart(ctx context.Context, req events.APIGatewayV2HTTPRequest) (events.
 		return errJSON(400, "expected JSON {job_id}"), nil
 	}
 	out, err := ddbClient.GetItem(ctx, &dynamodb.GetItemInput{
-		TableName: aws.String(jobsTable),
+		TableName: aws.String(jobsTable), ConsistentRead: aws.Bool(true),
 		Key: map[string]ddbtypes.AttributeValue{
 			"job_id": &ddbtypes.AttributeValueMemberS{Value: payload.JobID},
 		},
 	})
-	if err != nil || out.Item == nil {
+	if err != nil {
+		return errJSON(500, "job lookup: "+err.Error()), nil
+	}
+	if out.Item == nil {
 		return errJSON(404, "job not found"), nil
+	}
+	if status, ok := out.Item["status"].(*ddbtypes.AttributeValueMemberS); !ok || status.Value != "uploading" {
+		if status != nil && status.Value != "canceled" && status.Value != "failed" {
+			if saved, readErr := savedDetectionTask(ctx, payload.JobID, "batch"); readErr == nil && saved {
+				return okJSON(202, map[string]any{"job_id": payload.JobID}), nil
+			}
+		}
+		return errJSON(409, "job cannot be started"), nil
 	}
 	var key string
 	if v, ok := out.Item["image_key"].(*ddbtypes.AttributeValueMemberS); ok {
@@ -1012,26 +1022,28 @@ func scanStart(ctx context.Context, req events.APIGatewayV2HTTPRequest) (events.
 		return errJSON(400, "upload not found in S3: "+err.Error()), nil
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	if _, err := ddbClient.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+	if err := persistDetectionTask(ctx, ddbtypes.TransactWriteItem{Update: &ddbtypes.Update{
 		TableName: aws.String(jobsTable),
 		Key: map[string]ddbtypes.AttributeValue{
 			"job_id": &ddbtypes.AttributeValueMemberS{Value: payload.JobID},
 		},
 		UpdateExpression:         aws.String("SET #s = :s, updated_at = :u"),
+		ConditionExpression:      aws.String("#s = :uploading"),
 		ExpressionAttributeNames: map[string]string{"#s": "status"},
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":s": &ddbtypes.AttributeValueMemberS{Value: "pending"},
-			":u": &ddbtypes.AttributeValueMemberS{Value: now},
+			":s":         &ddbtypes.AttributeValueMemberS{Value: "pending"},
+			":uploading": &ddbtypes.AttributeValueMemberS{Value: "uploading"},
+			":u":         &ddbtypes.AttributeValueMemberS{Value: now},
 		},
-	}); err != nil {
-		return errJSON(500, "ddb update: "+err.Error()), nil
-	}
-	msg, _ := json.Marshal(map[string]string{"job_id": payload.JobID, "image_key": key})
-	if _, err := sqsClient.SendMessage(ctx, &sqs.SendMessageInput{
-		QueueUrl:    aws.String(yoloQueueURL),
-		MessageBody: aws.String(string(msg)),
-	}); err != nil {
-		return errJSON(500, "sqs send: "+err.Error()), nil
+	}}, detectionTask(payload.JobID, "batch", key, now, false)); err != nil {
+		saved, readErr := savedDetectionTask(ctx, payload.JobID, "batch")
+		if readErr == nil && saved {
+			return okJSON(202, map[string]any{"job_id": payload.JobID}), nil
+		}
+		if strings.Contains(err.Error(), "TransactionCanceledException") {
+			return errJSON(409, "job cannot be started"), nil
+		}
+		return errJSON(500, "start job: "+err.Error()), nil
 	}
 	return okJSON(202, map[string]any{"job_id": payload.JobID}), nil
 }

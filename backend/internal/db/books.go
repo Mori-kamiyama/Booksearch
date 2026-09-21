@@ -2,9 +2,13 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
+	"fmt"
 	"hash/fnv"
 	"math"
 	"net/url"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -174,10 +178,13 @@ type ShelfCandidateRow struct {
 }
 
 type Store struct {
-	db            *sql.DB
-	featuredMu    sync.Mutex
-	featuredWeek  string
-	featuredBooks []Book
+	db                *sql.DB
+	featuredMu        sync.Mutex
+	featuredWeek      string
+	featuredBooks     []Book
+	featuredLastWeek  string
+	featuredLastBooks []Book
+	featuredCachePath string
 }
 
 func Open(path string) (*Store, error) {
@@ -189,7 +196,7 @@ func Open(path string) (*Store, error) {
 		d.Close()
 		return nil, err
 	}
-	return &Store{db: d}, nil
+	return &Store{db: d, featuredCachePath: path + ".featured.json"}, nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -270,17 +277,26 @@ func (s *Store) FeaturedBooks(limit int) ([]Book, error) {
 	if limit <= 0 {
 		limit = 6
 	}
+	if limit > 20 {
+		limit = 20
+	}
 	weekKey := featuredWeekKey()
 	s.featuredMu.Lock()
+	defer s.featuredMu.Unlock()
 	if s.featuredWeek == weekKey {
 		books := cloneBooks(s.featuredBooks)
-		s.featuredMu.Unlock()
 		if len(books) > limit {
 			books = books[:limit]
 		}
 		return s.attachShelfCandidates(books)
 	}
-	defer s.featuredMu.Unlock()
+	if manifest, err := s.loadFeaturedManifest(); err == nil && manifest.Week == weekKey {
+		s.setFeaturedSuccess(manifest)
+		return s.attachShelfCandidates(truncateFeatured(manifest.Books, limit))
+	} else if err == nil && manifest.Week != "" {
+		s.setFeaturedLast(manifest)
+	}
+	previousWeek, previousBooks := s.featuredLastWeek, cloneBooks(s.featuredLastBooks)
 	rows, err := s.db.Query(`
 		SELECT b.id, b.title, COALESCE(b.authors,''), COALESCE(b.publisher,''),
 		       COALESCE(b.published_date,''), COALESCE(b.class_number,''),
@@ -291,28 +307,154 @@ func (s *Store) FeaturedBooks(limit int) ([]Book, error) {
 		WHERE bc.thumbnail IS NOT NULL AND bc.thumbnail != ''
 		ORDER BY b.id`)
 	if err != nil {
+		if previousWeek != "" {
+			return s.featuredFallback(previousBooks, limit)
+		}
 		return nil, err
 	}
 	defer rows.Close()
 	books, err := scanBooks(rows)
 	if err != nil {
+		if previousWeek != "" {
+			return s.featuredFallback(previousBooks, limit)
+		}
 		return nil, err
 	}
 	seed := weekKey
 	sort.SliceStable(books, func(i, j int) bool {
 		return featuredSortKey(seed, books[i].ID) < featuredSortKey(seed, books[j].ID)
 	})
-	s.featuredWeek = weekKey
-	s.featuredBooks = cloneBooks(books)
+	books = sanitizeFeaturedBooks(books)
+	if len(books) == 0 {
+		if previousWeek != "" {
+			return s.featuredFallback(previousBooks, limit)
+		}
+		return []Book{}, nil
+	}
+	manifest := featuredManifest{Week: weekKey, Books: cloneBooks(books)}
+	if err := s.saveFeaturedManifest(manifest); err != nil {
+		if previousWeek != "" {
+			return s.featuredFallback(previousBooks, limit)
+		}
+		// Leave this week uncached so a later request can retry the write.
+		return s.attachShelfCandidates(truncateFeatured(manifest.Books, limit))
+	}
+	s.setFeaturedSuccess(manifest)
+	return s.attachShelfCandidates(truncateFeatured(manifest.Books, limit))
+}
+
+type featuredManifest struct {
+	Week  string `json:"week"`
+	Books []Book `json:"books"`
+}
+
+func (s *Store) setFeaturedLast(manifest featuredManifest) {
+	s.featuredLastWeek = manifest.Week
+	s.featuredLastBooks = cloneBooks(manifest.Books)
+}
+
+func (s *Store) setFeaturedSuccess(manifest featuredManifest) {
+	s.featuredWeek = manifest.Week
+	s.featuredBooks = cloneBooks(manifest.Books)
+	s.setFeaturedLast(manifest)
+}
+
+func truncateFeatured(books []Book, limit int) []Book {
 	books = cloneBooks(books)
 	if len(books) > limit {
 		books = books[:limit]
 	}
-	return s.attachShelfCandidates(books)
+	return books
 }
 
+func sanitizeFeaturedBooks(books []Book) []Book {
+	seen := make(map[int]struct{}, len(books))
+	clean := make([]Book, 0, minInt(len(books), 20))
+	for _, book := range books {
+		if book.ID <= 0 {
+			continue
+		}
+		if _, ok := seen[book.ID]; ok {
+			continue
+		}
+		seen[book.ID] = struct{}{}
+		clean = append(clean, book)
+		if len(clean) == 20 {
+			break
+		}
+	}
+	return clean
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func (s *Store) featuredFallback(books []Book, limit int) ([]Book, error) {
+	result := truncateFeatured(books, limit)
+	enriched, err := s.attachShelfCandidates(result)
+	if err != nil {
+		// The weekly snapshot is still useful when the auxiliary shelf table is
+		// temporarily unavailable. Keep the persisted book data visible.
+		return result, nil
+	}
+	return enriched, nil
+}
+
+func (s *Store) loadFeaturedManifest() (featuredManifest, error) {
+	data, err := os.ReadFile(s.featuredCachePath)
+	if err != nil {
+		return featuredManifest{}, err
+	}
+	var manifest featuredManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return featuredManifest{}, err
+	}
+	if manifest.Week == "" || len(manifest.Books) == 0 || len(manifest.Books) > 20 {
+		return featuredManifest{}, fmt.Errorf("invalid featured manifest book count")
+	}
+	if len(sanitizeFeaturedBooks(manifest.Books)) != len(manifest.Books) {
+		return featuredManifest{}, fmt.Errorf("invalid featured manifest book IDs")
+	}
+	return manifest, nil
+}
+
+func (s *Store) saveFeaturedManifest(manifest featuredManifest) error {
+	if manifest.Week == "" || len(manifest.Books) == 0 || len(manifest.Books) > 20 ||
+		len(sanitizeFeaturedBooks(manifest.Books)) != len(manifest.Books) {
+		return fmt.Errorf("invalid featured manifest")
+	}
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(s.featuredCachePath), ".booksearch-featured-")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0o644); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, s.featuredCachePath)
+}
+
+var featuredNow = time.Now
+
 func featuredWeekKey() string {
-	year, week := time.Now().UTC().ISOWeek()
+	year, week := featuredNow().UTC().ISOWeek()
 	return strconv.Itoa(year) + "-" + strconv.Itoa(week)
 }
 
