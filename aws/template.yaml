@@ -13,6 +13,14 @@ Parameters:
     Type: String
     NoEcho: true
     Description: Gemini API key. Stored in Secrets Manager.
+  AlarmEmail:
+    Type: String
+    Default: ''
+    NoEcho: true
+    Description: Optional email address for CloudWatch alarm and recovery notifications.
+
+Conditions:
+  HasAlarmEmail: !Not [!Equals [!Ref AlarmEmail, '']]
 
 Globals:
   Function:
@@ -201,8 +209,50 @@ Resources:
         deadLetterTargetArn: !GetAtt LookupDLQ.Arn
         maxReceiveCount: 2
 
-  # These alarms intentionally have no AlarmActions. They expose queue
-  # pressure/DLQ growth in CloudWatch without inventing a notification target.
+  AlarmTopic:
+    Type: AWS::SNS::Topic
+    Condition: HasAlarmEmail
+    Properties:
+      TopicName: !Sub ${ProjectName}-alarm-notifications
+
+  AlarmTopicSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlarmEmail
+    Properties:
+      Endpoint: !Ref AlarmEmail
+      Protocol: email
+      TopicArn: !Ref AlarmTopic
+
+  AlarmTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Condition: HasAlarmEmail
+    Properties:
+      Topics:
+        - !Ref AlarmTopic
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudWatchAlarmsToPublish
+            Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref AlarmTopic
+            Condition:
+              StringEquals:
+                AWS:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                # Keep this policy limited to the six alarms below. Do not add
+                # an explicit Alarm -> AlarmTopicPolicy DependsOn: it would
+                # introduce a dependency cycle through AlarmTopic.
+                AWS:SourceArn:
+                  - !GetAtt YoloQueueAgeAlarm.Arn
+                  - !GetAtt OcrQueueAgeAlarm.Arn
+                  - !GetAtt LookupQueueAgeAlarm.Arn
+                  - !GetAtt YoloDLQAlarm.Arn
+                  - !GetAtt OcrDLQAlarm.Arn
+                  - !GetAtt LookupDLQAlarm.Arn
+
   YoloQueueAgeAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
@@ -218,6 +268,8 @@ Resources:
       Threshold: 900
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+      OKActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
 
   OcrQueueAgeAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -234,6 +286,8 @@ Resources:
       Threshold: 600
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+      OKActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
 
   LookupQueueAgeAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -250,6 +304,8 @@ Resources:
       Threshold: 600
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+      OKActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
 
   YoloDLQAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -266,6 +322,8 @@ Resources:
       Threshold: 0
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+      OKActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
 
   OcrDLQAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -282,6 +340,8 @@ Resources:
       Threshold: 0
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+      OKActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
 
   LookupDLQAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -298,6 +358,8 @@ Resources:
       Threshold: 0
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+      OKActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
 
   # ---------- Secrets ----------
   GeminiSecret:

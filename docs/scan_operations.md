@@ -27,6 +27,16 @@ uv run --no-project --with boto3 python aws/scripts/diagnose_scan.py \
 
 このCLIは削除、再送、visibility変更、DynamoDB更新を行いません。DLQからの復旧やleaseの変更は、原因と対象を確認した後の個別運用判断に限定します。
 
+## CloudWatch通知
+
+`aws/template.yaml` の `AlarmEmail` パラメータにメールアドレスを渡した場合だけ、6つのキュー/DLQ alarmからSNSトピックへ通知します。ALARMへの遷移とOKへの復帰を通知し、INSUFFICIENT_DATAは通知しません。空のままデプロイすれば、SNS購読もalarm通知先も作られません。
+
+```sh
+sam deploy --parameter-overrides "AlarmEmail=受信先のメールアドレス"
+```
+
+初回デプロイ後、SNSから届く購読確認メールのリンクを受信者が承認するまで通知は届きません。アドレスはリポジトリやこのドキュメントに保存せず、購読先を変更・解除するときはCloudFormationのパラメータ更新で管理します。
+
 ## 初回起動と表示速度の切り分け
 
 YOLOのログ `model initialization seconds` はUltralyticsのimportとモデル構築の合計であり、Lambda全体のcold startや推論時間ではありません。LambdaのINIT_REPORT/REPORTと合わせて確認します。モデルは初回処理時に作成し、同じ実行環境で再利用します。設定ファイルは書き込み可能な `/tmp/matplotlib` と `/tmp/Ultralytics` に置きます。
