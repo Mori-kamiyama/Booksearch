@@ -282,11 +282,13 @@ export async function publishHome({
   if (typeof clientIndexHtml !== 'string' || typeof renderHome !== 'function') throw new HomePublisherError('home render assets are unavailable')
   const week = weeklyKey(new Date(now()))
   const clientIndexHash = createHash('sha256').update(clientIndexHtml).digest('hex')
-  if (!force) {
+  let expectedETag
+  {
     try {
       const existing = await storage.headHome({ bucket: frontendBucket, key: HOME_KEY })
+      expectedETag = existing?.ETag
       const metadata = existing?.Metadata ?? existing?.metadata ?? {}
-      if ((metadata['featured-week'] ?? metadata['featured_week']) === week
+      if (!force && (metadata['featured-week'] ?? metadata['featured_week']) === week
         && (metadata['client-index-sha256'] ?? metadata['client_index_sha256']) === clientIndexHash) {
         return { status: 'skipped', week, clientIndexHash }
       }
@@ -322,6 +324,7 @@ export async function publishHome({
     contentType: 'text/html',
     cacheControl: 'public,max-age=300',
     metadata: { 'featured-week': week, 'client-index-sha256': clientIndexHash },
+    expectedETag,
   })
   return { status: 'published', week, clientIndexHash, books: books.length }
 }
@@ -341,8 +344,10 @@ async function createAwsPublisher() {
       const output = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }))
       return output.Body
     },
-    async putHome({ bucket, key, body, contentType, cacheControl, metadata }) {
-      return s3.send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: body, ContentType: contentType, CacheControl: cacheControl, Metadata: metadata }))
+    async putHome({ bucket, key, body, contentType, cacheControl, metadata, expectedETag }) {
+      return s3.send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: body, ContentType: contentType, CacheControl: cacheControl, Metadata: metadata,
+        ...(expectedETag ? { IfMatch: expectedETag } : { IfNoneMatch: '*' }),
+      }))
     },
   }
   const invokeRefresh = async ({ functionName, payload }) => {

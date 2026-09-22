@@ -390,7 +390,6 @@ Resources:
       Architectures: [arm64]
       Timeout: 120
       MemorySize: 512
-      ReservedConcurrentExecutions: 1
       Environment:
         Variables:
           FRONTEND_BUCKET: !Sub ${ProjectName}-web-${AWS::AccountId}-${AWS::Region}

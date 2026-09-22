@@ -66,6 +66,26 @@ test('weeklyKey follows UTC ISO week without zero padding', () => {
   assert.equal(weeklyKey(new Date('2021-01-01T12:00:00Z')), '2020-53')
 })
 
+test('forced publication still carries the previous ETag and surfaces concurrent writes', async () => {
+  const week = '2026-39'
+  let attempted = false
+  await assert.rejects(publishHome({
+    frontendBucket: 'frontend', dataBucket: 'data', apiFunctionName: 'api', force: true,
+    storage: fakeStorage(manifestFor(week), {
+      head: { ETag: 'previous-version' },
+      onPut: input => {
+        attempted = true
+        assert.equal(input.expectedETag, 'previous-version')
+        throw Object.assign(new Error('concurrent update'), { name: 'PreconditionFailed' })
+      },
+    }),
+    invokeRefresh: async () => {}, clientIndexHtml: CLIENT_INDEX,
+    renderHome: () => '<main>Books</main>', fetchImpl: imageFetch(), decodeImage: identityDecode,
+    now: () => Date.parse('2026-09-22T00:00:00Z'),
+  }), /concurrent update/)
+  assert.equal(attempted, true)
+})
+
 test('publishes five covers, embeds safe bootstrap JSON, and carries metadata', async () => {
   const week = weeklyKey(new Date('2026-09-22T00:00:00Z'))
   const puts = []
