@@ -16,6 +16,11 @@ export interface Book {
   shelf_candidates?: ShelfCandidate[]
 }
 
+export interface FeaturedSnapshot {
+  week: string
+  books: Book[]
+}
+
 export interface ShelfCandidate {
   book_id?: number
   title?: string

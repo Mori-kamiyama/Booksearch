@@ -5,18 +5,21 @@ import { CoverImage, SearchBar } from '../components/book'
 import { fallbackCoverForTitle } from '../data/figmaBooks'
 import { getFeaturedBooks, subscribeFeaturedBooks } from '../lib/api'
 import type { Book } from '../lib/types'
+import type { FeaturedSnapshot } from '../lib/types'
 import { BrandMark, RakutenCredit } from '../components/common'
 
-export default function SearchPage() {
+export default function SearchPage({ initialFeatured }: { initialFeatured?: FeaturedSnapshot | null }) {
   const navigate = useNavigate()
   const [query, setQuery] = useState('')
-  const [featured, setFeatured] = useState<Book[]>([])
-  const [featuredLoading, setFeaturedLoading] = useState(true)
+  const snapshotBooks = initialFeatured?.books.slice(0, 5) ?? []
+  const [featured, setFeatured] = useState<Book[]>(snapshotBooks)
+  const [featuredLoading, setFeaturedLoading] = useState(!initialFeatured)
 
   const [featuredError, setFeaturedError] = useState(false)
   const [retry, setRetry] = useState(0)
 
   useEffect(() => {
+    if (initialFeatured) return
     let cancelled = false
     const unsubscribe = subscribeFeaturedBooks(5, books => {
       if (!cancelled) {
@@ -31,7 +34,7 @@ export default function SearchPage() {
       .catch(() => { if (!cancelled) setFeaturedError(true) })
       .finally(() => { if (!cancelled) setFeaturedLoading(false) })
     return () => { cancelled = true; unsubscribe() }
-  }, [retry])
+  }, [initialFeatured, retry])
 
   const runSearch = () => {
     const q = query.trim()
@@ -75,7 +78,7 @@ export default function SearchPage() {
               {featuredLoading
                 ? Array.from({ length: 5 }, (_, index) => <FeaturedBookSkeleton key={index} />)
                 : featured.map(book => (
-                    <FeaturedBookCard key={book.id} book={book} onClick={() => navigate(`/books/${book.id}`)} className="snap-start" />
+                    <FeaturedBookCard key={book.id} book={book} eager={Boolean(initialFeatured)} onClick={() => navigate(`/books/${book.id}`)} className="snap-start" />
                   ))}
             </div>
           </div>
@@ -94,8 +97,8 @@ export default function SearchPage() {
   )
 }
 
-function FeaturedBookCard({ book, onClick, className = '' }: { book: Book; onClick: () => void; className?: string }) {
-  const cover = book.thumbnail || fallbackCoverForTitle(book.title)
+function FeaturedBookCard({ book, eager = false, onClick, className = '' }: { book: Book; eager?: boolean; onClick: () => void; className?: string }) {
+  const cover = eager ? book.thumbnail : (book.thumbnail || fallbackCoverForTitle(book.title))
   return (
     <button
       type="button"
@@ -103,7 +106,9 @@ function FeaturedBookCard({ book, onClick, className = '' }: { book: Book; onCli
       className={`tap-card flex w-[122px] shrink-0 flex-col items-center gap-2 rounded-lg text-center md:w-[114px] md:gap-[6px] ${className}`}
     >
       <div className="flex h-[150px] w-[108px] shrink-0 items-end justify-center overflow-hidden md:h-[155px] md:w-[114px]">
-        {cover ? (
+        {cover && eager ? (
+          <img src={cover} alt="" className="block max-h-full max-w-full object-contain" loading="eager" />
+        ) : cover ? (
           <CoverImage src={cover} alt="" className="block max-h-full max-w-full object-contain" fallbackClassName="grid h-full w-full place-items-center bg-[#d9d9d9]" />
         ) : (
           <CoverImage fallbackClassName="grid h-full w-full place-items-center bg-[#d9d9d9]" />

@@ -378,6 +378,48 @@ Resources:
         AllowMethods: [GET, POST, OPTIONS]
 
   # ---------- Lambdas ----------
+  HomePublisherFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      FunctionName: !Sub ${ProjectName}-home-publisher
+      CodeUri: functions/home_publisher/
+      Handler: handler.handler
+      Runtime: nodejs22.x
+      Architectures: [arm64]
+      Timeout: 120
+      MemorySize: 512
+      ReservedConcurrentExecutions: 1
+      Environment:
+        Variables:
+          FRONTEND_BUCKET: !Sub ${ProjectName}-web-${AWS::AccountId}-${AWS::Region}
+          DATA_BUCKET: !Ref AssetsBucket
+          API_FUNCTION_NAME: !Ref ApiFunction
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: s3:GetObject
+              Resource: !Sub ${AssetsBucket.Arn}/featured/weeks/*
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource:
+                - !GetAtt AssetsBucket.Arn
+                - !Sub arn:${AWS::Partition}:s3:::${ProjectName}-web-${AWS::AccountId}-${AWS::Region}
+            - Effect: Allow
+              Action: [s3:GetObject, s3:PutObject]
+              Resource: !Sub arn:${AWS::Partition}:s3:::${ProjectName}-web-${AWS::AccountId}-${AWS::Region}/home.html
+            - Effect: Allow
+              Action: lambda:InvokeFunction
+              Resource: !GetAtt ApiFunction.Arn
+      Events:
+        RefreshHome:
+          Type: Schedule
+          Properties:
+            Schedule: cron(5 * * * ? *)
+            Input: '{}'
+            Enabled: true
+
   ApiFunction:
     Type: AWS::Serverless::Function
     # New task-producing API code must follow compatible workers during updates.

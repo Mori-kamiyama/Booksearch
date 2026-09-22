@@ -2,6 +2,7 @@ import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-route
 import { Component, lazy, Suspense, useEffect, type ErrorInfo, type ReactNode } from 'react'
 import SearchPage from './pages/SearchPage'
 import { NotFoundPage, SiteFooter, SiteHeader } from './components/common'
+import type { FeaturedSnapshot } from './lib/types'
 
 const SearchResultsPage = lazy(() => import('./pages/SearchResultsPage'))
 const ScanPage = lazy(() => import('./pages/ScanPage'))
@@ -13,13 +14,19 @@ const IndexPage = lazy(() => import('./pages/IndexPage'))
 const MapPage = lazy(() => import('./pages/MapPage'))
 const ShelfDetailPage = lazy(() => import('./pages/ShelfDetailPage'))
 
-export default function App() {
+export default function App({ initialFeatured }: { initialFeatured?: FeaturedSnapshot | null } = {}) {
   return (
     <BrowserRouter>
-      <AppErrorBoundary>
-        <AppShell />
-      </AppErrorBoundary>
+      <AppContent initialFeatured={initialFeatured} />
     </BrowserRouter>
+  )
+}
+
+export function AppContent({ initialFeatured }: { initialFeatured?: FeaturedSnapshot | null } = {}) {
+  return (
+    <AppErrorBoundary>
+      <AppShell initialFeatured={initialFeatured} />
+    </AppErrorBoundary>
   )
 }
 
@@ -56,7 +63,7 @@ class AppErrorBoundary extends Component<{ children: ReactNode }, AppErrorBounda
   }
 }
 
-function AppShell() {
+function AppShell({ initialFeatured }: { initialFeatured?: FeaturedSnapshot | null }) {
   const { pathname } = useLocation()
   const isScanFlow = pathname === '/scan' || pathname.startsWith('/jobs/')
   const usesFigmaLayout = pathname === '/' || pathname === '/search' || pathname === '/index' || pathname.startsWith('/books/') || isScanFlow
@@ -73,7 +80,7 @@ function AppShell() {
       <main className={`flex-grow ${usesFigmaLayout ? 'w-full' : 'mx-auto w-full max-w-5xl px-4 pb-6'} ${needsHeaderPadding ? (usesFigmaLayout ? 'pt-[72px] md:pt-[88px]' : 'pt-[96px] md:pt-[120px]') : ''}`}>
         <Suspense fallback={<RouteLoading />}>
           <Routes>
-            <Route path="/" element={<SearchPage />} />
+            <Route path="/" element={<SearchPage initialFeatured={initialFeatured} />} />
             <Route path="/search" element={<SearchResultsPage />} />
             <Route path="/books/:id" element={<BookDetailPage />} />
             <Route path="/index" element={<IndexPage />} />

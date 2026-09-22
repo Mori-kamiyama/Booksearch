@@ -1,0 +1,11 @@
+{
+  "name": "booksearch-home-publisher",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "sharp": "^0.35.4"
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}

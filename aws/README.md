@@ -69,7 +69,7 @@ sam deploy --parameter-overrides "GeminiApiKey=$GEMINI_API_KEY"
 
 ## フロントエンドのデプロイ
 
-S3 + CloudFront のスタックは `frontend-stack.yaml` で別管理。初回のみ:
+S3 + CloudFront のスタックは `frontend-stack.yaml` で別管理。ホームのroot objectはpublisherが作る `home.html`、検索・詳細等のSPA fallbackは `index.html`。初回切り替えは下記publisherの生成成功後に実施する:
 
 ```bash
 cd aws
@@ -80,23 +80,30 @@ aws cloudformation deploy \
   --capabilities CAPABILITY_IAM
 ```
 
-ビルド + 同期 + キャッシュ無効化:
+ホームは5冊の実表紙をHTMLに埋め込んで事前生成する。フロント変更時はpublisherも同じビルド成果物で更新する。リポジトリのルートで:
 
 ```bash
-cd ../frontend
-npm install
-npm run build
+npm --prefix frontend ci
+node scripts/build-home-publisher.mjs
+# 以下のassetsをアップロードしてからHomePublisherFunctionを更新する。
 BUCKET=$(aws cloudformation describe-stacks --stack-name booksearch-frontend \
   --query "Stacks[0].Outputs[?OutputKey=='FrontendBucketName'].OutputValue" --output text)
 DIST=$(aws cloudformation describe-stacks --stack-name booksearch-frontend \
   --query "Stacks[0].Outputs[?OutputKey=='FrontendDistributionId'].OutputValue" --output text)
-aws s3 sync dist/ s3://$BUCKET/ --delete --exclude ".DS_Store" --cache-control "public, max-age=300"
+aws s3 sync frontend/dist/ s3://$BUCKET/ --exclude index.html --exclude home.html --exclude ".DS_Store" --cache-control "public, max-age=300"
+aws s3 cp frontend/dist/index.html s3://$BUCKET/index.html --content-type text/html --cache-control no-cache
+# ここで aws/template.yaml をSAM build/deployし、HomePublisherFunctionも更新する。
+aws lambda invoke --function-name booksearch-home-publisher \
+  --cli-binary-format raw-in-base64-out --payload '{"force":true}' /tmp/booksearch-home-publish.json
+# FunctionErrorがなく、payloadがstatus=publishedであることを確認してから無効化する。
 aws cloudfront create-invalidation --distribution-id $DIST --paths "/*"
 ```
 
 現在の配信 URL: <https://d2uel8nex1m4w7.cloudfront.net>
 
 API base URL は `frontend/.env.production` で固定。差し替える場合は `VITE_API_BASE_URL` を書き換えてから `npm run build`。
+
+`home.html` と旧hash付きassetは削除しない。旧HTMLを開いているブラウザもそのassetを参照するため、`sync --delete` は使わない。publisherは毎時05分に週とclient templateのhashを確認し、変更時のみ更新する。画像取得・実decode・5冊の準備が失敗した場合は成功済みHTMLを上書きしない。配信待ち時間は最大5分のキャッシュTTLを含む。詳細と検証は `docs/featured_initial_html.md` を参照。
 
 ## E2E テスト
 

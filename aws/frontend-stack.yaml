@@ -31,7 +31,7 @@ Resources:
     Properties:
       DistributionConfig:
         Enabled: true
-        DefaultRootObject: index.html
+        DefaultRootObject: home.html
         PriceClass: PriceClass_200
         HttpVersion: http2
         Origins:

@@ -16,7 +16,7 @@ export default defineConfig({
     screenshot: 'only-on-failure',
   },
   webServer: process.env.PRIORITY_FRONTEND_URL ? undefined : {
-    command: 'npm --prefix ../frontend run build && npm --prefix ../frontend run preview -- --host 127.0.0.1 --port 4179',
+    command: 'npm --prefix ../frontend run build && npm --prefix ../frontend run build:home-render && npm --prefix ../frontend run preview -- --host 127.0.0.1 --port 4179',
     url: 'http://127.0.0.1:4179',
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
