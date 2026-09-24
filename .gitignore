@@ -7,44 +7,43 @@ __pycache__/
 .python-version
 
 # Go
-backend/booksearch-backend
-backend/*.exe
+app/backend/booksearch-backend
+app/backend/*.exe
 
 # Node / frontend
-frontend/node_modules/
-frontend/dist/
-frontend/tag-placement/dist/
-frontend/*.tsbuildinfo
-frontend/vite.config.js
-frontend/vite.config.d.ts
-tests/node_modules/
-tests/playwright-report/
-tests/test-results/
+**/node_modules/
+**/node_modules
+**/dist/
+**/*.tsbuildinfo
+**/playwright-report/
+**/test-results/
+**/.vite/
+**/.env
+**/.env.*
+!**/.env.example
 
 # Data / outputs (大きいファイル)
-outputs/
-runs/
-dataset/
+**/outputs/
+**/output/
+**/runs/
+**/dataset/
 *.pt
 *.db
 *.db-shm
 *.db-wal
-!aws/functions/go_api/library.db
-!aws/functions/lookup_worker/assets/library.db
-!aws/functions/yolo_worker/assets/yolo_model.pt
+!app/aws/functions/go_api/library.db
+!app/aws/functions/lookup_worker/assets/library.db
+!app/aws/functions/yolo_worker/assets/yolo_model.pt
 
 # Misc
 .claude/
-aws/.aws-sam/
+**/.aws-sam/
 .nvimlog
 .DS_Store
-.vercel
-.env
-.env.local
-.env.*.local
-*.key
-*.p12
-*.pfx
 
-# Vite local overrides
-frontend/.env.development.local
+# Archived presentation/demo renders remain local references, not repository
+# inputs.  Source material and verification notes stay trackable.
+archive/demos/**/qa/*
+!archive/demos/**/qa/verification.md
+archive/demos/**/references/
+archive/demos/**/references/*.mp4

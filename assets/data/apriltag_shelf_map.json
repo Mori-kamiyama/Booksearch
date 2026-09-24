@@ -1,0 +1,60 @@
+{
+  "dictionary": "DICT_APRILTAG_25h9",
+  "auto_distance_scale": 1.25,
+  "tags": {
+    "0": {
+      "expected_angle_deg": 180,
+      "angle_tolerance_deg": 35,
+      "quadrants": {
+        "top_left": "shelf-A-01",
+        "top_right": "shelf-B-01",
+        "bottom_right": "shelf-B-02",
+        "bottom_left": "shelf-A-02"
+      }
+    },
+    "1": {
+      "expected_angle_deg": 180,
+      "angle_tolerance_deg": 35,
+      "quadrants": {
+        "top_left": "shelf-A-02",
+        "top_right": "shelf-B-02",
+        "bottom_right": "shelf-B-03",
+        "bottom_left": "shelf-A-03"
+      }
+    },
+    "2": {
+      "expected_angle_deg": 180,
+      "angle_tolerance_deg": 35,
+      "quadrants": {
+        "top_left": "shelf-A-03",
+        "top_right": "shelf-B-03",
+        "bottom_right": "shelf-B-04",
+        "bottom_left": "shelf-A-04"
+      }
+    },
+    "3": {
+      "expected_angle_deg": 180,
+      "angle_tolerance_deg": 35,
+      "quadrants": {
+        "top_right": "shelf-A-01",
+        "bottom_right": "shelf-A-02"
+      }
+    },
+    "4": {
+      "expected_angle_deg": 180,
+      "angle_tolerance_deg": 35,
+      "quadrants": {
+        "top_right": "shelf-A-02",
+        "bottom_right": "shelf-A-03"
+      }
+    },
+    "5": {
+      "expected_angle_deg": 180,
+      "angle_tolerance_deg": 35,
+      "quadrants": {
+        "top_right": "shelf-A-03",
+        "bottom_right": "shelf-A-04"
+      }
+    }
+  }
+}

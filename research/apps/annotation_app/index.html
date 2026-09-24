@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>背表紙 校正台</title>
+  <style>
+    :root {
+      --ink: #101820;
+      --ink-soft: #18242d;
+      --paper: #eef0e8;
+      --paper-dim: #c9cec3;
+      --label: #f4e9bf;
+      --red: #d6533d;
+      --green: #2b7561;
+      --brass: #c3a55d;
+      --line: rgba(238, 240, 232, 0.18);
+      --danger: #e18672;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--paper);
+      background: var(--ink);
+      font-family: "BIZ UDPGothic", "Hiragino Sans", "Yu Gothic UI", sans-serif;
+    }
+    button, textarea, select { font: inherit; }
+    button:focus-visible, textarea:focus-visible, select:focus-visible {
+      outline: 3px solid var(--brass);
+      outline-offset: 2px;
+    }
+    .shell { min-height: 100vh; display: grid; grid-template-rows: auto 1fr; }
+    header {
+      min-height: 64px;
+      display: flex;
+      align-items: center;
+      gap: 20px;
+      padding: 12px 24px;
+      border-bottom: 1px solid var(--line);
+      background: var(--ink-soft);
+    }
+    h1 { margin: 0; font-size: 20px; font-weight: 500; letter-spacing: .04em; }
+    .progress-copy { color: var(--paper-dim); font-size: 14px; white-space: nowrap; }
+    .progress-track { flex: 1; height: 4px; background: rgba(238,240,232,.12); }
+    .progress-bar { height: 100%; width: 0; background: var(--brass); }
+    .header-actions { display: flex; gap: 8px; }
+    button, .download {
+      border: 1px solid var(--line);
+      border-radius: 0;
+      color: var(--paper);
+      background: transparent;
+      padding: 9px 12px;
+      text-decoration: none;
+      cursor: pointer;
+    }
+    button:hover, .download:hover { background: rgba(238,240,232,.08); }
+    button.primary { color: var(--ink); background: var(--label); border-color: var(--label); }
+    button.danger { color: var(--danger); }
+    main { display: grid; grid-template-columns: minmax(260px, 38vw) minmax(480px, 1fr); min-height: 0; }
+    .image-stage {
+      position: relative;
+      display: grid;
+      place-items: center;
+      min-height: calc(100vh - 64px);
+      padding: 28px;
+      background:
+        linear-gradient(90deg, transparent 49.8%, rgba(255,255,255,.025) 50%, transparent 50.2%),
+        #0b1218;
+      border-right: 1px solid var(--line);
+      overflow: hidden;
+    }
+    .image-stage img {
+      max-width: 88%;
+      max-height: calc(100vh - 150px);
+      object-fit: contain;
+      image-rendering: auto;
+      filter: drop-shadow(0 18px 28px rgba(0,0,0,.42));
+      transform: rotate(var(--rotation, 0deg)) scale(var(--zoom, 1));
+      transition: transform 120ms ease;
+    }
+    .image-tools { position: absolute; left: 18px; bottom: 18px; display: flex; gap: 6px; }
+    .workbench { padding: 20px 24px 28px; overflow: auto; max-height: calc(100vh - 64px); }
+    .queue-row { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: center; margin-bottom: 18px; }
+    select { color: var(--paper); background: var(--ink-soft); border: 1px solid var(--line); padding: 9px 10px; }
+    .book-heading { margin: 0 0 4px; color: var(--label); font-size: 24px; font-weight: 500; line-height: 1.35; }
+    .meta { color: var(--paper-dim); font-size: 13px; margin-bottom: 18px; }
+    .candidate-list { border-top: 1px solid var(--line); }
+    .candidate {
+      display: grid;
+      grid-template-columns: 44px minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: start;
+      padding: 14px 0;
+      border-bottom: 1px solid var(--line);
+    }
+    .key {
+      display: grid;
+      place-items: center;
+      width: 34px;
+      height: 34px;
+      color: var(--ink);
+      background: var(--paper-dim);
+      font-weight: 500;
+    }
+    .candidate h2 { margin: 0 0 7px; color: var(--paper-dim); font-size: 13px; font-weight: 500; }
+    .candidate pre { margin: 0; color: var(--paper); white-space: pre-wrap; overflow-wrap: anywhere; font-family: inherit; line-height: 1.55; }
+    .candidate.empty { opacity: .42; }
+    .use-button { min-width: 72px; }
+    .editor-header { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin: 20px 0 8px; }
+    .editor-label { display: flex; justify-content: space-between; gap: 12px; color: var(--label); flex: 1; }
+    .reuse-button { padding: 6px 9px; color: var(--label); white-space: nowrap; }
+    .reuse-button .shortcut { color: var(--ink); background: var(--paper-dim); padding: 1px 5px; margin-right: 5px; }
+    .reuse-button:disabled { opacity: .38; cursor: not-allowed; }
+    textarea {
+      width: 100%;
+      min-height: 150px;
+      resize: vertical;
+      border: 1px solid var(--brass);
+      border-radius: 0;
+      color: var(--ink);
+      background: var(--paper);
+      padding: 14px;
+      line-height: 1.6;
+    }
+    .flags { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0 18px; color: var(--paper-dim); }
+    .flags label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+    .save-row { display: flex; gap: 8px; align-items: center; }
+    .save-row .primary { flex: 1; padding-block: 12px; }
+    .status { min-height: 22px; margin-top: 10px; color: var(--paper-dim); font-size: 13px; }
+    .search-results { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 14px; }
+    .search-results h2 { font-size: 14px; margin: 0 0 8px; color: var(--paper-dim); }
+    .search-line { display: flex; gap: 8px; padding: 5px 0; font-size: 13px; }
+    .rank { color: var(--brass); min-width: 24px; }
+    .score { color: var(--paper-dim); margin-left: auto; }
+    .hidden { display: none !important; }
+    @media (max-width: 820px) {
+      header { flex-wrap: wrap; padding: 10px 14px; }
+      .progress-track { order: 3; flex-basis: 100%; }
+      main { grid-template-columns: 1fr; }
+      .image-stage { min-height: 44vh; border-right: 0; border-bottom: 1px solid var(--line); }
+      .image-stage img { max-height: 38vh; }
+      .workbench { max-height: none; padding: 18px 16px 28px; }
+    }
+    @media (prefers-reduced-motion: reduce) { .image-stage img { transition: none; } }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header>
+      <h1>背表紙 校正台</h1>
+      <div class="progress-copy" id="progressCopy">読み込み中</div>
+      <div class="progress-track" aria-hidden="true"><div class="progress-bar" id="progressBar"></div></div>
+      <div class="header-actions"><a class="download" href="/api/export">JSONLを書き出す</a></div>
+    </header>
+    <main>
+      <section class="image-stage" aria-label="背表紙画像">
+        <img id="spineImage" alt="校正対象の背表紙">
+        <div class="image-tools">
+          <button type="button" id="rotateButton">90°回転</button>
+          <button type="button" id="zoomOut" aria-label="縮小">−</button>
+          <button type="button" id="zoomIn" aria-label="拡大">＋</button>
+        </div>
+      </section>
+      <section class="workbench">
+        <div class="queue-row">
+          <select id="filter" aria-label="表示対象">
+            <option value="comparison">比較結果あり</option>
+            <option value="unreviewed">未校正</option>
+            <option value="all">すべて</option>
+            <option value="accepted">校正済み</option>
+            <option value="skipped">除外</option>
+          </select>
+          <button type="button" id="prevButton">前へ</button>
+          <button type="button" id="nextButton">次へ</button>
+        </div>
+        <h2 class="book-heading" id="bookTitle">—</h2>
+        <div class="meta" id="meta"></div>
+        <div class="candidate-list">
+          <article class="candidate" id="loraCandidate">
+            <span class="key">1</span><div><h2>LoRA全文転記</h2><pre id="loraText"></pre></div><button class="use-button" data-source="lora">使う</button>
+          </article>
+          <article class="candidate" id="geminiCandidate">
+            <span class="key">2</span><div><h2>Gemini書名</h2><pre id="geminiText"></pre></div><button class="use-button" data-source="gemini">使う</button>
+          </article>
+          <article class="candidate" id="pseudoCandidate">
+            <span class="key">3</span><div><h2>現在の疑似ラベル</h2><pre id="pseudoText"></pre></div><button class="use-button" data-source="pseudo">使う</button>
+          </article>
+          <article class="candidate" id="baseCandidate">
+            <span class="key">4</span><div><h2>学習前PaddleOCR-VL</h2><pre id="baseText"></pre></div><button class="use-button" data-source="base">使う</button>
+          </article>
+        </div>
+        <div class="editor-header">
+          <label class="editor-label" for="transcription"><span>確定する文字列</span><span>⌘/Ctrl + Enterで保存</span></label>
+          <button type="button" class="reuse-button" id="reuseButton" disabled title="直前に保存した文字列を入力欄へ貼り付ける"><span class="shortcut">0</span>直前を貼る</button>
+        </div>
+        <textarea id="transcription" spellcheck="false" placeholder="候補を選ぶか、画像どおりに修正"></textarea>
+        <div class="flags">
+          <label><input type="checkbox" value="multi_spine"> 2冊以上</label>
+          <label><input type="checkbox" value="unreadable"> 読めない</label>
+          <label><input type="checkbox" value="bad_crop"> crop不良</label>
+        </div>
+        <div class="save-row">
+          <button type="button" class="primary" id="saveButton">保存して次へ</button>
+          <button type="button" class="danger" id="skipButton">除外</button>
+        </div>
+        <div class="status" id="status" aria-live="polite"></div>
+        <div class="search-results" id="searchResults"></div>
+      </section>
+    </main>
+  </div>
+  <script>
+    const state = { items: [], queue: [], position: 0, current: null, source: "edited", rotation: 0, zoom: 1, lastTranscription: "" };
+    const $ = (id) => document.getElementById(id);
+    const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
+
+    async function api(path, options) {
+      const response = await fetch(path, options);
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+      return payload;
+    }
+    function rebuildQueue(keepIndex = null) {
+      const filter = $("filter").value;
+      state.queue = state.items.filter(item => {
+        if (filter === "all") return true;
+        if (filter === "comparison") return item.has_comparison && item.status === "unreviewed";
+        return item.status === filter;
+      });
+      const found = keepIndex == null ? -1 : state.queue.findIndex(item => item.index === keepIndex);
+      state.position = found >= 0 ? found : Math.min(state.position, Math.max(0, state.queue.length - 1));
+      updateProgress();
+    }
+    function updateProgress(stats) {
+      const accepted = stats?.accepted ?? state.items.filter(item => item.status === "accepted").length;
+      const skipped = stats?.skipped ?? state.items.filter(item => item.status === "skipped").length;
+      const done = accepted + skipped;
+      $("progressCopy").textContent = `${done} / ${state.items.length}　確定 ${accepted}　除外 ${skipped}`;
+      $("progressBar").style.width = `${state.items.length ? done / state.items.length * 100 : 0}%`;
+    }
+    function candidate(id, text) {
+      $(id + "Text").textContent = text || "候補なし";
+      $(id + "Candidate").classList.toggle("empty", !text);
+      $(id + "Candidate").querySelector("button").disabled = !text;
+    }
+    function searchMarkup(rows, label) {
+      if (!rows?.length) return "";
+      return `<h2>${escapeHtml(label)}</h2>` + rows.map(row => `<div class="search-line"><span class="rank">${row.rank}</span><span>${escapeHtml(row.title)}</span><span class="score">${Number(row.score).toFixed(3)}</span></div>`).join("");
+    }
+    async function loadCurrent() {
+      if (!state.queue.length) {
+        $("status").textContent = "この条件の画像はありません";
+        return;
+      }
+      const summary = state.queue[state.position];
+      const item = await api(`/api/items/${summary.index}`);
+      state.current = item;
+      state.source = item.annotation?.selected_source || (item.lora_prediction ? "lora" : item.pseudo_transcription ? "pseudo" : item.gemini_prediction ? "gemini" : "edited");
+      state.rotation = 0; state.zoom = 1; applyImageTransform();
+      $("spineImage").src = item.image_url;
+      $("spineImage").alt = `${item.catalog_title || item.image_name} の背表紙`;
+      $("bookTitle").textContent = item.catalog_title || "書名未設定";
+      $("meta").textContent = `${item.image_name}　DB ${item.library_db_id ?? "—"}　match ${item.match_score?.toFixed?.(3) ?? "—"}　${item.split || "—"}`;
+      candidate("lora", item.lora_prediction);
+      candidate("gemini", item.gemini_prediction);
+      candidate("pseudo", item.pseudo_transcription);
+      candidate("base", item.base_prediction);
+      $("transcription").value = item.annotation?.transcription || item.lora_prediction || item.pseudo_transcription || item.gemini_prediction || "";
+      document.querySelectorAll(".flags input").forEach(input => input.checked = (item.annotation?.flags || []).includes(input.value));
+      $("searchResults").innerHTML = searchMarkup(item.lora_candidates, "LoRA → 図書DB") + searchMarkup(item.gemini_candidates, "Gemini → 図書DB");
+      $("status").textContent = item.annotation ? `${item.annotation.status === "accepted" ? "校正済み" : "除外済み"}・${state.position + 1}/${state.queue.length}` : `${state.position + 1}/${state.queue.length}`;
+    }
+    function choose(source) {
+      if (!state.current) return;
+      const values = { lora: state.current.lora_prediction, gemini: state.current.gemini_prediction, pseudo: state.current.pseudo_transcription, base: state.current.base_prediction };
+      if (values[source]) { $("transcription").value = values[source]; state.source = source; $("transcription").focus(); }
+    }
+    function setLastTranscription(value) {
+      state.lastTranscription = String(value || "").trim();
+      $("reuseButton").disabled = !state.lastTranscription;
+    }
+    function reuseLastTranscription() {
+      if (!state.lastTranscription) return;
+      $("transcription").value = state.lastTranscription;
+      state.source = "edited";
+      $("transcription").focus();
+      $("status").textContent = "直前に保存した文字列を貼り付けました";
+    }
+    async function save(status) {
+      if (!state.current) return;
+      const payload = {
+        status,
+        transcription: $("transcription").value,
+        selected_source: state.source,
+        flags: [...document.querySelectorAll(".flags input:checked")].map(input => input.value)
+      };
+      $("status").textContent = "保存中";
+      try {
+        const result = await api(`/api/items/${state.current.index}/annotation`, { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(payload) });
+        const summary = state.items.find(item => item.index === state.current.index);
+        summary.status = status;
+        if (status === "accepted") setLastTranscription(payload.transcription);
+        updateProgress(result.stats);
+        const oldPosition = state.position;
+        rebuildQueue();
+        state.position = Math.min(oldPosition, Math.max(0, state.queue.length - 1));
+        await loadCurrent();
+      } catch (error) { $("status").textContent = error.message; }
+    }
+    function move(delta) {
+      if (!state.queue.length) return;
+      state.position = Math.max(0, Math.min(state.queue.length - 1, state.position + delta));
+      loadCurrent();
+    }
+    function applyImageTransform() {
+      $("spineImage").style.setProperty("--rotation", `${state.rotation}deg`);
+      $("spineImage").style.setProperty("--zoom", state.zoom);
+    }
+    async function init() {
+      const [items, latest] = await Promise.all([api("/api/items"), api("/api/latest-accepted")]);
+      state.items = items;
+      setLastTranscription(latest.transcription);
+      rebuildQueue();
+      await loadCurrent();
+    }
+    document.querySelectorAll(".use-button").forEach(button => button.addEventListener("click", () => choose(button.dataset.source)));
+    $("filter").addEventListener("change", () => { rebuildQueue(); loadCurrent(); });
+    $("prevButton").addEventListener("click", () => move(-1));
+    $("nextButton").addEventListener("click", () => move(1));
+    $("saveButton").addEventListener("click", () => save("accepted"));
+    $("skipButton").addEventListener("click", () => save("skipped"));
+    $("reuseButton").addEventListener("click", reuseLastTranscription);
+    $("transcription").addEventListener("input", () => { state.source = "edited"; });
+    $("rotateButton").addEventListener("click", () => { state.rotation = (state.rotation + 90) % 360; applyImageTransform(); });
+    $("zoomIn").addEventListener("click", () => { state.zoom = Math.min(2.5, state.zoom + .2); applyImageTransform(); });
+    $("zoomOut").addEventListener("click", () => { state.zoom = Math.max(.5, state.zoom - .2); applyImageTransform(); });
+    document.addEventListener("keydown", event => {
+      if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); save("accepted"); return; }
+      if (event.target.matches("textarea, select, input")) return;
+      if (["1","2","3","4"].includes(event.key)) choose(({"1":"lora","2":"gemini","3":"pseudo","4":"base"})[event.key]);
+      if (event.key === "0") reuseLastTranscription();
+      if (event.key.toLowerCase() === "s") save("skipped");
+      if (event.key === "ArrowLeft") move(-1);
+      if (event.key === "ArrowRight") move(1);
+    });
+    init().catch(error => { $("status").textContent = error.message; });
+  </script>
+</body>
+</html>

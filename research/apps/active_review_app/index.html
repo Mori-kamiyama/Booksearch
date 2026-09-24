@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>背表紙 学習キュー</title>
+  <style>
+    :root {
+      --ink: #101820; --ink-soft: #18242d; --stage: #0b1218;
+      --paper: #eef0e8; --paper-dim: #bdc7c1; --label: #f4e9bf;
+      --learn: #55c7b4; --learn-dark: #174f48; --brass: #c3a55d;
+      --line: rgba(238,240,232,.18); --danger: #e18672;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; color: var(--paper); background: var(--ink); font-family: "BIZ UDPGothic", "Hiragino Sans", "Yu Gothic UI", sans-serif; }
+    button, textarea, select { font: inherit; }
+    button:focus-visible, textarea:focus-visible, select:focus-visible, a:focus-visible { outline: 3px solid var(--learn); outline-offset: 2px; }
+    .shell { min-height: 100vh; display: grid; grid-template-rows: auto 1fr; }
+    header { min-height: 64px; display: flex; align-items: center; gap: 18px; padding: 11px 22px; border-bottom: 1px solid var(--line); background: var(--ink-soft); }
+    h1 { margin: 0; font-size: 20px; font-weight: 500; letter-spacing: .03em; white-space: nowrap; }
+    .learn-mark { display: inline-block; width: 9px; height: 22px; margin-right: 9px; vertical-align: -4px; background: var(--learn); }
+    .progress-copy { color: var(--paper-dim); font-size: 13px; white-space: nowrap; }
+    .progress-track { flex: 1; height: 4px; background: rgba(238,240,232,.12); }
+    .progress-bar { height: 100%; width: 0; background: var(--learn); }
+    .header-actions { display: flex; gap: 7px; }
+    button, .download { border: 1px solid var(--line); border-radius: 0; color: var(--paper); background: transparent; padding: 9px 11px; text-decoration: none; cursor: pointer; }
+    button:hover, .download:hover { background: rgba(238,240,232,.08); }
+    button.primary { color: var(--ink); background: var(--label); border-color: var(--label); }
+    button.accept { color: var(--ink); background: var(--learn); border-color: var(--learn); }
+    button.danger { color: var(--danger); }
+    main { display: grid; grid-template-columns: minmax(280px, 40vw) minmax(500px, 1fr); min-height: 0; }
+    .image-stage { position: relative; display: grid; place-items: center; min-height: calc(100vh - 64px); padding: 28px; background: linear-gradient(90deg, transparent 49.8%, rgba(255,255,255,.025) 50%, transparent 50.2%), var(--stage); border-right: 1px solid var(--line); overflow: hidden; }
+    .image-stage img { max-width: 90%; max-height: calc(100vh - 145px); object-fit: contain; filter: drop-shadow(0 18px 28px rgba(0,0,0,.45)); transform: rotate(var(--rotation, 0deg)) scale(var(--zoom, 1)); transition: transform 120ms ease; }
+    .image-tools { position: absolute; left: 18px; bottom: 18px; display: flex; gap: 6px; }
+    .workbench { padding: 18px 24px 28px; overflow: auto; max-height: calc(100vh - 64px); }
+    .queue-row { display: grid; grid-template-columns: 1fr auto auto; gap: 9px; align-items: center; margin-bottom: 15px; }
+    select { color: var(--paper); background: var(--ink-soft); border: 1px solid var(--line); padding: 9px; }
+    .book-heading { margin: 0 0 4px; color: var(--label); font-size: 22px; font-weight: 500; line-height: 1.35; }
+    .meta { color: var(--paper-dim); font-size: 13px; margin-bottom: 14px; }
+    .model-strip { border: 1px solid var(--learn); background: rgba(85,199,180,.07); padding: 14px; }
+    .candidate-head { display: flex; align-items: center; gap: 9px; margin-bottom: 9px; }
+    .key { display: grid; place-items: center; width: 30px; height: 30px; color: var(--ink); background: var(--learn); font-weight: 600; }
+    .candidate-head h2 { flex: 1; margin: 0; color: var(--learn); font-size: 14px; font-weight: 500; }
+    .model-strip pre, .reference pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.55; }
+    .reference-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; margin-top: 10px; background: var(--line); border: 1px solid var(--line); }
+    .reference { min-width: 0; padding: 12px; background: var(--ink); }
+    .reference h2 { margin: 0 0 7px; color: var(--paper-dim); font-size: 12px; font-weight: 500; }
+    .reference button { margin-top: 9px; padding: 6px 9px; font-size: 12px; }
+    .editor-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 18px 0 7px; color: var(--label); }
+    .preference-note { color: var(--paper-dim); font-size: 12px; }
+    .preference-note.changed { color: var(--learn); }
+    textarea { width: 100%; min-height: 140px; resize: vertical; border: 1px solid var(--brass); border-radius: 0; color: var(--ink); background: var(--paper); padding: 13px; line-height: 1.55; }
+    .flags { display: flex; flex-wrap: wrap; gap: 14px; margin: 12px 0 16px; color: var(--paper-dim); }
+    .flags label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+    .save-row { display: grid; grid-template-columns: 1.2fr 1fr auto; gap: 8px; }
+    .save-row button { padding-block: 12px; }
+    .status { min-height: 22px; margin-top: 10px; color: var(--paper-dim); font-size: 13px; }
+    .hidden { display: none !important; }
+    @media (max-width: 880px) {
+      header { flex-wrap: wrap; padding: 10px 14px; }
+      .progress-track { order: 3; flex-basis: 100%; }
+      .header-actions { width: 100%; }
+      main { grid-template-columns: 1fr; }
+      .image-stage { min-height: 42vh; border-right: 0; border-bottom: 1px solid var(--line); }
+      .image-stage img { max-height: 36vh; }
+      .workbench { max-height: none; padding: 16px; }
+      .save-row { grid-template-columns: 1fr; }
+    }
+    @media (prefers-reduced-motion: reduce) { .image-stage img { transition: none; } }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header>
+      <h1><span class="learn-mark"></span>背表紙 学習キュー</h1>
+      <div class="progress-copy" id="progressCopy">読み込み中</div>
+      <div class="progress-track" aria-hidden="true"><div class="progress-bar" id="progressBar"></div></div>
+      <div class="header-actions">
+        <a class="download" href="/api/export/sft">SFTを書き出す</a>
+        <a class="download" href="/api/export/preferences">DPOペアを書き出す</a>
+      </div>
+    </header>
+    <main>
+      <section class="image-stage" aria-label="背表紙画像">
+        <img id="spineImage" alt="校正対象の背表紙">
+        <div class="image-tools">
+          <button type="button" id="rotateButton">90°回転</button>
+          <button type="button" id="zoomOut" aria-label="縮小">−</button>
+          <button type="button" id="zoomIn" aria-label="拡大">＋</button>
+        </div>
+      </section>
+      <section class="workbench">
+        <div class="queue-row">
+          <select id="filter" aria-label="表示対象">
+            <option value="unreviewed">未校正</option>
+            <option value="all">すべて</option>
+            <option value="accepted">校正済み</option>
+            <option value="corrected">修正あり</option>
+            <option value="skipped">除外</option>
+          </select>
+          <button type="button" id="prevButton">前へ</button>
+          <button type="button" id="nextButton">次へ</button>
+        </div>
+        <h2 class="book-heading" id="bookTitle">—</h2>
+        <div class="meta" id="meta"></div>
+
+        <article class="model-strip">
+          <div class="candidate-head"><span class="key">A</span><h2>人手SFTモデルの提案</h2><button type="button" id="useModel">入力欄へ</button></div>
+          <pre id="modelText"></pre>
+        </article>
+        <div class="reference-grid">
+          <article class="reference"><h2>蔵書DBの書名</h2><pre id="catalogText"></pre><button type="button" id="useCatalog">書名を使う</button></article>
+          <article class="reference"><h2>以前の疑似ラベル</h2><pre id="pseudoText"></pre><button type="button" id="usePseudo">疑似ラベルを使う</button></article>
+        </div>
+
+        <div class="editor-head"><label for="transcription">正解にする文字列</label><span class="preference-note" id="preferenceNote">モデルと同じ：SFTのみ</span></div>
+        <textarea id="transcription" spellcheck="false" placeholder="画像に見える文字へ修正"></textarea>
+        <div class="flags">
+          <label><input type="checkbox" value="multi_spine"> 2冊以上</label>
+          <label><input type="checkbox" value="unreadable"> 読めない</label>
+          <label><input type="checkbox" value="bad_crop"> crop不良</label>
+        </div>
+        <div class="save-row">
+          <button type="button" class="accept" id="acceptButton">そのまま正解 A</button>
+          <button type="button" class="primary" id="saveButton">修正を保存 ⌘↵</button>
+          <button type="button" class="danger" id="skipButton">除外 S</button>
+        </div>
+        <div class="status" id="status" aria-live="polite"></div>
+      </section>
+    </main>
+  </div>
+  <script>
+    const state = { items: [], queue: [], position: 0, current: null, rotation: 0, zoom: 1 };
+    const $ = id => document.getElementById(id);
+    async function api(path, options) {
+      const response = await fetch(path, options); const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`); return payload;
+    }
+    function rebuildQueue(keepIndex = null) {
+      const filter = $("filter").value;
+      state.queue = state.items.filter(item => filter === "all" || (filter === "corrected" ? item.corrected : item.status === filter));
+      const found = keepIndex == null ? -1 : state.queue.findIndex(item => item.index === keepIndex);
+      state.position = found >= 0 ? found : Math.min(state.position, Math.max(0, state.queue.length - 1));
+    }
+    function updateProgress(stats) {
+      const accepted = stats?.accepted ?? state.items.filter(item => item.status === "accepted").length;
+      const corrected = stats?.corrected ?? state.items.filter(item => item.corrected).length;
+      const skipped = stats?.skipped ?? state.items.filter(item => item.status === "skipped").length;
+      const done = accepted + skipped;
+      $("progressCopy").textContent = `${done} / ${state.items.length}　正解 ${accepted}　修正 ${corrected}　除外 ${skipped}`;
+      $("progressBar").style.width = `${state.items.length ? done / state.items.length * 100 : 0}%`;
+    }
+    function updatePreferenceNote() {
+      if (!state.current) return;
+      const changed = $("transcription").value.trim() !== state.current.model_prediction.trim();
+      $("preferenceNote").textContent = changed ? "修正あり：SFT + DPOペア" : "モデルと同じ：SFTのみ";
+      $("preferenceNote").classList.toggle("changed", changed);
+    }
+    function useValue(value) { $("transcription").value = value || ""; updatePreferenceNote(); $("transcription").focus(); }
+    async function loadCurrent() {
+      if (!state.queue.length) { state.current = null; $("status").textContent = "この条件の画像はありません"; return; }
+      const item = await api(`/api/items/${state.queue[state.position].index}`); state.current = item;
+      state.rotation = 0; state.zoom = 1; applyImageTransform();
+      $("spineImage").src = item.image_url; $("spineImage").alt = `${item.catalog_title || item.image_name} の背表紙`;
+      $("bookTitle").textContent = item.catalog_title || "書名未設定";
+      $("meta").textContent = `${item.image_name}　DB ${item.library_db_id ?? "—"}　match ${item.match_score?.toFixed?.(3) ?? "—"}　ランダム ${item.random_rank + 1}/500`;
+      $("modelText").textContent = item.model_prediction || "出力なし";
+      $("catalogText").textContent = [item.catalog_title, ...(item.catalog_authors || [])].filter(Boolean).join("\n") || "参照なし";
+      $("pseudoText").textContent = item.pseudo_transcription || "参照なし";
+      $("transcription").value = item.annotation?.transcription || item.model_prediction;
+      document.querySelectorAll(".flags input").forEach(input => input.checked = (item.annotation?.flags || []).includes(input.value));
+      updatePreferenceNote();
+      $("status").textContent = item.annotation ? `${item.annotation.status === "accepted" ? "校正済み" : "除外済み"}・${state.position + 1}/${state.queue.length}` : `${state.position + 1}/${state.queue.length}`;
+    }
+    async function save(status, acceptModel = false) {
+      if (!state.current) return;
+      if (acceptModel) $("transcription").value = state.current.model_prediction;
+      const payload = { status, transcription: $("transcription").value, flags: [...document.querySelectorAll(".flags input:checked")].map(input => input.value) };
+      $("status").textContent = "保存中";
+      try {
+        const result = await api(`/api/items/${state.current.index}/annotation`, { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(payload) });
+        const summary = state.items.find(item => item.index === state.current.index); summary.status = status; summary.corrected = result.annotation.corrected;
+        updateProgress(result.stats); const oldPosition = state.position; rebuildQueue(); state.position = Math.min(oldPosition, Math.max(0, state.queue.length - 1)); await loadCurrent();
+      } catch (error) { $("status").textContent = error.message; }
+    }
+    function move(delta) { if (!state.queue.length) return; state.position = Math.max(0, Math.min(state.queue.length - 1, state.position + delta)); loadCurrent(); }
+    function applyImageTransform() { $("spineImage").style.setProperty("--rotation", `${state.rotation}deg`); $("spineImage").style.setProperty("--zoom", state.zoom); }
+    async function init() { state.items = await api("/api/items"); updateProgress(); rebuildQueue(); await loadCurrent(); }
+    $("filter").addEventListener("change", () => { rebuildQueue(); loadCurrent(); });
+    $("prevButton").addEventListener("click", () => move(-1)); $("nextButton").addEventListener("click", () => move(1));
+    $("useModel").addEventListener("click", () => useValue(state.current?.model_prediction));
+    $("useCatalog").addEventListener("click", () => useValue(state.current?.catalog_title));
+    $("usePseudo").addEventListener("click", () => useValue(state.current?.pseudo_transcription));
+    $("acceptButton").addEventListener("click", () => save("accepted", true));
+    $("saveButton").addEventListener("click", () => save("accepted")); $("skipButton").addEventListener("click", () => save("skipped"));
+    $("transcription").addEventListener("input", updatePreferenceNote);
+    $("rotateButton").addEventListener("click", () => { state.rotation = (state.rotation + 90) % 360; applyImageTransform(); });
+    $("zoomIn").addEventListener("click", () => { state.zoom = Math.min(2.5, state.zoom + .2); applyImageTransform(); });
+    $("zoomOut").addEventListener("click", () => { state.zoom = Math.max(.5, state.zoom - .2); applyImageTransform(); });
+    document.addEventListener("keydown", event => {
+      if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); save("accepted"); return; }
+      if (event.target.matches("textarea, select, input")) return;
+      if (event.key.toLowerCase() === "a") save("accepted", true);
+      if (event.key.toLowerCase() === "s") save("skipped");
+      if (event.key === "ArrowLeft") move(-1); if (event.key === "ArrowRight") move(1);
+    });
+    init().catch(error => { $("status").textContent = error.message; });
+  </script>
+</body>
+</html>
