@@ -54,20 +54,14 @@ Resources:
     Type: AWS::S3::Bucket
     Properties:
       BucketName: !Sub ${ProjectName}-${AWS::AccountId}-${AWS::Region}
+      VersioningConfiguration:
+        Status: Enabled
       LifecycleConfiguration:
         Rules:
-          - Id: ExpireUploads
+          - Id: AbortIncompleteMultipartUploads
             Status: Enabled
-            Prefix: uploads/
-            ExpirationInDays: 30
-          - Id: ExpireCrops
-            Status: Enabled
-            Prefix: crops/
-            ExpirationInDays: 30
-          - Id: ExpireLiveFrames
-            Status: Enabled
-            Prefix: live/
-            ExpirationInDays: 7
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
       CorsConfiguration:
         CorsRules:
           - AllowedHeaders: ['*']
@@ -242,7 +236,7 @@ Resources:
               StringEquals:
                 AWS:SourceAccount: !Ref AWS::AccountId
               ArnLike:
-                # Keep this policy limited to the six alarms below. Do not add
+                # Keep this policy limited to the alarms below. Do not add
                 # an explicit Alarm -> AlarmTopicPolicy DependsOn: it would
                 # introduce a dependency cycle through AlarmTopic.
                 AWS:SourceArn:
@@ -251,6 +245,11 @@ Resources:
                   - !GetAtt LookupQueueAgeAlarm.Arn
                   - !GetAtt YoloDLQAlarm.Arn
                   - !GetAtt OcrDLQAlarm.Arn
+                  - !GetAtt HomePublisherErrorAlarm.Arn
+                  - !GetAtt MaintenanceErrorAlarm.Arn
+                  - !GetAtt FeaturedStaleAlarm.Arn
+                  - !GetAtt MaintenanceMissingAlarm.Arn
+                  - !GetAtt StalledJobsSkippedAlarm.Arn
                   - !GetAtt LookupDLQAlarm.Arn
 
   YoloQueueAgeAlarm:
@@ -377,6 +376,91 @@ Resources:
         AllowHeaders: ['*']
         AllowMethods: [GET, POST, OPTIONS]
 
+  HomePublisherErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref HomePublisherFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+      OKActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+
+  MaintenanceErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref MaintenanceFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+      OKActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+
+  FeaturedStaleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      Namespace: Booksearch/Operations
+      MetricName: FeaturedStale
+      Dimensions:
+        - Name: Project
+          Value: !Ref ProjectName
+      Statistic: Maximum
+      Period: 3600
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: breaching
+      AlarmActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+      OKActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+
+  MaintenanceMissingAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      Namespace: Booksearch/Operations
+      MetricName: MaintenanceHealthy
+      Dimensions:
+        - Name: Project
+          Value: !Ref ProjectName
+      Statistic: Maximum
+      Period: 3600
+      EvaluationPeriods: 3
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+      OKActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+
+  StalledJobsSkippedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      Namespace: Booksearch/Operations
+      MetricName: StalledJobsSkipped
+      Dimensions:
+        - Name: Project
+          Value: !Ref ProjectName
+      Statistic: Maximum
+      Period: 3600
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+      OKActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+
   # ---------- Lambdas ----------
   HomePublisherFunction:
     Type: AWS::Serverless::Function
@@ -417,6 +501,46 @@ Resources:
           Properties:
             Schedule: cron(5 * * * ? *)
             Input: '{}'
+            Enabled: true
+
+  MaintenanceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ProjectName}-maintenance
+      CodeUri: functions/maintenance/
+      Handler: handler.handler
+      Runtime: python3.12
+      Architectures: [arm64]
+      MemorySize: 256
+      Timeout: 120
+      Environment:
+        Variables:
+          FRONTEND_BUCKET: !Sub ${ProjectName}-web-${AWS::AccountId}-${AWS::Region}
+      Policies:
+        - DynamoDBReadPolicy: { TableName: !Ref JobsTable }
+        - DynamoDBReadPolicy: { TableName: !Ref ScanTasksTable }
+        - DynamoDBReadPolicy: { TableName: !Ref CropsTable }
+        - Statement:
+            - Effect: Allow
+              Action: dynamodb:UpdateItem
+              Resource: !GetAtt JobsTable.Arn
+            - Effect: Allow
+              Action: dynamodb:ConditionCheckItem
+              Resource: [!GetAtt ScanTasksTable.Arn, !GetAtt CropsTable.Arn]
+            - Effect: Allow
+              Action: s3:GetObject
+              Resource: !Sub arn:${AWS::Partition}:s3:::${ProjectName}-web-${AWS::AccountId}-${AWS::Region}/home.html
+            - Effect: Allow
+              Action: cloudwatch:PutMetricData
+              Resource: '*'
+              Condition:
+                StringEquals:
+                  cloudwatch:namespace: Booksearch/Operations
+      Events:
+        HourlyMaintenance:
+          Type: Schedule
+          Properties:
+            Schedule: cron(35 * * * ? *)
             Enabled: true
 
   ApiFunction:
