@@ -45,3 +45,12 @@ uv run --no-project --with boto3 python aws/scripts/cleanup_orphan_images.py --b
 - SNS email購読はPendingConfirmation。受信者の確認と通知到達検証は未完了。
 - 再実行は `expiration={fresh:97}, featured_stale=false`。期限切れ処理の重複更新なし。S3 versioning Enabled、一律失効ルールなし、11 alarmの障害/復旧通知接続、毎時schedule ENABLEDを確認。
 - CloudFormation最終状態はUPDATE_COMPLETE。実metricはFeaturedStale=0、MaintenanceHealthy=1、StalledJobsSkipped=0。新設alarmは初期データ不足を異常として扱うため、初回metricの評価反映まで一時的にALARMとなる。
+
+## メールを保留した状態での実行確認
+
+メールの再送・設定変更はユーザー判断で停止。運用処理はメール購読と独立して継続する。
+
+- 本番maintenance再実行成功: `expiration={fresh:97}, featured_stale=false`。新たな期限切れ対象なし。
+- 画像整理はdry-runで候補0件を確認後、`--apply`も正常終了（削除0件）。削除・復元そのものの検証は上記のテストで実施済みであり、本番画像の削除実績とは区別する。
+- CloudWatchの11 alarmすべてOK。初期のデータ不足状態も解消。
+- 自動実行はジョブ期限切れとおすすめ監視。画像整理は引き続き手動実行。
