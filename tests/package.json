@@ -7,7 +7,8 @@
     "report": "playwright show-report",
     "test:live": "playwright test --config=playwright.config.ts",
     "measure:featured": "node measure-featured.mjs",
-    "measure:home": "node measure-home.mjs"
+    "measure:home": "node measure-home.mjs",
+    "test:camera": "playwright test --config=playwright.camera.config.ts"
   },
   "devDependencies": {
     "@playwright/test": "^1.50.0"

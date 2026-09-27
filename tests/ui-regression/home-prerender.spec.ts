@@ -12,10 +12,12 @@ const snapshot = {
     thumbnail: cover, info_link: null,
   })),
 }
+const frontend = process.env.TEST_FRONTEND_DIR ?? '../frontend'
+const homeURL = `${process.env.PRIORITY_FRONTEND_URL ?? 'http://127.0.0.1:4179'}/`
 let home: string
 test.beforeAll(async () => {
-  const { renderHome } = await import(pathToFileURL(path.resolve('../frontend/.home-render/entry-home.js')).href)
-  const template = await readFile('../frontend/dist/index.html', 'utf8')
+  const { renderHome } = await import(pathToFileURL(path.resolve(frontend, '.home-render/entry-home.js')).href)
+  const template = await readFile(path.join(frontend, 'dist/index.html'), 'utf8')
   home = template.replace('<div id="root"></div>', `<div id="root" data-prerendered="home">${renderHome(snapshot)}</div>`)
     .replace('</body>', `<script type="application/json" id="featured-bootstrap">${JSON.stringify(snapshot)}</script></body>`)
 })
@@ -26,8 +28,8 @@ test('all five covers are present without JavaScript or API requests', async ({ 
     const page = await context.newPage()
     const apiCalls: string[] = []
     page.on('request', request => { if (request.url().includes('/api/')) apiCalls.push(request.url()) })
-    await page.route('http://127.0.0.1:4179/', route => route.fulfill({ contentType: 'text/html', body: home }))
-    await page.goto('http://127.0.0.1:4179/')
+    await page.route(homeURL, route => route.fulfill({ contentType: 'text/html', body: home }))
+    await page.goto(homeURL)
     for (const book of snapshot.books) await expect(page.getByRole('button', { name: book.title, exact: true })).toBeVisible()
     const images = page.locator('button img[src^="data:image/"]')
     await expect(images).toHaveCount(5)
@@ -43,7 +45,7 @@ test('hydration preserves the covers and enables search without fetching recomme
   page.on('pageerror', error => errors.push(error.message))
   page.on('console', message => { if (message.type() === 'error') errors.push(message.text()) })
   page.on('request', request => { if (request.url().includes('/api/books/featured')) featuredRequests.push(request.url()) })
-  await page.route('http://127.0.0.1:4179/', route => route.fulfill({ contentType: 'text/html', body: home }))
+  await page.route(homeURL, route => route.fulfill({ contentType: 'text/html', body: home }))
   await page.route('**/api/books/search?**', route => route.fulfill({ json: { books: [], total: 0 } }))
   await page.goto('/')
   await expect(page.getByRole('button', { name: snapshot.books[0].title, exact: true })).toBeVisible()

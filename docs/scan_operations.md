@@ -50,3 +50,15 @@ OUTPUT=/tmp/booksearch-featured-timing.json npm run measure:featured
 ```
 
 20回を直列に測定し、毎回ブラウザcontextと保存領域を新しくします。APIを事前に取得するため、サーバーcold startの測定ではありません。最初のおすすめの文字が表示されるまでの時間、document受信、DOMContentLoaded、API要求、JS転送量を記録します。表紙画像の全件完了は待ちません。CPU/回線の制限はなく、測定中に他のブラウザテストを走らせない条件で比較します。
+
+## ライブスキャン時の同時実行枠（2026-09-27）
+
+東京リージョンのLambda上限は10。実動画スキャン時（21:13 JST）にYOLOの同時実行が10へ達し、同じ1分間でAPIのThrottlesが19、dispatcherが7発生した。503はこの枠競合によるものと判断した。
+
+YOLO/OCR/lookupのSQS event source mappingそれぞれに `ScalingConfig.MaximumConcurrency: 2` を設定し、本番へ反映。3ワーカー合計最大6としてAPI・dispatcherの余地を作る。これはAPIの予約枠を保証するものではなく、他の処理・利用増加時は上限引き上げが必要。AWSの[MaximumConcurrency設定](https://docs.aws.amazon.com/lambda/latest/dg/services-sqs-scaling.html)を使用する。
+
+Service Quotas `lambda / L-B99A9384` は現在10、Adjustable=true。増枠申請は未実施。まず50程度への増枠を検討し、承認後はAPI用の予約枠を確保してから各ワーカーの並列数を実測で調整する。現在のworkerはRecordsを順番に処理するため、BatchSizeを5にするだけでは5並列にはならない。OCRの外部API制限も別途守る。
+
+フレーム初期化はsession IDとfilenameから一定のキーを生成し、条件付き書き込みで重複を防ぐ。PUTは同じ画像、commitは既存のdurable taskを用いて冪等に再試行。フロントは一時エラーに最大4回（待機0.5/1/2秒）試行し、失敗画像はセッション中保持する。保留送信は最大2つ、失敗後は新規キャプチャを止め、再確定時に失敗画像を再送する。キャンセル時は再試行を中断する。
+
+存在しない任意のtags/detect endpointへの404/501後の呼び出しは停止。ブラウザ検知が動いている間もサーバーへの検知要求を抑制する。ブラウザ検知とサーバー検知が両方利用不可ならその旨を表示し、画像の非同期解析で確認する。

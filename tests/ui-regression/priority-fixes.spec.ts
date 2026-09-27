@@ -589,7 +589,7 @@ for (const failUpload of [false, true]) {
     else await expect.poll(() => page.evaluate(() => !!(window as any).__encoding), { timeout: 9000 }).toBe(true)
     await page.getByRole('button', { name: 'スキャンを終了', exact: true }).click()
     if (failUpload) {
-      await expect(page.getByText('保存できなかったフレームがあります。キャンセルして撮り直してください。')).toBeVisible()
+      await expect(page.getByText('保存できなかったフレームがあります。再確定で送信を再試行できます。')).toBeVisible({ timeout: 12_000 })
       expect(completes).toBe(0)
       await page.getByRole('button', { name: 'キャンセル', exact: true }).click()
       await expect(page.getByRole('button', { name: 'ライブスキャンを開始', exact: true })).toBeVisible()
@@ -602,3 +602,20 @@ for (const failUpload of [false, true]) {
     }
   })
 }
+
+test('camera rejection leaves retry and file selection available', async ({ page }) => {
+  await mockApi(page)
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator.mediaDevices, 'getUserMedia', { configurable: true, value: async () => {
+      throw new DOMException('Denied for regression test', 'NotAllowedError')
+    } })
+  })
+  await page.goto('/scan')
+  const start = page.getByRole('button', { name: 'カメラを開始してライブスキャンを開始', exact: true })
+  await start.click()
+  await expect(page.getByText('カメラの使用が許可されていません。ブラウザのサイト設定でカメラを許可して、もう一度押してください。')).toBeVisible()
+  await expect(start).toBeEnabled()
+  await expect(page.getByRole('button', { name: '画像または動画を選択', exact: true })).toBeEnabled()
+  await start.click()
+  await expect(start).toBeEnabled()
+})

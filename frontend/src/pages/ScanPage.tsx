@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState, useRef } from 'react'
 import { ArrowLeft, BookMarked, Camera, ImagePlus } from 'lucide-react'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { apiFetch, apiUrl } from '../lib/api'
+import { apiFetch } from '../lib/api'
+import { retryFrameRequest } from '../lib/retryFrameRequest'
 import { frameMetrics, shouldSendFrame, type FrameGateState, type FrameSkipReason } from '../lib/liveFrameGate'
 import { detectBrowserAprilTags, isBrowserAprilTagReady } from '../lib/browserAprilTag'
 import { StableTagTracker } from '../lib/stableTagTracker'
@@ -89,6 +90,7 @@ interface ActiveSession {
   id: string
   template: string
   controller: AbortController
+  failedUploads: Map<string, () => Promise<void>>
   uploadFailure?: string
 }
 
@@ -137,6 +139,7 @@ export default function ScanPage() {
   const detectingRef = useRef(false)
   const browserDetectingRef = useRef(false)
   const browserDetectionActiveRef = useRef(false)
+  const serverDetectionUnavailableRef = useRef(false)
   const trackingEnabledRef = useRef(false)
   const stableTagTrackerRef = useRef(new StableTagTracker(2))
   const announcedTagSetsRef = useRef(new Set<string>())
@@ -284,7 +287,7 @@ export default function ScanPage() {
   const detectFrame = useCallback(async () => {
     const sessionId = sessionRef.current?.id
     if (!trackingEnabledRef.current || !sessionId || document.hidden) return
-    if (detectingRef.current) return
+    if (detectingRef.current || browserDetectionActiveRef.current || serverDetectionUnavailableRef.current) return
     const video = videoRef.current
     const canvas = canvasRef.current
     if (!video || !canvas || video.videoWidth === 0 || video.videoHeight === 0) return
@@ -305,6 +308,10 @@ export default function ScanPage() {
       const form = new FormData()
       form.append('image', blob, 'live-scan-frame.jpg')
       const response = await apiFetch('/api/tags/detect', { method: 'POST', body: form })
+      if (response.status === 404 || response.status === 501) {
+        serverDetectionUnavailableRef.current = true
+        return
+      }
       if (!response.ok) throw new Error(await response.text())
       const data = (await response.json()) as LiveDetectResponse
       if (!trackingEnabledRef.current || sessionRef.current?.id !== sessionId) return
@@ -371,7 +378,9 @@ export default function ScanPage() {
       setOpencvState('fallback')
       browserDetectionActiveRef.current = false
       const detail = browserError instanceof Error ? browserError.message : String(browserError)
-      setLiveStatus(`ブラウザ検知を利用できないため、サーバー検知を使用中です。${detail}`)
+      setLiveStatus(serverDetectionUnavailableRef.current
+        ? `棚のライブ検知を利用できません。送信画像の解析結果で確認してください。${detail}`
+        : `ブラウザ検知を利用できないため、サーバー検知を使用中です。${detail}`)
       console.warn('browser AprilTag detection failed', browserError)
     } finally {
       browserDetectingRef.current = false
@@ -460,6 +469,7 @@ export default function ScanPage() {
       if (requestId !== cameraRequestRef.current) return false
       setError(cameraAccessErrorMessage(cameraError))
       stopCamera()
+      setCameraStarting(false)
       return false
     } finally {
       if (requestId === cameraRequestRef.current) setCameraStarting(false)
@@ -505,6 +515,7 @@ export default function ScanPage() {
         id: session.session_id,
         template: session.frame_upload_url_template ?? session.frame_upload_url_endpoint ?? '',
         controller: new AbortController(),
+        failedUploads: new Map(),
       }
       sessionRef.current = activeSession
       setLiveJobId(session.session_id)
@@ -541,7 +552,7 @@ export default function ScanPage() {
           scanAnimationRef.current = requestAnimationFrame(loop)
           return
         }
-        if (now - lastEvaluationRef.current >= 1000 / 15) {
+        if (activeSession.failedUploads.size === 0 && pendingUploadsRef.current.size + pendingFrameEncodesRef.current.size < 2 && now - lastEvaluationRef.current >= 1000 / 15) {
           lastEvaluationRef.current = now
           const video = videoRef.current; const canvas = scanCanvasRef.current
           if (video && canvas && video.videoWidth) {
@@ -575,56 +586,47 @@ export default function ScanPage() {
                       resolve()
                       return
                     }
-                    const upload = (async () => {
+                    const saveFrame = async () => {
                       if (!isCurrentSession(activeSession)) return
                       let url = activeSession.template.replace('{frame_id}', frame)
                       let frameKey = frame
                       if (!activeSession.template.includes('{frame_id}')) {
-                        const init = await apiFetch(activeSession.template, {
+                        const init = await retryFrameRequest(() => apiFetch(activeSession.template, {
                           method: 'POST',
                           headers: { 'Content-Type': 'application/json' },
                           body: JSON.stringify({ filename: frame }),
                           signal: activeSession.controller.signal,
-                        })
+                        }), activeSession.controller.signal)
                         if (!init.ok) throw new Error(`frame init ${init.status}`)
                         const initialized = await init.json() as { upload_url: string; frame_key?: string }
                         url = initialized.upload_url
                         frameKey = initialized.frame_key ?? frame
                       }
                       if (!isCurrentSession(activeSession)) return
-                      const putController = new AbortController()
-                      const abortPut = () => putController.abort()
-                      const putTimeout = window.setTimeout(() => putController.abort(), 30_000)
-                      activeSession.controller.signal.addEventListener('abort', abortPut, { once: true })
-                      let put: Response
-                      try {
-                        put = await fetch(apiUrl(url), {
-                          method: 'PUT',
-                          headers: { 'Content-Type': 'image/jpeg' },
-                          body: blob,
-                          signal: putController.signal,
-                        })
-                      } finally {
-                        window.clearTimeout(putTimeout)
-                        activeSession.controller.signal.removeEventListener('abort', abortPut)
-                      }
+                      const put = await retryFrameRequest(() => apiFetch(url, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'image/jpeg' },
+                        body: blob,
+                        signal: activeSession.controller.signal,
+                      }), activeSession.controller.signal)
                       if (!put.ok) throw new Error(`frame upload ${put.status}`)
                       if (!isCurrentSession(activeSession)) return
-                      const commit = await apiFetch(`/api/scan/sessions/${activeSession.id}/commit-frame`, {
+                      const commit = await retryFrameRequest(() => apiFetch(`/api/scan/sessions/${activeSession.id}/commit-frame`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ frame_key: frameKey }),
                         signal: activeSession.controller.signal,
-                      })
+                      }), activeSession.controller.signal)
                       if (!commit.ok) throw new Error(`frame commit ${commit.status}`)
                       if (isCurrentSession(activeSession)) setScanStats(s => ({ ...s, evaluated: s.evaluated + 1, sent: s.sent + 1 }))
-                    })()
+                    }
+                    const upload = saveFrame()
                     pendingUploadsRef.current.add(upload)
                     void upload.then(
                       () => pendingUploadsRef.current.delete(upload),
                       e => {
                         pendingUploadsRef.current.delete(upload)
-                        activeSession.uploadFailure = String(e)
+                        if (isCurrentSession(activeSession)) activeSession.failedUploads.set(frame, saveFrame)
                         if (isCurrentSession(activeSession)) setError(`候補フレームの保存に失敗しました: ${String(e)}`)
                       },
                     )
@@ -665,9 +667,15 @@ export default function ScanPage() {
       // cancelled. Wait for those callbacks before completing the session so
       // their uploads cannot arrive after finalize.
       await Promise.all([...pendingFrameEncodesRef.current])
-      await Promise.all([...pendingUploadsRef.current])
+      await Promise.allSettled([...pendingUploadsRef.current])
+      for (const [frame, saveFrame] of session.failedUploads) {
+        if (!isCurrentSession(session)) return
+        await saveFrame()
+        session.failedUploads.delete(frame)
+      }
       if (!isCurrentSession(session)) return
       if (session.uploadFailure) throw new Error(`候補フレームの保存に失敗しています: ${session.uploadFailure}`)
+      setError('')
       const res = await apiFetch(`/api/scan/sessions/${session.id}/complete`, { method: 'POST' })
       if (!res.ok) throw new Error(await res.text())
       const data = await res.json() as { job_id: string }
@@ -687,7 +695,9 @@ export default function ScanPage() {
         setFinalizeRetryAvailable(true)
         setError(session.uploadFailure
           ? '保存できなかったフレームがあります。キャンセルして撮り直してください。'
-          : `スキャン確定に失敗しました。もう一度確定するか、キャンセルしてください: ${String(e)}`)
+          : session.failedUploads.size > 0
+            ? '保存できなかったフレームがあります。再確定で送信を再試行できます。'
+            : `スキャン確定に失敗しました。もう一度確定するか、キャンセルしてください: ${String(e)}`)
       }
     } finally {
       if (isCurrentSession(session)) setStopping(false)

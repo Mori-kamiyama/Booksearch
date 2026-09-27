@@ -488,6 +488,8 @@ Resources:
           Properties:
             Queue: !GetAtt YoloQueue.Arn
             BatchSize: 1
+            ScalingConfig:
+              MaximumConcurrency: 2
     Metadata:
       Dockerfile: Dockerfile
       DockerContext: ./functions/yolo_worker
@@ -523,6 +525,8 @@ Resources:
           Properties:
             Queue: !GetAtt OcrQueue.Arn
             BatchSize: 1
+            ScalingConfig:
+              MaximumConcurrency: 2
 
   LookupDispatcherFunction:
     Type: AWS::Serverless::Function
@@ -589,6 +593,8 @@ Resources:
           Properties:
             Queue: !GetAtt LookupQueue.Arn
             BatchSize: 1
+            ScalingConfig:
+              MaximumConcurrency: 2
     Metadata:
       Dockerfile: Dockerfile
       DockerContext: ./functions/lookup_worker

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -175,7 +176,8 @@ func liveSessionFrame(ctx context.Context, req events.APIGatewayV2HTTPRequest, p
 	if err := json.Unmarshal([]byte(decodeBody(req)), &payload); err != nil || payload.Filename == "" {
 		return errJSON(400, "expected JSON {filename}"), nil
 	}
-	key := fmt.Sprintf("live/%s/frames/%s.jpg", id, uuid.New().String())
+	// A lost response must not allocate another frame on retry.
+	key := fmt.Sprintf("live/%s/frames/%x.jpg", id, sha256.Sum256([]byte(payload.Filename)))
 	presigner := s3.NewPresignClient(s3Client)
 	p, err := presigner.PresignPutObject(ctx, &s3.PutObjectInput{Bucket: aws.String(bucket), Key: aws.String(key), ContentType: aws.String("image/jpeg")}, func(o *s3.PresignOptions) { o.Expires = 15 * time.Minute })
 	if err != nil {
@@ -184,13 +186,30 @@ func liveSessionFrame(ctx context.Context, req events.APIGatewayV2HTTPRequest, p
 	_, err = ddbClient.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(jobsTable), Key: map[string]ddbtypes.AttributeValue{"job_id": &ddbtypes.AttributeValueMemberS{Value: id}},
 		UpdateExpression:    aws.String("SET frame_keys = list_append(frame_keys, :k), updated_at = :u"),
-		ConditionExpression: aws.String("#s = :collecting"), ExpressionAttributeNames: map[string]string{"#s": "status"},
+		ConditionExpression: aws.String("#s = :collecting AND NOT contains(frame_keys, :key)"), ExpressionAttributeNames: map[string]string{"#s": "status"},
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":k": &ddbtypes.AttributeValueMemberL{Value: []ddbtypes.AttributeValue{&ddbtypes.AttributeValueMemberS{Value: key}}},
-			":u": &ddbtypes.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)}, ":collecting": &ddbtypes.AttributeValueMemberS{Value: "collecting"},
+			":k":   &ddbtypes.AttributeValueMemberL{Value: []ddbtypes.AttributeValue{&ddbtypes.AttributeValueMemberS{Value: key}}},
+			":key": &ddbtypes.AttributeValueMemberS{Value: key},
+			":u":   &ddbtypes.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)}, ":collecting": &ddbtypes.AttributeValueMemberS{Value: "collecting"},
 		},
 	})
 	if err != nil {
+		if strings.Contains(err.Error(), "ConditionalCheckFailedException") {
+			current, readErr := ddbClient.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String(jobsTable), Key: map[string]ddbtypes.AttributeValue{"job_id": &ddbtypes.AttributeValueMemberS{Value: id}}, ConsistentRead: aws.Bool(true)})
+			if readErr != nil {
+				return errJSON(500, "frame lookup: "+readErr.Error()), nil
+			}
+			status, _ := current.Item["status"].(*ddbtypes.AttributeValueMemberS)
+			frames, _ := current.Item["frame_keys"].(*ddbtypes.AttributeValueMemberL)
+			if status != nil && status.Value == "collecting" && frames != nil {
+				for _, frame := range frames.Value {
+					if value, ok := frame.(*ddbtypes.AttributeValueMemberS); ok && value.Value == key {
+						return okJSON(200, map[string]any{"frame_id": filepath.Base(key), "frame_key": key, "upload_url": p.URL, "content_type": "image/jpeg"}), nil
+					}
+				}
+			}
+			return errJSON(409, "session is no longer accepting frames"), nil
+		}
 		return errJSON(500, "ddb frame: "+err.Error()), nil
 	}
 	return okJSON(200, map[string]any{"frame_id": filepath.Base(key), "frame_key": key, "upload_url": p.URL, "content_type": "image/jpeg"}), nil
