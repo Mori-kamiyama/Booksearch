@@ -44,3 +44,4 @@ uv run --no-project --with boto3 python aws/scripts/cleanup_orphan_images.py --b
 - 画像cleanup dry-runは候補0件。画像削除は実行していない。
 - SNS email購読はPendingConfirmation。受信者の確認と通知到達検証は未完了。
 - 再実行は `expiration={fresh:97}, featured_stale=false`。期限切れ処理の重複更新なし。S3 versioning Enabled、一律失効ルールなし、11 alarmの障害/復旧通知接続、毎時schedule ENABLEDを確認。
+- CloudFormation最終状態はUPDATE_COMPLETE。実metricはFeaturedStale=0、MaintenanceHealthy=1、StalledJobsSkipped=0。新設alarmは初期データ不足を異常として扱うため、初回metricの評価反映まで一時的にALARMとなる。
