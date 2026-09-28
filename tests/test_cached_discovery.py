@@ -142,3 +142,28 @@ def test_catalog_without_cover_cache_still_produces_copy(tmp_path):
     with sqlite3.connect(target) as db:
         assert db.execute('SELECT count(*) FROM books').fetchone()[0] == 1
         assert db.execute('SELECT count(*) FROM book_metadata').fetchone()[0] == 0
+
+
+def test_reader_genres_are_multiple_and_preserve_legacy_filters(cached_catalog, tmp_path):
+    metadata, output = tmp_path/'metadata.db', tmp_path/'discovery.db'
+    enrich(cached_catalog, metadata)
+    build_discovery(metadata, output, tmp_path/'index.json')
+    data = json.loads((tmp_path/'index.json').read_text())
+    assert next(t for t in data['topics'] if t['id'] == 'genre-it')['label'] == 'IT・プログラミング'
+    assert next(t for t in data['topics'] if t['id'] == 'ndc-0')['kind'] == 'legacy'
+    with sqlite3.connect(output) as db:
+        assert db.execute("SELECT 1 FROM book_topics WHERE book_id=1 AND topic_id='ndc-0'").fetchone()
+        assert db.execute("SELECT 1 FROM book_search_terms WHERE book_id=1 AND value_norm='ぱいそん'").fetchone()
+    from discovery_genres import assign_genres
+    genres = dict(assign_genres('UIデザイン', '007', ['ui-design']))
+    assert set(genres) >= {'genre-it','genre-design'}
+    assert dict(assign_genres('建築の歴史', '520', []))['genre-architecture']
+
+
+def test_every_theme_has_explicit_reader_genre_parents():
+    from build_discovery_index import THEMES
+    from discovery_genres import THEME_GENRES, GENRE_RULES
+    ids = {g[0] for g in GENRE_RULES}
+    assert {t[0] for t in THEMES} == set(THEME_GENRES)
+    assert all(set(parents) <= ids and parents for parents in THEME_GENRES.values())
+    assert 'genre-it' not in THEME_GENRES['english-learning']

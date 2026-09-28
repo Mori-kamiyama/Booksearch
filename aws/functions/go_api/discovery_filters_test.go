@@ -54,6 +54,30 @@ func TestDiscoveryFiltersBeforePagination(t *testing.T) {
 	if _, err = ParseSearchFilters(url.Values{"level": {"guessed"}}); err == nil {
 		t.Fatal("accepted invalid level")
 	}
+	for _, stmt := range []string{
+		`CREATE TABLE book_search_terms(book_id INTEGER,value_norm TEXT,PRIMARY KEY(book_id,value_norm))`,
+		`INSERT INTO book_search_terms VALUES(1,'しーげんご'),(2,'しーげんご'),(1,'ぱいそん')`,
+	} {
+		if _, err = raw.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err = store.SearchFiltered("シーゲンゴ", 1, 1, SearchFilters{})
+	if err != nil || result.Total != 2 || len(result.Books) != 1 {
+		t.Fatalf("reading pagination: %+v %v", result, err)
+	}
+	result, err = store.SearchFiltered("シーゲンゴ 著者", 10, 0, SearchFilters{MaxPages: 200})
+	if err != nil || result.Total != 1 || result.Books[0].ID != 1 {
+		t.Fatalf("reading AND/filter: %+v %v", result, err)
+	}
+	result, err = store.SearchFiltered("パイソン", 10, 0, SearchFilters{})
+	if err != nil || result.Total != 1 {
+		t.Fatalf("alias: %+v %v", result, err)
+	}
+	result, err = store.SearchFiltered("ぱい%そん", 10, 0, SearchFilters{})
+	if err != nil || result.Total != 0 {
+		t.Fatalf("escaped alias: %+v %v", result, err)
+	}
 	raw.Exec("DROP TABLE book_topics")
 	if _, err = store.SearchFiltered("", 10, 0, SearchFilters{Topic: "c-language"}); err == nil {
 		t.Fatal("silently ignored unavailable filter")
