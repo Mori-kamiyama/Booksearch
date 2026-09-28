@@ -96,7 +96,7 @@ export function SearchBar({
       onSubmit={submit}
       onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setFocused(false) }}
       aria-label="蔵書を検索"
-      className="relative z-30 flex w-full items-center gap-2 rounded-[24px] bg-white px-[14px] py-3 shadow-[0_3px_2.9px_rgba(0,0,0,0.1)] focus-within:ring-2 focus-within:ring-primary-soft"
+      className="relative z-30 flex h-14 w-full shrink-0 items-center gap-2 rounded-[24px] bg-white px-[14px] shadow-[0_3px_2.9px_rgba(0,0,0,0.1)]"
     >
       <label htmlFor={id} className="sr-only">本を検索</label>
       <button type="submit" aria-label="検索" className="grid size-6 shrink-0 place-items-center text-[#087f5b]">

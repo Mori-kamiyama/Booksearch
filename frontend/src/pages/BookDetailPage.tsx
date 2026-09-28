@@ -136,7 +136,7 @@ function BookCoverPanel({ book, cover }: { book: Book; cover?: string }) {
 function BookInfoPanel({ book, readingHours }: { book: Book; readingHours: number | null }) {
   return (
     <section className="md:pt-2">
-      <h1 className="text-2xl font-normal leading-[1.35] text-ink md:text-[32px]">{book.title}</h1>
+      <h1 className="text-lg font-normal leading-[1.35] text-ink md:text-[32px]">{book.title}</h1>
       <dl className="mt-4 grid gap-1 text-sm leading-6 text-ink md:text-base">
         <MetaRow label="著者" value={book.authors} accent />
         <MetaRow label="出版社" value={book.publisher} />
@@ -227,7 +227,7 @@ function AiSummarySection({ text }: { text: string }) {
 function Recommendations({ books, onOpen, failed, loading }: { books: RelatedBook[]; onOpen: (bookId: number) => void; failed: boolean; loading: boolean }) {
   return (
     <section>
-      <h2 className="text-lg font-bold leading-[1.4] text-ink">関連する本</h2>
+      <h2 className="text-base font-bold leading-[1.4] text-ink md:text-lg">関連する本</h2>
       {books.length === 0 && <p className="mt-3 text-sm text-ink-muted">{loading ? '関連する本を読み込んでいます…' : failed ? '関連する本を取得できませんでした。' : '関連する本はまだ用意されていません。'}</p>}
       <div className="-mx-7 mt-5 flex snap-x snap-mandatory scroll-px-7 items-start gap-6 overflow-x-auto px-7 pb-2 [-webkit-overflow-scrolling:touch] [scrollbar-width:none] md:mx-0 md:snap-none md:gap-5 md:overflow-x-auto md:px-0 [&::-webkit-scrollbar]:hidden">
         {books.map(book => {

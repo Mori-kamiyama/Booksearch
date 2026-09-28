@@ -209,7 +209,7 @@ export default function SearchResultsPage() {
         )}
         {!loading && !error && books.length > 0 && (
           <>
-            <p className="mt-[32px] text-right text-base leading-[19px] text-ink">{total === null ? `${books.length}件表示` : total > books.length ? `全${total}件中 ${books.length}件表示` : `${total}件ヒット`}</p>
+            <p className="mt-[32px] text-right text-sm leading-5 text-ink md:text-base md:leading-[19px]">{total === null ? `${books.length}件表示` : total > books.length ? `全${total}件中 ${books.length}件表示` : `${total}件ヒット`}</p>
             <div className="mt-[32px] grid grid-cols-2 gap-x-2 gap-y-[19px] md:mt-[28px] md:grid-cols-4 md:gap-x-[30px] md:gap-y-[30px] lg:grid-cols-5">
               {books.map(book => (
                 <SearchResultCard
@@ -267,7 +267,7 @@ function SearchResultCard({ book, onOpen, onPointerDown }: { book: Book; onOpen:
       <div className="flex h-[199px] w-[141px] max-w-full items-end justify-center md:h-[208px] md:w-[153px]">
         {cover ? <CoverImage src={cover} className="max-h-full max-w-full bg-[#d9d9d9] object-contain" fallbackClassName="grid h-full w-full place-items-center bg-[#d9d9d9]" /> : <div className="h-full w-full bg-[#d9d9d9]" />}
       </div>
-      <span id={`search-title-${book.id}`} className="line-clamp-2 w-full text-base leading-normal text-ink md:text-[15px]">{book.title}</span>
+      <span id={`search-title-${book.id}`} className="line-clamp-2 w-full text-sm leading-normal text-ink md:text-[15px]">{book.title}</span>
       <span id={`search-meta-${book.id}`} className="flex w-full flex-col gap-1 text-xs text-ink-muted">
         {book.authors && <span className="line-clamp-1">{book.authors}</span>}
         <span>{[book.published_date?.match(/^\d{4}/)?.[0], book.class_number ? `分類 ${book.class_number}` : null].filter(Boolean).join(' / ')}</span>

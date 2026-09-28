@@ -95,7 +95,7 @@ export default function IndexPage() {
   return (
     <div className="min-h-[calc(100vh-72px)] bg-white md:min-h-[calc(100vh-88px)]">
       <div className="mx-auto flex w-full max-w-[402px] flex-col items-center gap-3 px-7 pb-16 pt-[42px] md:max-w-[760px] md:gap-8 md:pt-[54px] lg:max-w-[886px]">
-        <h1 className="w-full text-center text-4xl font-normal leading-normal text-ink">索引</h1>
+        <h1 className="w-full text-center text-2xl font-normal leading-normal text-ink md:text-4xl">索引</h1>
         <ViewToggle value={view} onChange={changeView} />
         {view === 'map' && candidatesError && candidates.length > 0 && (
           <div className="w-full"><ErrorState message="棚の索引を更新できませんでした。" onRetry={loadCandidates} /></div>
@@ -277,7 +277,7 @@ function ListView({ books }: { books: IndexBook[] }) {
       {groups.length === 0 && <p className="w-full text-center text-sm text-ink-faint">蔵書が登録されていません。</p>}
       {groups.map(group => (
         <div key={group.label} className="flex w-full flex-col gap-4">
-          <p className="w-full text-4xl font-normal leading-normal text-[#087f5b]">{group.label}</p>
+          <p className="w-full text-2xl font-normal leading-normal text-[#087f5b] md:text-4xl">{group.label}</p>
           <BookGrid books={group.books} />
         </div>
       ))}
