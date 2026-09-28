@@ -46,6 +46,30 @@ func TestRelatedBooksUsesOnlyValidPrecomputedCandidates(t *testing.T) {
 	if err != nil || len(got) != 1 || len(got[0].Reasons) != 0 {
 		t.Fatalf("invalid reasons: %+v %v", got, err)
 	}
+	for _, stmt := range []string{
+		`CREATE TABLE book_recommendation_runs(source_book_id INTEGER,strategy TEXT,generated_at TEXT)`,
+		`INSERT INTO book_recommendation_runs VALUES(1,'content-diverse-v2','today')`,
+		`INSERT INTO book_recommendations VALUES(1,3,1,'content-diverse-v2','["同じテーマの本"]')`,
+	} {
+		if _, err = d.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err = s.RelatedBooks(1, 6)
+	if err != nil || len(got) != 1 || got[0].ID != 3 || len(got[0].Reasons) != 1 {
+		t.Fatalf("v2 must replace v1: %+v %v", got, err)
+	}
+	if _, err = d.Exec(`DELETE FROM book_recommendations WHERE strategy='content-diverse-v2'`); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.RelatedBooks(1, 6)
+	if err != nil || len(got) != 0 {
+		t.Fatalf("completed empty v2 must remain empty: %+v %v", got, err)
+	}
+	got, err = s.RelatedBooks(2, 6)
+	if err != nil || len(got) != 1 || got[0].ID != 3 {
+		t.Fatalf("unprocessed source must retain v1: %+v %v", got, err)
+	}
 	d.Close()
 	if _, err = s.RelatedBooks(1, 6); err == nil {
 		t.Fatal("closed database must not silently appear empty")
