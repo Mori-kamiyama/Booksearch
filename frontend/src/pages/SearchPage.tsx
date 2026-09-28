@@ -36,9 +36,9 @@ export default function SearchPage({ initialFeatured }: { initialFeatured?: Feat
     return () => { cancelled = true; unsubscribe() }
   }, [initialFeatured, retry])
 
-  const runSearch = () => {
-    const q = query.trim()
-    if (q) navigate(`/search?q=${encodeURIComponent(q)}`)
+  const runSearch = (text: string, topic?: string) => {
+    const q = text.trim()
+    if (q || topic) navigate(`/search?${new URLSearchParams(topic ? { topic } : { q }).toString()}`)
   }
 
   return (

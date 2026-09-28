@@ -49,9 +49,9 @@ export interface SearchBookResults {
   total: number | null
 }
 
-export async function searchBookResults(query: string, limit = 30, offset = 0): Promise<SearchBookResults> {
+export async function searchBookResults(query: string, limit = 30, offset = 0, filters = ''): Promise<SearchBookResults> {
   const normalizedOffset = Number.isSafeInteger(offset) && offset > 0 ? offset : 0
-  const data = await jsonFetch<{ books?: Book[]; total?: number | null }>(`/api/books/search?q=${encodeURIComponent(query)}&limit=${limit}&offset=${normalizedOffset}`)
+  const data = await jsonFetch<{ books?: Book[]; total?: number | null }>(`/api/books/search?q=${encodeURIComponent(query)}&limit=${limit}&offset=${normalizedOffset}${filters ? `&${filters}` : ''}`)
   return {
     books: data.books ?? [],
     total: typeof data.total === 'number' && Number.isFinite(data.total) ? data.total : null,

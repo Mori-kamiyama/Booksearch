@@ -40,7 +40,7 @@ test('book detail carries the target into live scan and returns to the detail', 
 
   await page.goto(`/books/${targetBook.id}?q=${encodeURIComponent(targetBook.title)}`)
   await expect(page.getByRole('heading', { name: targetBook.title, exact: true })).toBeVisible()
-  await page.getByRole('button', { name: 'スキャンしながら探す', exact: true }).click()
+  await page.getByRole('button', { name: 'スキャンして探す', exact: true }).click()
 
   await expect(page).toHaveURL(/\/scan$/)
   await expect(page.getByTestId('scan-target-status')).toContainText(targetBook.title)

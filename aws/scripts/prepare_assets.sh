@@ -35,10 +35,13 @@ LIBRARY_DB_SOURCE="$ROOT/outputs/library/library.db"
 if [[ ! -f "$LIBRARY_DB_SOURCE" ]]; then
   LIBRARY_DB_SOURCE="$ROOT/aws/functions/go_api/library.db"
 fi
-cp "$LIBRARY_DB_SOURCE" "$LOOKUP_ASSETS/library.db"
-if [[ "$LIBRARY_DB_SOURCE" != "$GO_API_ASSETS/library.db" ]]; then
-  cp "$LIBRARY_DB_SOURCE" "$GO_API_ASSETS/library.db"
-fi
+# Generate the browser index and the matching server-side facet tables together.
+DISCOVERY_OUTPUT="$ROOT/outputs/discovery/library.db"
+uv run --no-project python "$ROOT/scripts/build_discovery_index.py" \
+  --db "$LIBRARY_DB_SOURCE" --output-db "$DISCOVERY_OUTPUT" \
+  --output-index "$ROOT/frontend/public/search-index.json"
+cp "$DISCOVERY_OUTPUT" "$LOOKUP_ASSETS/library.db"
+cp "$DISCOVERY_OUTPUT" "$GO_API_ASSETS/library.db"
 cp "$ROOT/data/known_books.json" "$LOOKUP_ASSETS/known_books.json"
 
 echo "✓ assets ready"

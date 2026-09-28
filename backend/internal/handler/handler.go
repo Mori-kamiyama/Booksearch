@@ -32,7 +32,12 @@ type Handler struct {
 
 func (h *Handler) SearchBooks(c *gin.Context) {
 	q := c.Query("q")
-	if strings.TrimSpace(q) == "" {
+	filters, filterErr := db.ParseSearchFilters(c.Request.URL.Query())
+	if filterErr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": filterErr.Error()})
+		return
+	}
+	if strings.TrimSpace(q) == "" && filters.Empty() {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "q is required"})
 		return
 	}
@@ -44,7 +49,7 @@ func (h *Handler) SearchBooks(c *gin.Context) {
 	if o, err := strconv.Atoi(c.Query("offset")); err == nil && o > 0 {
 		offset = o
 	}
-	result, err := h.Store.SearchWithTotalOffset(q, limit, offset)
+	result, err := h.Store.SearchFiltered(q, limit, offset, filters)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

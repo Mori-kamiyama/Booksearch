@@ -4,6 +4,7 @@ import { useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import { EmptyState, ErrorState } from '../components/common'
 import { CoverImage, SearchBar } from '../components/book'
 import { searchBookResults } from '../lib/api'
+import { loadDiscoveryIndex, type DiscoveryIndex } from '../lib/discoveryIndex'
 import type { Book } from '../lib/types'
 import { formatShelfLabel } from '../lib/shelf'
 import { fallbackCoverForTitle } from '../data/figmaBooks'
@@ -15,14 +16,16 @@ function parsePage(value: string | null): number {
   return Number.isSafeInteger(page) && page > 0 ? page : 1
 }
 
-function searchResultsPath(query: string, page: number): string {
-  const params = new URLSearchParams({ q: query })
+function searchResultsPath(query: string, page: number, filters = ''): string {
+  const params = new URLSearchParams(filters)
+  if (query) params.set('q', query)
   if (page > 1) params.set('page', String(page))
   return `/search?${params.toString()}`
 }
 
-function bookDetailPath(id: number, query: string, page: number): string {
-  const params = new URLSearchParams({ q: query })
+function bookDetailPath(id: number, query: string, page: number, filters = ''): string {
+  const params = new URLSearchParams(filters)
+  if (query) params.set('q', query)
   if (page > 1) params.set('page', String(page))
   return `/books/${id}?${params.toString()}`
 }
@@ -51,10 +54,13 @@ export default function SearchResultsPage() {
   const location = useLocation()
   const [params] = useSearchParams()
   const sourceQuery = params.get('q')?.trim() ?? ''
+  const filters = new URLSearchParams([...params].filter(([key]) => ['author', 'topic', 'min_pages', 'max_pages', 'level'].includes(key))).toString()
+  const [discovery, setDiscovery] = useState<DiscoveryIndex | null>(null)
+  useEffect(() => { loadDiscoveryIndex().then(setDiscovery).catch(() => {}) }, [])
   const page = parsePage(params.get('page'))
   const candidateOffset = (page - 1) * SEARCH_PAGE_SIZE
   const offset = Number.isSafeInteger(candidateOffset) ? candidateOffset : 0
-  const scrollKey = `booksearch:search-scroll:${sourceQuery}:${page}`
+  const scrollKey = `booksearch:search-scroll:${sourceQuery}:${page}:${filters}`
   const [query, setQuery] = useState(sourceQuery)
   const [total, setTotal] = useState<number | null>(null)
   const [books, setBooks] = useState<Book[]>([])
@@ -63,6 +69,7 @@ export default function SearchResultsPage() {
   const mountedRef = useRef(false)
   const requestIdRef = useRef(0)
   const loadedScrollKeyRef = useRef<string | null>(null)
+  const leavingRef = useRef(false)
   const pointerNavigationScrollKeyRef = useRef<string | null>(null)
 
   const load = useCallback(async () => {
@@ -70,7 +77,7 @@ export default function SearchResultsPage() {
     const isCurrentRequest = () => mountedRef.current && requestId === requestIdRef.current
     if (isCurrentRequest()) loadedScrollKeyRef.current = null
 
-    if (!sourceQuery) {
+    if (!sourceQuery && !filters) {
       if (isCurrentRequest()) {
         loadedScrollKeyRef.current = scrollKey
         setLoading(false)
@@ -83,7 +90,7 @@ export default function SearchResultsPage() {
     setLoading(true)
     setError(false)
     try {
-      const results = await searchBookResults(sourceQuery, SEARCH_PAGE_SIZE, offset)
+      const results = await searchBookResults(sourceQuery, SEARCH_PAGE_SIZE, offset, filters)
       if (isCurrentRequest()) { setBooks(results.books); setTotal(results.total) }
     } catch {
       if (isCurrentRequest()) {
@@ -100,7 +107,7 @@ export default function SearchResultsPage() {
         setLoading(false)
       }
     }
-  }, [offset, scrollKey, sourceQuery])
+  }, [offset, scrollKey, sourceQuery, filters])
 
   useEffect(() => {
     mountedRef.current = true
@@ -131,7 +138,7 @@ export default function SearchResultsPage() {
 
   useEffect(() => {
     const save = () => {
-      if (loadedScrollKeyRef.current === scrollKey) rememberScroll(scrollKey)
+      if (!leavingRef.current && loadedScrollKeyRef.current === scrollKey) rememberScroll(scrollKey)
     }
     if (loadedScrollKeyRef.current !== scrollKey) return
     window.addEventListener('scroll', save, { passive: true })
@@ -143,9 +150,9 @@ export default function SearchResultsPage() {
     return () => { requestIdRef.current += 1 }
   }, [load, location])
 
-  const runSearch = () => {
-    const q = query.trim()
-    if (q) navigate(searchResultsPath(q, 1))
+  const runSearch = (text: string, topic?: string) => {
+    const q = text.trim()
+    if (q || topic || filters) navigate(searchResultsPath(q, 1, topic ? new URLSearchParams({ topic }).toString() : filters))
   }
 
   const totalPages = total === null ? 1 : Math.max(1, Math.ceil(total / SEARCH_PAGE_SIZE))
@@ -159,14 +166,14 @@ export default function SearchResultsPage() {
 
   useEffect(() => {
     if (!loading && !error && total !== null && page > totalPages) {
-      navigate(searchResultsPath(sourceQuery, totalPages), { replace: true })
+      navigate(searchResultsPath(sourceQuery, totalPages, filters), { replace: true })
     }
-  }, [error, loading, navigate, page, sourceQuery, total, totalPages])
+  }, [error, loading, navigate, page, sourceQuery, total, totalPages, filters])
 
   const goToPage = (nextPage: number) => {
     if (nextPage < 1 || nextPage > totalPages || nextPage === page) return
     rememberScroll(scrollKey)
-    navigate(searchResultsPath(sourceQuery, nextPage))
+    navigate(searchResultsPath(sourceQuery, nextPage, filters))
   }
 
   return (
@@ -174,6 +181,33 @@ export default function SearchResultsPage() {
       <div className="mx-auto w-full md:mt-[54px]">
         <h1 className="sr-only">検索結果</h1>
         <SearchBar value={query} onChange={setQuery} onSubmit={runSearch} />
+
+        <form key={filters} aria-label="検索の絞り込み" className="mt-6 flex flex-wrap items-end gap-3 text-sm" onSubmit={event => {
+          event.preventDefault()
+          const form = new FormData(event.currentTarget)
+          const next = new URLSearchParams()
+          for (const [key, value] of form) if (String(value).trim()) next.set(key, String(value).trim())
+          navigate(searchResultsPath(sourceQuery, 1, next.toString()))
+        }}>
+          <label className="flex flex-col gap-1">著者<input name="author" defaultValue={params.get('author') ?? ''} placeholder="著者名を指定" list="filter-authors" className="min-h-11 w-40 rounded border border-line px-2" /></label>
+          <datalist id="filter-authors">{[...new Set(discovery?.books.map(book => book.authors).filter(Boolean) ?? [])].sort().map(author => <option key={author} value={author} />)}</datalist>
+          <label className="flex flex-col gap-1">ジャンル・テーマ<select key={`topic-${Boolean(discovery)}`} name="topic" defaultValue={params.get('topic') ?? ''} className="min-h-11 max-w-48 rounded border border-line px-2">
+            <option value="">すべて</option>
+            {params.get('topic') && !discovery?.topics.some(topic => topic.id === params.get('topic')) && <option value={params.get('topic')!}>{params.get('topic')}</option>}
+            {discovery?.topics.map(topic => <option key={topic.id} value={topic.id}>{topic.label}</option>)}
+          </select></label>
+          <details className="w-full" open={params.has('min_pages') || params.has('max_pages') || params.has('level') || undefined}>
+            <summary className="min-h-11 cursor-pointer py-3 text-ink-muted">ページ数・レベル{discovery && !discovery.coverage.page_count && !discovery.coverage.level ? '（準備中）' : ''}</summary>
+            <div className="mb-3 flex flex-wrap gap-3">
+          <label className="flex flex-col gap-1">ページ数（下限）<input name="min_pages" type="number" min="1" max="100000" defaultValue={params.get('min_pages') ?? ''} disabled={!discovery?.coverage.page_count && !params.has('min_pages')} className="min-h-11 w-24 rounded border border-line px-2 disabled:bg-zinc-100" /></label>
+          <label className="flex flex-col gap-1">ページ数（上限）<input name="max_pages" type="number" min="1" max="100000" defaultValue={params.get('max_pages') ?? ''} disabled={!discovery?.coverage.page_count && !params.has('max_pages')} className="min-h-11 w-24 rounded border border-line px-2 disabled:bg-zinc-100" /></label>
+          <label className="flex flex-col gap-1">レベル<select name="level" defaultValue={params.get('level') ?? ''} disabled={!discovery?.coverage.level && !params.has('level')} className="min-h-11 rounded border border-line px-2 disabled:bg-zinc-100"><option value="">指定なし</option><option value="beginner">入門</option><option value="intermediate">中級</option><option value="advanced">専門</option></select></label>
+            </div>
+          </details>
+          <button className="min-h-11 rounded border border-line px-4 text-primary" type="submit">絞り込む</button>
+          {filters && <button className="min-h-11 px-3 text-primary underline" type="button" onClick={() => navigate(sourceQuery ? searchResultsPath(sourceQuery, 1) : '/')}>条件を解除</button>}
+
+        </form>
 
         {loading && <SearchGridSkeleton />}
         {!loading && error && <div className="mt-8"><ErrorState message="検索できませんでした。" onRetry={load} /></div>}
@@ -186,7 +220,7 @@ export default function SearchResultsPage() {
                 input?.focus(); input?.select()
               }}>検索条件を見直す</button>
               {sourceQuery.split(/\s+/).filter(Boolean).length > 1 && [...new Set(sourceQuery.split(/\s+/).filter(Boolean))].slice(0, 5).map(term => (
-                <button key={term} type="button" className="min-h-11 rounded-lg border border-line px-4 text-sm text-primary" onClick={() => navigate(searchResultsPath(term, 1))}>「{term}」で検索</button>
+                <button key={term} type="button" className="min-h-11 rounded-lg border border-line px-4 text-sm text-primary" onClick={() => navigate(searchResultsPath(term, 1, filters))}>「{term}」で検索</button>
               ))}
             </div>
           </div>
@@ -206,9 +240,10 @@ export default function SearchResultsPage() {
                     pointerNavigationScrollKeyRef.current = scrollKey
                   }}
                   onOpen={() => {
+                    leavingRef.current = true
                     if (pointerNavigationScrollKeyRef.current !== scrollKey) rememberScroll(scrollKey)
                     pointerNavigationScrollKeyRef.current = null
-                    navigate(bookDetailPath(book.id, sourceQuery, page))
+                    navigate(bookDetailPath(book.id, sourceQuery, page, filters))
                   }}
                 />
               ))}

@@ -49,7 +49,7 @@ test('hydration preserves the covers and enables search without fetching recomme
   await page.route('**/api/books/search?**', route => route.fulfill({ json: { books: [], total: 0 } }))
   await page.goto('/')
   await expect(page.getByRole('button', { name: snapshot.books[0].title, exact: true })).toBeVisible()
-  await page.getByRole('searchbox', { name: '本を検索' }).fill('図書室')
+  await page.getByRole('combobox', { name: '本を検索' }).fill('図書室')
   await page.getByRole('button', { name: '検索', exact: true }).click()
   await expect(page).toHaveURL(/\/search\?q=/)
   await expect(page.getByText('見つかりませんでした', { exact: true })).toBeVisible()

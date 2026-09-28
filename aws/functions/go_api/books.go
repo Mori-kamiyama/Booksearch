@@ -105,6 +105,9 @@ func searchWhere(terms []searchTerm) (string, []any) {
 }
 
 func searchOrder(terms []searchTerm) (string, []any) {
+	if len(terms) == 0 {
+		return "b.title_norm COLLATE NOCASE ASC, b.id ASC", nil
+	}
 	joined := make([]string, 0, len(terms))
 	for _, term := range terms {
 		joined = append(joined, term.normalized)
@@ -245,8 +248,12 @@ func (s *BookStore) SearchWithTotal(query string, limit int) (SearchResult, erro
 }
 
 func (s *BookStore) SearchWithTotalOffset(query string, limit, offset int) (SearchResult, error) {
+	return s.SearchFiltered(query, limit, offset, SearchFilters{})
+}
+
+func (s *BookStore) SearchFiltered(query string, limit, offset int, filters SearchFilters) (SearchResult, error) {
 	terms := searchTerms(query)
-	if len(terms) == 0 {
+	if len(terms) == 0 && filters.Empty() {
 		return SearchResult{Books: []Book{}, Total: 0}, nil
 	}
 	if limit <= 0 {
@@ -256,11 +263,25 @@ func (s *BookStore) SearchWithTotalOffset(query string, limit, offset int) (Sear
 		offset = 0
 	}
 	where, whereArgs := searchWhere(terms)
+	if len(terms) == 0 {
+		where = "1=1"
+		whereArgs = nil
+	}
+	filter, filterArgs, err := s.filterWhere(filters)
+	if err != nil {
+		return SearchResult{}, err
+	}
+	where = "(" + where + ") AND (" + filter + ")"
+	whereArgs = append(whereArgs, filterArgs...)
 	var total int
 	if err := s.db.QueryRow("SELECT COUNT(DISTINCT b.id) FROM books b WHERE "+where, whereArgs...).Scan(&total); err != nil {
 		return SearchResult{}, err
 	}
 	order, orderArgs := searchOrder(terms)
+	if len(terms) == 0 {
+		order = "b.title_norm COLLATE NOCASE ASC, b.id ASC"
+		orderArgs = nil
+	}
 	args := append(append([]any{}, whereArgs...), orderArgs...)
 	args = append(args, limit, offset)
 	rows, err := s.db.Query(`

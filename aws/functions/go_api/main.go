@@ -450,7 +450,15 @@ func parseRequest(raw json.RawMessage) (events.APIGatewayV2HTTPRequest, string, 
 // ---- /api/books/search ----
 func searchBooks(ctx context.Context, req events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {
 	q := req.QueryStringParameters["q"]
-	if strings.TrimSpace(q) == "" {
+	filterValues := url.Values{}
+	for key, value := range req.QueryStringParameters {
+		filterValues.Set(key, value)
+	}
+	filters, filterErr := ParseSearchFilters(filterValues)
+	if filterErr != nil {
+		return errJSON(400, filterErr.Error()), nil
+	}
+	if strings.TrimSpace(q) == "" && filters.Empty() {
 		return errJSON(400, "q is required"), nil
 	}
 	limit := 20
@@ -468,7 +476,7 @@ func searchBooks(ctx context.Context, req events.APIGatewayV2HTTPRequest) (event
 	if bookStore == nil {
 		return errJSON(503, "library DB not available"), nil
 	}
-	result, err := bookStore.SearchWithTotalOffset(q, limit, offset)
+	result, err := bookStore.SearchFiltered(q, limit, offset, filters)
 	if err != nil {
 		return errJSON(500, err.Error()), nil
 	}

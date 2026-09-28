@@ -7,7 +7,7 @@ test('empty search can reduce terms and compare the recovered book', async ({ pa
   })
   await page.goto('/search?q=Python%20入門書')
   await page.getByRole('button', { name: '検索条件を見直す' }).click()
-  await expect(page.getByRole('searchbox')).toBeFocused()
+  await expect(page.getByRole('combobox', { name: '本を検索' })).toBeFocused()
   await page.getByRole('button', { name: '「Python」で検索' }).click()
   await expect(page).toHaveURL(/q=Python$/)
   const result = page.getByRole('button', { name: 'Python入門', exact: true })
