@@ -1,13 +1,14 @@
-import { Link, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ScanLine } from 'lucide-react'
 import { getShelfCandidates } from '../lib/api'
 import type { ShelfCandidate } from '../lib/types'
 import { BookCard, shelfBookFromCandidate } from '../components/book'
-import { EmptyState, ErrorState, PageHeader, Skeleton } from '../components/common'
+import { Breadcrumbs, EmptyState, ErrorState, PageHeader, Skeleton } from '../components/common'
 import { FreshnessBadge, ShelfLocationLabel, ShelfMiniMap } from '../components/shelf'
 
 export default function ShelfDetailPage() {
+  const navigate = useNavigate()
   const { shelfId } = useParams<{ shelfId: string }>()
   const decodedShelfId = shelfId ? decodeURIComponent(shelfId) : ''
   const [candidates, setCandidates] = useState<ShelfCandidate[]>([])
@@ -41,6 +42,7 @@ export default function ShelfDetailPage() {
 
   return (
     <div>
+      <Breadcrumbs items={[{ label: 'MAP', to: '/map' }, { label: `棚${decodedShelfId}`}]} />
       <PageHeader title="棚区画" back />
       {loading ? (
         <Skeleton variant="card" />
@@ -63,7 +65,11 @@ export default function ShelfDetailPage() {
           ) : (
             <div className="grid gap-3">
               {books.map(candidate => (
-                <BookCard key={`${candidate.book_id}:${candidate.shelf_id}`} book={shelfBookFromCandidate(candidate)} />
+                <BookCard
+                  key={`${candidate.book_id}:${candidate.shelf_id}`}
+                  book={shelfBookFromCandidate(candidate)}
+                  onClick={() => navigate(`/books/${candidate.book_id}?shelf=${encodeURIComponent(decodedShelfId)}`)}
+                />
               ))}
             </div>
           )}

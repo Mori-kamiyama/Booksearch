@@ -21,6 +21,12 @@ body {
   color: #18181b;
 }
 
+@media (max-width: 639px) {
+  body {
+    font-size: 14px;
+  }
+}
+
 button,
 input {
   font: inherit;

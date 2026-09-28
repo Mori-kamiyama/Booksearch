@@ -23,13 +23,13 @@ export function SearchBar({
   return (
     <form onSubmit={submit} className="flex gap-2">
       <div className="relative min-w-0 flex-1">
-        <Search className="pointer-events-none absolute left-3 top-1/2 size-5 -translate-y-1/2 text-ink-faint" />
+        <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-ink-faint sm:size-5" />
         <input
           value={value}
           onChange={event => onChange(event.target.value)}
           autoFocus={autoFocus}
           placeholder="書名・著者・ISBN"
-          className="min-h-12 w-full rounded-lg border border-line bg-white py-3 pl-10 pr-10 text-base outline-none focus:border-primary focus:ring-2 focus:ring-primary-soft"
+          className="min-h-11 w-full rounded-lg border border-line bg-white py-2 pl-9 pr-10 text-base outline-none focus:border-ink-muted sm:min-h-12 sm:py-3 sm:pl-10"
         />
         {value && (
           <button
@@ -42,7 +42,7 @@ export function SearchBar({
           </button>
         )}
       </div>
-      <button type="submit" className="min-h-12 rounded-lg bg-primary px-5 text-sm font-bold text-white">
+      <button type="submit" className="min-h-11 rounded-lg bg-primary px-4 text-sm font-bold text-white sm:min-h-12 sm:px-5">
         検索
       </button>
     </form>
@@ -61,8 +61,8 @@ export function BookCard({ book, onClick }: { book: Book; onClick?: () => void }
     >
       <BookCover book={book} size="sm" />
       <div className="min-w-0 flex-1">
-        <p className="line-clamp-2 font-semibold leading-snug text-ink">{book.title}</p>
-        {book.authors && <p className="mt-1 truncate text-sm text-ink-muted">{book.authors}</p>}
+        <p className="line-clamp-2 text-sm font-semibold leading-snug text-ink sm:text-base">{book.title}</p>
+        {book.authors && <p className="mt-1 truncate text-[13px] text-ink-muted sm:text-sm">{book.authors}</p>}
         {book.publisher && <p className="truncate text-xs text-ink-faint">{book.publisher}</p>}
         <div className="mt-3">
           {top ? <ShelfChip shelfId={top.shelf_id} confidence={top.confidence} /> : <span className="rounded-full bg-zinc-100 px-3 py-1 text-xs font-semibold text-ink-muted">場所未登録</span>}
@@ -77,7 +77,7 @@ export function BookHero({ book }: { book: Book }) {
     <section className="flex gap-4 rounded-xl border border-line bg-white p-4 shadow-sm">
       <BookCover book={book} size="lg" />
       <div className="min-w-0 flex-1">
-        <h2 className="text-lg font-bold leading-tight text-ink">{book.title}</h2>
+        <h2 className="text-base font-bold leading-tight text-ink sm:text-lg">{book.title}</h2>
         {book.authors && <p className="mt-2 text-sm text-ink-muted">{book.authors}</p>}
         <div className="mt-3 grid gap-1 text-xs text-ink-muted">
           {book.publisher && <p>{book.publisher}</p>}
@@ -96,7 +96,7 @@ export function BookHero({ book }: { book: Book }) {
 }
 
 function BookCover({ book, size }: { book: Book; size: 'sm' | 'lg' }) {
-  const cls = size === 'lg' ? 'h-32 w-24' : 'h-20 w-14'
+  const cls = size === 'lg' ? 'h-28 w-20 sm:h-32 sm:w-24' : 'h-16 w-12 sm:h-20 sm:w-14'
   if (book.thumbnail) {
     return <img src={book.thumbnail} alt="" className={`${cls} shrink-0 rounded-lg border border-line object-cover bg-zinc-100`} loading="lazy" />
   }

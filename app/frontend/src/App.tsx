@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { saveCognitoTokenFromHash } from './lib/api'
 import SearchPage from './pages/SearchPage'
 import ScanPage from './pages/ScanPage'
@@ -15,9 +15,17 @@ export default function App() {
   useEffect(() => { saveCognitoTokenFromHash() }, [])
   return (
     <BrowserRouter>
-      <div className="min-h-screen bg-surface pb-20 md:pb-0">
-        <SiteHeader />
-        <main className="mx-auto w-full max-w-5xl px-4 py-6">
+      <AppShell />
+    </BrowserRouter>
+  )
+}
+
+function AppShell() {
+  const isHome = useLocation().pathname === '/'
+  return (
+      <div className={isHome ? 'min-h-svh bg-white' : 'min-h-screen bg-surface pb-20 md:pb-0'}>
+        {!isHome && <SiteHeader />}
+        <main className={isHome ? 'w-full' : 'mx-auto w-full max-w-5xl px-5 py-4 sm:px-6 sm:py-6'}>
           <Routes>
             <Route path="/" element={<SearchPage />} />
             <Route path="/books/:id" element={<BookDetailPage />} />
@@ -31,8 +39,7 @@ export default function App() {
             <Route path="/tag-placement" element={<Navigate to="/admin/tags" replace />} />
           </Routes>
         </main>
-        <BottomTabs />
+        {!isHome && <BottomTabs />}
       </div>
-    </BrowserRouter>
   )
 }

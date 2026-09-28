@@ -368,27 +368,27 @@ export default function ScanPage() {
 
   return (
     <div>
-      <h2 className="text-2xl font-bold text-gray-800 mb-6">棚をスキャン</h2>
+      <h2 className="mb-4 text-base font-bold text-gray-800 sm:mb-6 sm:text-2xl">棚をスキャン</h2>
 
       {/* モード切替 */}
-      <div className="flex gap-2 mb-6">
+      <div className="mb-4 flex gap-2 sm:mb-6">
         {(['upload', 'camera'] as const).map(m => (
           <button
             key={m}
             onClick={() => { setMode(m); setFile(null) }}
-            className={`px-4 py-2 rounded-lg text-sm font-semibold border transition-colors ${
+            className={`min-h-11 flex-1 whitespace-nowrap rounded-lg border px-3 py-2 text-sm font-semibold transition-colors sm:flex-none sm:px-4 ${
               mode === m ? 'bg-[#1f7a5c] text-white border-[#1f7a5c]' : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'
             }`}
           >
-            {m === 'upload' ? 'ファイルアップロード' : 'カメラ撮影'}
+            {m === 'upload' ? <><span className="sm:hidden">ファイル選択</span><span className="hidden sm:inline">ファイルアップロード</span></> : 'カメラ撮影'}
           </button>
         ))}
       </div>
 
       {mode === 'upload' && (
-        <label className="flex flex-col items-center justify-center border-2 border-dashed border-gray-300 rounded-xl p-12 cursor-pointer hover:border-[#1f7a5c] transition-colors bg-white">
-          <span className="text-4xl mb-3">📷</span>
-          <span className="text-gray-600 font-medium">
+        <label className="flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed border-gray-300 bg-white p-7 transition-colors hover:border-[#1f7a5c] sm:p-12">
+          <span className="mb-3 text-3xl sm:text-4xl">📷</span>
+          <span className="break-all text-center text-sm font-medium text-gray-600 sm:text-base">
             {file ? file.name : '画像または動画を選択'}
           </span>
           <span className="text-sm text-gray-400 mt-1">JPG / PNG / MP4 / MOV</span>

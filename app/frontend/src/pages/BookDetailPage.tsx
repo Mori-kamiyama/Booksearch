@@ -1,13 +1,16 @@
-import { Link, useParams } from 'react-router-dom'
+import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Map } from 'lucide-react'
 import { getBook } from '../lib/api'
 import type { Book } from '../lib/types'
 import { AltShelfList, BookHero, BookLocationPanel, ConfidenceMeter, LowConfidenceBanner } from '../components/book'
-import { EmptyState, ErrorState, PageHeader, Skeleton } from '../components/common'
+import { Breadcrumbs, EmptyState, ErrorState, PageHeader, Skeleton } from '../components/common'
 
 export default function BookDetailPage() {
   const { id } = useParams<{ id: string }>()
+  const [params] = useSearchParams()
+  const query = params.get('q')?.trim()
+  const shelfId = params.get('shelf')?.trim()
   const [book, setBook] = useState<Book | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
@@ -39,6 +42,12 @@ export default function BookDetailPage() {
 
   return (
     <div>
+      <Breadcrumbs items={shelfId
+        ? [{ label: 'MAP', to: '/map' }, { label: `棚${shelfId}`, to: `/map/${encodeURIComponent(shelfId)}` }, { label: book.title }]
+        : query
+          ? [{ label: 'TOP', to: '/' }, { label: query }, { label: book.title }]
+          : [{ label: 'TOP', to: '/' }, { label: book.title }]}
+      />
       <PageHeader title="本の場所" back />
       <div className="grid gap-4">
         <BookHero book={book} />
