@@ -1,5 +1,5 @@
 export interface DiscoveryBook { id: number; title: string; authors: string }
-export interface DiscoveryTopic { id: string; label: string; aliases: string[]; count: number }
+export interface DiscoveryTopic { id: string; label: string; aliases: string[]; count: number; genres?: string[] }
 export interface DiscoveryIndex { version: number; books: DiscoveryBook[]; topics: DiscoveryTopic[]; coverage: { books: number; page_count: number; level: number } }
 let cached: Promise<DiscoveryIndex> | undefined
 export function loadDiscoveryIndex(): Promise<DiscoveryIndex> {

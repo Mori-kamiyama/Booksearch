@@ -11,6 +11,7 @@ import sqlite3
 class Constraints:
     author: str = ''
     topic: str = ''
+    genre: str = ''
     min_pages: int | None = None
     max_pages: int | None = None
     level: str = ''
@@ -43,7 +44,7 @@ class SearchTools:
             args.extend([f'%{escaped}%', f'%{escaped}%'])
         if self.constraints.author:
             clauses.append('b.authors=?'); args.append(self.constraints.author)
-        for selected in set(filter(None, [topic, self.constraints.topic])):
+        for selected in set(filter(None, [topic, self.constraints.topic, self.constraints.genre])):
             clauses.append('EXISTS (SELECT 1 FROM book_topics t WHERE t.book_id=b.id AND t.topic_id=?)')
             args.append(selected)
         for field, op, value in [('page_count', '>=', self.constraints.min_pages), ('page_count', '<=', self.constraints.max_pages), ('level', '=', self.constraints.level or None)]:

@@ -137,7 +137,7 @@ export function SearchBar({
               className={`flex min-h-11 cursor-pointer items-center gap-3 px-4 py-3 text-left hover:bg-primary-soft ${active === index ? 'bg-primary-soft' : ''}`}>
               <SearchIcon className="size-4 shrink-0 text-ink-muted" />
               <span className="min-w-0 flex-1 break-words text-sm text-ink">{item.value}</span>
-              <span className="shrink-0 text-xs text-ink-muted">{item.kind === 'topic' ? 'テーマ' : item.kind === 'author' ? '著者' : '書名'}</span>
+              <span className="shrink-0 text-xs text-ink-muted">{item.kind === 'topic' ? (item.topicId?.startsWith('ndc-') ? 'ジャンル' : 'テーマ') : item.kind === 'author' ? '著者' : '書名'}</span>
             </li>
           ))}
         </ul>

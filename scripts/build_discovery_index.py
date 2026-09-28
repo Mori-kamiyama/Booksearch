@@ -16,7 +16,9 @@ THEMES = [
     ('brutalism', 'ブルータリズム', ['brutalism', 'ブルータリズム', 'ブルータリズム建築'], r'ブルータリズム|brutalism'),
     ('english-learning', '英語学習', ['英語', '英会話', 'TOEIC', 'TOEFL'], r'英語|英会話|toeic|toefl'),
     ('python', 'Python', ['Python', 'パイソン'], r'\bpython\b|パイソン'),
-    ('design', 'デザイン', ['デザイン', 'design'], r'デザイン|\bdesign\b'),
+    ('typography', 'タイポグラフィ', ['タイポグラフィ', 'typography'], r'タイポグラフィ|\btypography\b'),
+    ('ui-design', 'UIデザイン', ['UIデザイン', 'UI design', 'ユーザーインターフェース'], r'ui.?デザイン|\bui design\b|ユーザーインターフェース'),
+    ('graphic-design', 'グラフィックデザイン', ['グラフィックデザイン', 'graphic design'], r'グラフィック.?デザイン|\bgraphic design\b'),
 ]
 
 def build(source, output_db, output_index):
@@ -57,6 +59,9 @@ def build(source, output_db, output_index):
     topics = [{'id': f'ndc-{i}', 'label': label, 'aliases': [label], 'count': counts.get(f'ndc-{i}', 0)} for i, label in enumerate(GENRES)]
     topics += [{'id': ident, 'label': label, 'aliases': aliases, 'count': counts.get(ident, 0)} for ident, label, aliases, _ in THEMES]
     topics = [topic for topic in topics if topic['count']]
+    for topic in topics:
+        if not topic['id'].startswith('ndc-'):
+            topic['genres'] = [row[0] for row in db.execute("SELECT DISTINCT g.topic_id FROM book_topics t JOIN book_topics g ON g.book_id=t.book_id WHERE t.topic_id=? AND g.topic_id LIKE 'ndc-%' ORDER BY g.topic_id", (topic['id'],))]
     payload = {'version': 1, 'books': entries, 'topics': topics, 'coverage': {'books': len(entries), 'page_count': db.execute('SELECT count(*) FROM book_discovery WHERE page_count IS NOT NULL').fetchone()[0], 'level': 0}}
     output_index.parent.mkdir(parents=True, exist_ok=True)
     output_index.write_text(json.dumps(payload, ensure_ascii=False, separators=(',', ':')))

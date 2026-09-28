@@ -28,10 +28,13 @@ def test_index_preserves_unknowns_and_excludes_ambiguous_metadata(catalog):
     db = sqlite3.connect(output)
     assert db.execute("SELECT book_id FROM book_topics WHERE topic_id='c-language'").fetchall() == [(1,)]
     assert db.execute('SELECT page_count,level FROM book_discovery WHERE book_id=2').fetchone() == (None, None)
+    import json
+    index = json.loads((output.parent / 'index.json').read_text())
+    assert next(topic for topic in index['topics'] if topic['id'] == 'c-language')['genres'] == ['ndc-0']
     with pytest.raises(ValueError): build(source, source, source.parent/'bad.json')
 
 def test_agent_refines_after_empty_search_and_grounds_results(catalog):
-    tools = SearchTools(catalog[1], Constraints(topic='c-language', max_pages=200))
+    tools = SearchTools(catalog[1], Constraints(topic='c-language', genre='ndc-0', max_pages=200))
     def planner(state):
         trace = state['trace']
         if not trace: return {'tool':'search','args':{'query':'初心者向け'}}

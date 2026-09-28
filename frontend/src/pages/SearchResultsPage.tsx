@@ -3,6 +3,7 @@ import { BookOpen } from 'lucide-react'
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import { EmptyState, ErrorState } from '../components/common'
 import { CoverImage, SearchBar } from '../components/book'
+import { SearchFilters } from '../components/SearchFilters'
 import { searchBookResults } from '../lib/api'
 import { loadDiscoveryIndex, type DiscoveryIndex } from '../lib/discoveryIndex'
 import type { Book } from '../lib/types'
@@ -54,9 +55,15 @@ export default function SearchResultsPage() {
   const location = useLocation()
   const [params] = useSearchParams()
   const sourceQuery = params.get('q')?.trim() ?? ''
-  const filters = new URLSearchParams([...params].filter(([key]) => ['author', 'topic', 'min_pages', 'max_pages', 'level'].includes(key))).toString()
+  const filters = new URLSearchParams([...params].filter(([key]) => ['genre', 'topic', 'min_pages', 'max_pages', 'level'].includes(key))).toString()
   const [discovery, setDiscovery] = useState<DiscoveryIndex | null>(null)
   useEffect(() => { loadDiscoveryIndex().then(setDiscovery).catch(() => {}) }, [])
+  useEffect(() => {
+    if (params.has('author')) {
+      const next = new URLSearchParams(params); next.delete('author'); next.delete('page')
+      navigate(`/search?${next.toString()}`, { replace: true })
+    }
+  }, [params, navigate])
   const page = parsePage(params.get('page'))
   const candidateOffset = (page - 1) * SEARCH_PAGE_SIZE
   const offset = Number.isSafeInteger(candidateOffset) ? candidateOffset : 0
@@ -182,32 +189,7 @@ export default function SearchResultsPage() {
         <h1 className="sr-only">検索結果</h1>
         <SearchBar value={query} onChange={setQuery} onSubmit={runSearch} />
 
-        <form key={filters} aria-label="検索の絞り込み" className="mt-6 flex flex-wrap items-end gap-3 text-sm" onSubmit={event => {
-          event.preventDefault()
-          const form = new FormData(event.currentTarget)
-          const next = new URLSearchParams()
-          for (const [key, value] of form) if (String(value).trim()) next.set(key, String(value).trim())
-          navigate(searchResultsPath(sourceQuery, 1, next.toString()))
-        }}>
-          <label className="flex flex-col gap-1">著者<input name="author" defaultValue={params.get('author') ?? ''} placeholder="著者名を指定" list="filter-authors" className="min-h-11 w-40 rounded border border-line px-2" /></label>
-          <datalist id="filter-authors">{[...new Set(discovery?.books.map(book => book.authors).filter(Boolean) ?? [])].sort().map(author => <option key={author} value={author} />)}</datalist>
-          <label className="flex flex-col gap-1">ジャンル・テーマ<select key={`topic-${Boolean(discovery)}`} name="topic" defaultValue={params.get('topic') ?? ''} className="min-h-11 max-w-48 rounded border border-line px-2">
-            <option value="">すべて</option>
-            {params.get('topic') && !discovery?.topics.some(topic => topic.id === params.get('topic')) && <option value={params.get('topic')!}>{params.get('topic')}</option>}
-            {discovery?.topics.map(topic => <option key={topic.id} value={topic.id}>{topic.label}</option>)}
-          </select></label>
-          <details className="w-full" open={params.has('min_pages') || params.has('max_pages') || params.has('level') || undefined}>
-            <summary className="min-h-11 cursor-pointer py-3 text-ink-muted">ページ数・レベル{discovery && !discovery.coverage.page_count && !discovery.coverage.level ? '（準備中）' : ''}</summary>
-            <div className="mb-3 flex flex-wrap gap-3">
-          <label className="flex flex-col gap-1">ページ数（下限）<input name="min_pages" type="number" min="1" max="100000" defaultValue={params.get('min_pages') ?? ''} disabled={!discovery?.coverage.page_count && !params.has('min_pages')} className="min-h-11 w-24 rounded border border-line px-2 disabled:bg-zinc-100" /></label>
-          <label className="flex flex-col gap-1">ページ数（上限）<input name="max_pages" type="number" min="1" max="100000" defaultValue={params.get('max_pages') ?? ''} disabled={!discovery?.coverage.page_count && !params.has('max_pages')} className="min-h-11 w-24 rounded border border-line px-2 disabled:bg-zinc-100" /></label>
-          <label className="flex flex-col gap-1">レベル<select name="level" defaultValue={params.get('level') ?? ''} disabled={!discovery?.coverage.level && !params.has('level')} className="min-h-11 rounded border border-line px-2 disabled:bg-zinc-100"><option value="">指定なし</option><option value="beginner">入門</option><option value="intermediate">中級</option><option value="advanced">専門</option></select></label>
-            </div>
-          </details>
-          <button className="min-h-11 rounded border border-line px-4 text-primary" type="submit">絞り込む</button>
-          {filters && <button className="min-h-11 px-3 text-primary underline" type="button" onClick={() => navigate(sourceQuery ? searchResultsPath(sourceQuery, 1) : '/')}>条件を解除</button>}
-
-        </form>
+        <SearchFilters filters={filters} discovery={discovery} onApply={next => navigate(sourceQuery || next ? searchResultsPath(sourceQuery, 1, next) : '/')} />
 
         {loading && <SearchGridSkeleton />}
         {!loading && error && <div className="mt-8"><ErrorState message="検索できませんでした。" onRetry={load} /></div>}

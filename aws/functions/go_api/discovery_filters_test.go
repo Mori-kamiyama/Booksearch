@@ -21,7 +21,7 @@ func TestDiscoveryFiltersBeforePagination(t *testing.T) {
 		`CREATE TABLE book_topics(book_id INTEGER,topic_id TEXT,evidence TEXT)`,
 		`INSERT INTO books(id,title,authors,title_norm,authors_norm) VALUES(1,'C言語一','著者','c言語一','著者'),(2,'C言語二','著者','c言語二','著者'),(3,'別の本','別著者','別の本','別著者')`,
 		`INSERT INTO book_discovery VALUES(1,150,'beginner'),(2,400,NULL),(3,NULL,NULL)`,
-		`INSERT INTO book_topics VALUES(1,'c-language','title'),(2,'c-language','title')`,
+		`INSERT INTO book_topics VALUES(1,'c-language','title'),(2,'c-language','title'),(1,'ndc-0','classification'),(2,'ndc-5','classification')`,
 	}
 	for _, statement := range statements {
 		if _, err = raw.Exec(statement); err != nil {
@@ -35,6 +35,10 @@ func TestDiscoveryFiltersBeforePagination(t *testing.T) {
 	}
 	if result.Total != 2 || len(result.Books) != 1 {
 		t.Fatalf("%+v", result)
+	}
+	result, err = store.SearchFiltered("", 10, 0, SearchFilters{Genre: "ndc-0", Topic: "c-language"})
+	if err != nil || result.Total != 1 || result.Books[0].ID != 1 {
+		t.Fatalf("genre intersection: %+v %v", result, err)
 	}
 	result, err = store.SearchFiltered("", 10, 0, SearchFilters{MaxPages: 200, Level: "beginner"})
 	if err != nil || result.Total != 1 || result.Books[0].ID != 1 {
