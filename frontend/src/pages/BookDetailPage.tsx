@@ -16,6 +16,7 @@ export default function BookDetailPage() {
   const { id } = useParams<{ id: string }>()
   const [params] = useSearchParams()
   const sourceQuery = params.get('q')?.trim() ?? ''
+  const sourceShelfId = params.get('shelf')?.trim() ?? ''
   const [query, setQuery] = useState(sourceQuery)
   const [book, setBook] = useState<Book | null>(null)
   const [loading, setLoading] = useState(true)
@@ -81,7 +82,18 @@ export default function BookDetailPage() {
 
         <div className="md:mx-auto md:w-full md:max-w-[920px] md:px-7">
           <nav aria-label="パンくず" className="mb-7 text-sm text-ink-muted md:mb-[39px]">
-            <Link to="/" className="text-primary hover:underline">TOP</Link>
+            {sourceShelfId ? (
+              <>
+                <Link to="/map" className="text-primary hover:underline">MAP</Link>
+                <span className="mx-2">&gt;</span>
+                <Link to={`/map/${encodeURIComponent(sourceShelfId)}`} className="text-primary hover:underline">棚{sourceShelfId}</Link>
+              </>
+            ) : (
+              <>
+                <Link to="/" className="text-primary hover:underline">TOP</Link>
+                {sourceQuery && <><span className="mx-2">&gt;</span><span className="line-clamp-1 inline-block max-w-[40vw] align-bottom">{sourceQuery}</span></>}
+              </>
+            )}
             <span className="mx-2">&gt;</span>
             <span className="line-clamp-1 align-bottom text-ink-muted">{book.title}</span>
           </nav>
