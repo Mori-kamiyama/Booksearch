@@ -146,6 +146,10 @@ func isStrippedPunct(r rune) bool {
 }
 
 type Book struct {
+	Description        *string          `json:"description,omitempty"`
+	DescriptionSource  *string          `json:"description_source,omitempty"`
+	PageCount          *int             `json:"page_count,omitempty"`
+	Level              *string          `json:"level,omitempty"`
 	ID                 int              `json:"id"`
 	Title              string           `json:"title"`
 	Authors            string           `json:"authors"`
@@ -228,7 +232,10 @@ func (s *Store) SearchFiltered(query string, limit, offset int, filters SearchFi
 	if offset < 0 {
 		offset = 0
 	}
-	where, whereArgs := searchWhere(terms)
+	where, whereArgs, searchErr := s.discoverySearchWhere(terms)
+	if searchErr != nil {
+		return SearchResult{}, searchErr
+	}
 	if len(terms) == 0 {
 		where = "1=1"
 		whereArgs = nil
@@ -294,6 +301,10 @@ func (s *Store) GetByID(id int) (*Book, error) {
 	}
 	books, err = s.attachShelfCandidates(books)
 	if err != nil {
+		return nil, err
+	}
+	rows.Close()
+	if err := s.enrichBook(&books[0]); err != nil {
 		return nil, err
 	}
 	return &books[0], nil

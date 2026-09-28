@@ -82,6 +82,7 @@ function AppShell({ initialFeatured }: { initialFeatured?: FeaturedSnapshot | nu
           <Routes>
             <Route path="/" element={<SearchPage initialFeatured={initialFeatured} />} />
             <Route path="/search" element={<SearchResultsPage />} />
+            <Route path="/ai-search" element={<Navigate to="/" replace />} />
             <Route path="/books/:id" element={<BookDetailPage />} />
             <Route path="/index" element={<IndexPage />} />
             <Route path="/map" element={<MapPage />} />

@@ -30,7 +30,7 @@ def test_index_preserves_unknowns_and_excludes_ambiguous_metadata(catalog):
     assert db.execute('SELECT page_count,level FROM book_discovery WHERE book_id=2').fetchone() == (None, None)
     import json
     index = json.loads((output.parent / 'index.json').read_text())
-    assert next(topic for topic in index['topics'] if topic['id'] == 'c-language')['genres'] == ['ndc-0']
+    assert next(topic for topic in index['topics'] if topic['id'] == 'c-language')['genres'] == ['genre-it']
     with pytest.raises(ValueError): build(source, source, source.parent/'bad.json')
 
 def test_agent_refines_after_empty_search_and_grounds_results(catalog):

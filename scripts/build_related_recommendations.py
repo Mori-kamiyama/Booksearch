@@ -128,7 +128,7 @@ def build(path, report_path=None):
           COALESCE(m.description,'') description, COALESCE(m.categories_json,'[]') categories_json
           FROM books b LEFT JOIN book_metadata m ON m.book_id=b.id AND m.fetch_status='matched' ORDER BY b.id''')]
         topics = defaultdict(set)
-        for row in db.execute("SELECT book_id,topic_id FROM book_topics WHERE topic_id NOT LIKE 'ndc-%'"):
+        for row in db.execute("SELECT book_id,topic_id FROM book_topics WHERE topic_id NOT LIKE 'ndc-%' AND topic_id NOT LIKE 'genre-%'"):
             topics[row[0]].add(row[1])
         index = RelatedIndex(books, topics)
         # Evaluate a deterministic, class-stratified sample against the saved baseline.
