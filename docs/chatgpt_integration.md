@@ -1,6 +1,12 @@
 # ChatGPTからホンノキの蔵書検索
 
-## 状態と設計
+## 現在の運用
+
+AWS版を利用する。MCP: `https://h8wcg8zqd3.execute-api.ap-northeast-1.amazonaws.com/mcp`。
+ChatGPT: https://chatgpt.com/plugins/plugin_asdk_app_6aba2d5e92e88191ad3749bc116b7d38 （ホンノキ蔵書検索（AWS）、アイコン付き・接続済み）。
+MacのAPI・SQLite・Secure MCP Tunnelへ依存しない。以下のローカル起動・トンネル設定は試作時の記録として残す。旧アプリは削除していないので、利用時にはAWS版を選択する。
+
+## 試作時の状態と設計
 
 独自の会話UIは取り下げ、ChatGPTが検索ツールを使う方式を試す。`integrations/chatgpt/server.py` に読み取り専用MCPサーバーを実装した。ChatGPTへの登録と実際の会話評価は未完了。通常検索のフロントエンドは変更しない。
 
@@ -123,3 +129,15 @@ MCPを専用Lambda + HTTP APIへ移す。Streamable HTTPはstateless/json_respon
 MCPは本番APIから内容紹介・出典・ページ数・難易度を取得する。ローカルsnapshotは開発用に残すがAWSでは指定しない。本番Lambdaから取得した既存DBを基底に、全4,202冊のID・書名・ISBNの完全一致を確認して、検証済みメタデータ・検索索引・関連本テーブルだけを更新する。既存の蔵書・書影・棚テーブルは維持する。内容紹介はfetch_status=matchedのみ返す。
 
 ビルド: `uv run --no-project python integrations/chatgpt/build_aws.py --output /tmp/booksearch-mcp-release.zip`。zipをS3へ配置し`aws-template.yaml`のArtifactBucket/ArtifactKeyを指定して`booksearch-mcp`スタックをデプロイする。出力McpUrlをChatGPTのサーバーURL方式で登録する。Mac上のトンネルは不要になる。通知メール設定は保留のまま、Lambda Errorsアラームを用意する。
+
+### AWS移行の検証結果
+
+PR #10（パンくず）・#11（検索とMCP）をmasterへマージ。実装のmerge commitは`5155530d`。`booksearch-mcp`はCREATE_COMPLETE、既存`booksearch`はUPDATE_COMPLETE。本番スタックの元テンプレートのコード参照だけを変更し、展開後の差分がApiFunction/HomePublisherFunctionのCodeのみであることを確認して反映した。スキャン処理の構成は維持した。
+
+APIとMCPの実通信で、本472の282ページ・出典google_books・641文字の紹介文、2冊の書影、HTML資源を確認。「パイソン」の検索は185冊。本番4,202冊のうち3,970冊にmatchedメタデータを収録。紹介文やページ数が欠ける本は不明のまま返す。
+
+ホームはweek=2026-40、5冊、clientIndexHash=`b778432bd7592c877a623a437ff0d6bd872bd29d89f903ef1a9d36ec3ffddd86`で生成成功。CloudFront invalidation `IATOVZ0W7LHOI8XXSBA1MXG4O3`はCompleted。配信JSは`index-CmtBhNVP.js`。favicon.svgと新しいgenre索引もHTTP200を確認。
+
+検証: MCP7件、Go API/backend全件、フロント53件、検索Python52件、検索UI回帰16件、home publisher8件が成功。本番smokeは10件成功・2件が旧searchboxロール参照で失敗。現行の候補付きcomboboxに合わせてテストを修正し、Chromium/WebKitの2件を再実行して成功した。
+
+ChatGPT実会話: https://chatgpt.com/c/6aba2db6-dd98-83ee-b14f-f3b3168df8dc 。用途の一問→入門用→本298/1797の書影・紹介・理由・場所リンクを表示した。これは接続と表示の検証であり、推薦精度の包括評価ではない。ChatGPTの開発者CSPは引き続きオフ表示で、強制有効時の検証は未完了。

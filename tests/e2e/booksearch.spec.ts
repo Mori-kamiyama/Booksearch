@@ -5,7 +5,7 @@ const API_BASE = process.env.API_BASE
 
 test('home exposes a labelled search and scan action', async ({ page }) => {
   await page.goto('/')
-  await expect(page.getByRole('searchbox', { name: '本を検索' })).toBeVisible()
+  await expect(page.getByRole('combobox', { name: '本を検索' })).toBeVisible()
   await expect(page.getByRole('button', { name: '検索', exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: '本棚をスキャン', exact: true })).toBeVisible()
 })
