@@ -264,7 +264,6 @@ function Recommendations({ books, onOpen, failed, loading }: { books: RelatedBoo
                 />
               </div>
               <p className="line-clamp-2 w-full text-center text-[11px] leading-[13px] text-ink">{book.title}</p>
-              {book.reasons.map(reason => <p key={reason} className="text-xs text-ink-muted">{reason}</p>)}
             </button>
           )
         })}

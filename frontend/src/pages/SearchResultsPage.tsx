@@ -8,7 +8,6 @@ import { searchBookResults } from '../lib/api'
 import { loadDiscoveryIndex, type DiscoveryIndex } from '../lib/discoveryIndex'
 import { searchCorrections } from '../lib/searchCorrections'
 import type { Book } from '../lib/types'
-import { formatShelfLabel } from '../lib/shelf'
 import { fallbackCoverForTitle } from '../data/figmaBooks'
 
 const SEARCH_PAGE_SIZE = 30
@@ -290,8 +289,7 @@ function SearchResultCard({ book, onOpen, onPointerDown }: { book: Book; onOpen:
       <span id={`search-title-${book.id}`} className="line-clamp-2 w-full text-sm leading-normal text-ink md:text-[15px]">{book.title}</span>
       <span id={`search-meta-${book.id}`} className="flex w-full flex-col gap-1 text-xs text-ink-muted">
         {book.authors && <span className="line-clamp-1">{book.authors}</span>}
-        <span>{[book.published_date?.match(/^\d{4}/)?.[0], book.class_number ? `分類 ${book.class_number}` : null].filter(Boolean).join(' / ')}</span>
-        <span>{book.shelf_candidates?.[0]?.shelf_id ? `棚候補: ${formatShelfLabel(book.shelf_candidates[0].shelf_id)}` : '棚の位置情報なし'}</span>
+        {book.published_date?.match(/^\d{4}/)?.[0] && <span>{book.published_date.match(/^\d{4}/)?.[0]}</span>}
       </span>
     </button>
   )
