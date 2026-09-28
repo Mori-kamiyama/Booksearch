@@ -1,4 +1,4 @@
-import { Link, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ScanLine } from 'lucide-react'
 import { getShelfCandidates } from '../lib/api'
@@ -9,6 +9,7 @@ import { EmptyState, ErrorState, PageHeader, Skeleton } from '../components/comm
 import { FreshnessBadge, ShelfLocationLabel, ShelfMiniMap } from '../components/shelf'
 
 export default function ShelfDetailPage() {
+  const navigate = useNavigate()
   const { shelfId } = useParams<{ shelfId: string }>()
   const shelf = getSlot(shelfId)
   const validShelfId = shelf?.shelf_id ?? ''
@@ -66,6 +67,7 @@ export default function ShelfDetailPage() {
 
   return (
     <div>
+      {shelf && <nav aria-label="パンくず" className="mb-4 text-sm text-ink-muted"><Link to="/map" className="text-primary hover:underline">MAP</Link><span className="mx-2">&gt;</span><span className="text-ink">棚{validShelfId}</span></nav>}
       <PageHeader title="棚区画" back />
       {!shelf ? (
         <EmptyState
@@ -101,7 +103,7 @@ export default function ShelfDetailPage() {
           ) : (
             <div className="grid gap-3">
               {books.map(candidate => (
-                <BookCard key={`${candidate.book_id}:${candidate.shelf_id}`} book={shelfBookFromCandidate(candidate)} />
+                <BookCard key={`${candidate.book_id}:${candidate.shelf_id}`} book={shelfBookFromCandidate(candidate)} onClick={() => navigate(`/books/${candidate.book_id}?shelf=${encodeURIComponent(validShelfId)}`)} />
               ))}
             </div>
           )}
