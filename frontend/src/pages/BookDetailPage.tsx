@@ -86,14 +86,6 @@ export default function BookDetailPage() {
             <span className="line-clamp-1 align-bottom text-ink-muted">{book.title}</span>
           </nav>
 
-          <div className="mb-6 flex items-center justify-between gap-3 rounded-xl bg-primary-soft px-4 py-3 text-sm">
-            <div>
-              <p className="text-xs text-ink-muted">{topCandidate ? 'この本の棚候補' : 'この本の位置は未登録です'}</p>
-              {topCandidate && <ShelfLocationLabel shelfId={topCandidate.shelf_id} size="sm" />}
-            </div>
-            <a href="#shelf-location" className="shrink-0 py-2 font-semibold text-primary underline">{topCandidate ? '場所を確認' : '探し方を見る'}</a>
-          </div>
-
           <section className="grid gap-8 md:grid-cols-[minmax(0,300px)_minmax(0,1fr)] md:gap-[44px]">
             <BookCoverPanel book={book} cover={cover} />
             <BookInfoPanel book={book} readingHours={readingHours} />
@@ -195,22 +187,25 @@ function MapSection({ candidate, onOpenMap, onScanForBook }: { candidate?: Shelf
             <ShelfLocationLabel shelfId={candidate.shelf_id} size="lg" />
             <p className="mt-1 text-sm text-ink-muted">この本はここにありそう</p>
             <p className="mt-2 text-xs text-ink-muted">観測 {candidate.observations}回 / 位置は推定です</p>
-            <button type="button" onClick={onOpenMap} className="tap-soft mt-4 text-sm font-semibold text-primary hover:underline">
-              マップで見る
-            </button>
+            <div className="mt-4 flex flex-wrap items-center justify-center gap-x-5 gap-y-3 md:justify-start">
+              <button type="button" onClick={onOpenMap} className="tap-soft min-h-11 text-sm font-semibold text-primary hover:underline">
+                マップで見る
+              </button>
+              <button type="button" onClick={onScanForBook} className="tap-card min-h-11 rounded-full bg-primary px-4 text-sm font-semibold text-white">
+                スキャンして探す
+              </button>
+            </div>
           </div>
           <LibraryMap shelfId={candidate.shelf_id} />
         </div>
       ) : (
-        <p className="mt-4 text-sm text-ink-muted">まだ棚の位置が登録されていません。スキャンするとここに表示されます。</p>
+        <div className="mt-4">
+          <p className="text-sm text-ink-muted">まだ棚の位置が登録されていません。スキャンするとここに表示されます。</p>
+          <button type="button" onClick={onScanForBook} className="tap-card mt-4 min-h-11 rounded-full bg-primary px-4 text-sm font-semibold text-white">
+            スキャンして探す
+          </button>
+        </div>
       )}
-      <div className="mt-6 rounded-xl border border-primary-soft bg-primary-soft p-4">
-        <p className="text-sm font-semibold text-ink">本棚を見ながら、この本を探す</p>
-        <p className="mt-1 text-xs leading-5 text-ink-muted">周囲の本も一緒に認識し、対象本は候補と自動照合を分けて表示します。</p>
-        <button type="button" onClick={onScanForBook} className="tap-card mt-3 rounded-full bg-primary px-4 py-2 text-sm font-semibold text-white">
-          スキャンしながら探す
-        </button>
-      </div>
     </section>
   )
 }
