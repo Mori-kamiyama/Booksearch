@@ -39,7 +39,7 @@ export function PageHeader({ title, back = false }: { title: string; back?: bool
           <ArrowLeft className="size-5" />
         </button>
       )}
-      <h1 className="text-xl font-bold text-ink">{title}</h1>
+      <h1 className="text-base font-bold text-ink md:text-xl">{title}</h1>
     </div>
   )
 }
@@ -236,7 +236,7 @@ function MenuDrawer({ onClose }: { onClose: () => void }) {
     { to: '/admin/tags', label: 'タグ配置' },
   ]
   const itemClass = ({ isActive }: { isActive: boolean }) =>
-    `flex min-h-12 items-center border-b border-line text-xl ${isActive ? 'text-[#087f5b]' : 'text-ink'}`
+    `flex min-h-12 items-center border-b border-line text-base md:text-xl ${isActive ? 'text-[#087f5b]' : 'text-ink'}`
 
   // ヘッダーの backdrop-blur が fixed の基準を変えるため body 直下に描画する
   return createPortal(

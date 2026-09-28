@@ -56,9 +56,9 @@ export default function SearchPage({ initialFeatured }: { initialFeatured?: Feat
         className="pointer-events-none absolute -bottom-[122px] -right-[72px] -z-0 hidden h-[246px] w-[234px] select-none opacity-95 md:block md:-bottom-[63px] md:-right-[46px] md:h-[331px] md:w-[315px]"
       />
       <div className="relative z-10 mx-auto flex min-h-svh w-full max-w-[402px] flex-col justify-center gap-8 pb-6 pt-[72px] md:max-w-none md:justify-start md:gap-16 md:pb-16 md:pt-0">
-        <div className="flex w-full flex-col items-center gap-6 md:mt-[25vh] md:w-[444px] md:self-center md:gap-10">
-          <BrandMark />
-          <h1 className="w-full text-center text-2xl font-normal leading-[29px] tracking-[0.05em] text-ink">
+        <div className="flex w-full flex-col items-center gap-5 px-5 md:mt-[25vh] md:w-[444px] md:self-center md:gap-10 md:px-0">
+          <BrandMark className="scale-90 md:scale-100" />
+          <h1 className="w-full text-center text-lg font-normal leading-6 tracking-[0.05em] text-ink md:text-2xl md:leading-[29px]">
             どんな<span className="text-[#087f5b]">本</span>でも一瞬で
           </h1>
           <SearchBar value={query} onChange={setQuery} onSubmit={runSearch} />
@@ -67,13 +67,13 @@ export default function SearchPage({ initialFeatured }: { initialFeatured?: Feat
         {featuredError && <div role="status" className="text-center text-sm text-ink-muted">おすすめを読み込めませんでした。<button type="button" className="ml-2 min-h-11 text-primary underline" onClick={() => setRetry(value => value + 1)}>再試行</button></div>}
         {!featuredLoading && !featuredError && featured.length === 0 && (
           <div className="flex flex-col items-center gap-1 text-center text-sm text-ink-muted" role="status">
-            <p className="text-base text-ink">今週のおすすめ</p>
+            <p className="text-sm text-ink md:text-base">今週のおすすめ</p>
             <p>おすすめは準備中です。</p>
           </div>
         )}
         {(featuredLoading || featured.length > 0) && (
           <div className="flex flex-col items-center gap-4 md:gap-8">
-            <p className="w-full text-center text-base leading-[19px] text-ink">今週のおすすめ</p>
+            <p className="w-full text-center text-sm leading-5 text-ink md:text-base md:leading-[19px]">今週のおすすめ</p>
             <div className="flex w-full snap-x snap-mandatory scroll-px-7 gap-8 overflow-x-auto px-7 [-webkit-overflow-scrolling:touch] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden md:w-auto md:snap-none md:justify-center md:gap-[22px] md:overflow-visible md:px-0 md:scroll-px-0">
               {featuredLoading
                 ? Array.from({ length: 5 }, (_, index) => <FeaturedBookSkeleton key={index} />)
@@ -85,8 +85,8 @@ export default function SearchPage({ initialFeatured }: { initialFeatured?: Feat
         )}
 
         <div className="relative z-20 flex flex-col items-center gap-3 self-center md:fixed md:bottom-[67px] md:right-8 md:z-10">
-          <button type="button" onClick={() => navigate('/scan')} className="tap-card flex h-[71px] w-[196px] items-center justify-center gap-4 rounded-full bg-[#087f5b] px-6 py-4 text-2xl text-white shadow-[0_10px_24px_rgba(8,127,91,0.22)] transition hover:bg-[#076b4d] md:size-[90px] md:bg-[#363636] md:p-0 md:hover:bg-[#222]" aria-label="本棚をスキャン">
-            <ScanLine className="size-9 text-white md:size-12" strokeWidth={1.8} />
+          <button type="button" onClick={() => navigate('/scan')} className="tap-card flex h-14 w-44 items-center justify-center gap-3 rounded-full bg-[#087f5b] px-6 text-lg text-white shadow-[0_10px_24px_rgba(8,127,91,0.22)] transition hover:bg-[#076b4d] md:size-[90px] md:bg-[#363636] md:p-0 md:hover:bg-[#222]" aria-label="本棚をスキャン">
+            <ScanLine className="size-7 text-white md:size-12" strokeWidth={1.8} />
             <span className="md:hidden">スキャン</span>
           </button>
           <p className="text-center text-xs leading-[15px] text-ink md:hidden">本棚をスキャンして検索</p>
@@ -114,7 +114,7 @@ function FeaturedBookCard({ book, eager = false, onClick, className = '' }: { bo
           <CoverImage fallbackClassName="grid h-full w-full place-items-center bg-[#d9d9d9]" />
         )}
       </div>
-      <p className="line-clamp-2 min-h-[34px] w-full break-words px-1 text-center text-sm leading-[17px] text-ink md:min-h-[26px] md:px-0 md:text-[11px] md:leading-[13px]">{book.title}</p>
+      <p className="line-clamp-2 min-h-[32px] w-full break-words px-1 text-center text-[13px] leading-4 text-ink md:min-h-[26px] md:px-0 md:text-[11px] md:leading-[13px]">{book.title}</p>
     </button>
   )
 }

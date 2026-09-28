@@ -16,6 +16,7 @@ export default function BookDetailPage() {
   const { id } = useParams<{ id: string }>()
   const [params] = useSearchParams()
   const sourceQuery = params.get('q')?.trim() ?? ''
+  const sourceShelfId = params.get('shelf')?.trim() ?? ''
   const [query, setQuery] = useState(sourceQuery)
   const [book, setBook] = useState<Book | null>(null)
   const [loading, setLoading] = useState(true)
@@ -81,7 +82,18 @@ export default function BookDetailPage() {
 
         <div className="md:mx-auto md:w-full md:max-w-[920px] md:px-7">
           <nav aria-label="パンくず" className="mb-7 text-sm text-ink-muted md:mb-[39px]">
-            <Link to="/" className="text-primary hover:underline">TOP</Link>
+            {sourceShelfId ? (
+              <>
+                <Link to="/map" className="text-primary hover:underline">MAP</Link>
+                <span className="mx-2">&gt;</span>
+                <Link to={`/map/${encodeURIComponent(sourceShelfId)}`} className="text-primary hover:underline">棚{sourceShelfId}</Link>
+              </>
+            ) : (
+              <>
+                <Link to="/" className="text-primary hover:underline">TOP</Link>
+                {sourceQuery && <><span className="mx-2">&gt;</span><span className="line-clamp-1 inline-block max-w-[40vw] align-bottom">{sourceQuery}</span></>}
+              </>
+            )}
             <span className="mx-2">&gt;</span>
             <span className="line-clamp-1 align-bottom text-ink-muted">{book.title}</span>
           </nav>
@@ -136,7 +148,7 @@ function BookCoverPanel({ book, cover }: { book: Book; cover?: string }) {
 function BookInfoPanel({ book, readingHours }: { book: Book; readingHours: number | null }) {
   return (
     <section className="md:pt-2">
-      <h1 className="text-2xl font-normal leading-[1.35] text-ink md:text-[32px]">{book.title}</h1>
+      <h1 className="text-lg font-normal leading-[1.35] text-ink md:text-[32px]">{book.title}</h1>
       <dl className="mt-4 grid gap-1 text-sm leading-6 text-ink md:text-base">
         <MetaRow label="著者" value={book.authors} accent />
         <MetaRow label="出版社" value={book.publisher} />
@@ -227,7 +239,7 @@ function AiSummarySection({ text }: { text: string }) {
 function Recommendations({ books, onOpen, failed, loading }: { books: RelatedBook[]; onOpen: (bookId: number) => void; failed: boolean; loading: boolean }) {
   return (
     <section>
-      <h2 className="text-lg font-bold leading-[1.4] text-ink">関連する本</h2>
+      <h2 className="text-base font-bold leading-[1.4] text-ink md:text-lg">関連する本</h2>
       {books.length === 0 && <p className="mt-3 text-sm text-ink-muted">{loading ? '関連する本を読み込んでいます…' : failed ? '関連する本を取得できませんでした。' : '関連する本はまだ用意されていません。'}</p>}
       <div className="-mx-7 mt-5 flex snap-x snap-mandatory scroll-px-7 items-start gap-6 overflow-x-auto px-7 pb-2 [-webkit-overflow-scrolling:touch] [scrollbar-width:none] md:mx-0 md:snap-none md:gap-5 md:overflow-x-auto md:px-0 [&::-webkit-scrollbar]:hidden">
         {books.map(book => {
