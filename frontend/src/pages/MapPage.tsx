@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { candidateCounts } from '../lib/candidateCounts'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { getShelfCandidates } from '../lib/api'
 import type { ShelfCandidate } from '../lib/types'
-import { getSlot } from '../lib/shelf'
 import { EmptyState, ErrorState, PageHeader, Skeleton } from '../components/common'
 import { LibraryFloorMap, ShelfUnitGrid } from '../components/shelf'
 
@@ -13,39 +13,29 @@ export default function MapPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
 
+  const requestRef = useRef(0)
   const load = useCallback(async () => {
+    const request = ++requestRef.current
     setLoading(true)
     setError(false)
     try {
-      setCandidates(await getShelfCandidates())
+      const results = await getShelfCandidates()
+      if (request === requestRef.current) setCandidates(results)
     } catch {
-      setCandidates([])
-      setError(true)
+      if (request === requestRef.current) { setCandidates([]); setError(true) }
     } finally {
-      setLoading(false)
+      if (request === requestRef.current) setLoading(false)
     }
   }, [])
 
   useEffect(() => {
     load()
+    return () => { requestRef.current += 1 }
   }, [load])
 
-  const unitCounts = useMemo(() => {
-    const counts: Record<string, number> = {}
-    for (const candidate of candidates) {
-      const slot = getSlot(candidate.shelf_id)
-      if (slot) counts[slot.unit] = (counts[slot.unit] ?? 0) + 1
-    }
-    return counts
-  }, [candidates])
+  const unitCounts = useMemo(() => candidateCounts(candidates, 'unit'), [candidates])
 
-  const cellCounts = useMemo(() => {
-    const counts: Record<string, number> = {}
-    for (const candidate of candidates) {
-      counts[candidate.shelf_id] = (counts[candidate.shelf_id] ?? 0) + 1
-    }
-    return counts
-  }, [candidates])
+  const cellCounts = useMemo(() => candidateCounts(candidates, 'cell'), [candidates])
 
   return (
     <div>
@@ -55,7 +45,7 @@ export default function MapPage() {
       ) : error ? (
         <ErrorState message="マップを読み込めませんでした。" onRetry={load} />
       ) : candidates.length === 0 ? (
-        <EmptyState title="まだスキャンされていません" hint="棚スキャンが完了すると、ここに本のある区画が表示されます。" />
+        <EmptyState title="棚の位置情報がまだありません" hint="棚スキャンが完了すると、ここに本のある区画が表示されます。" />
       ) : (
         <div className="grid gap-4">
           <LibraryFloorMap unitCounts={unitCounts} onUnitClick={setSelectedUnit} />

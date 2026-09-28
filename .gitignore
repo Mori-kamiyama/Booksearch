@@ -13,6 +13,10 @@ backend/*.exe
 # Node / frontend
 frontend/node_modules/
 frontend/dist/
+frontend/.home-render/
+aws/functions/home_publisher/node_modules/
+aws/functions/home_publisher/render/
+aws/functions/home_publisher/client-index.html
 frontend/tag-placement/dist/
 frontend/*.tsbuildinfo
 frontend/vite.config.js
@@ -36,6 +40,7 @@ dataset/
 # Misc
 .claude/
 aws/.aws-sam/
+/.aws-sam/
 .nvimlog
 .DS_Store
 .vercel

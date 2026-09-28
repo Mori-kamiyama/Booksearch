@@ -1,6 +1,7 @@
 import { defineConfig, devices } from '@playwright/test'
 
-const FRONTEND_URL = process.env.FRONTEND_URL ?? 'https://d2uel8nex1m4w7.cloudfront.net'
+const FRONTEND_URL = process.env.FRONTEND_URL
+if (!FRONTEND_URL) throw new Error('Set FRONTEND_URL explicitly for live smoke checks; npm test runs local mocked regression checks.')
 
 export default defineConfig({
   testDir: './e2e',

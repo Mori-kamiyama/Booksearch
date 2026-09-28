@@ -35,10 +35,19 @@ LIBRARY_DB_SOURCE="$ROOT/outputs/library/library.db"
 if [[ ! -f "$LIBRARY_DB_SOURCE" ]]; then
   LIBRARY_DB_SOURCE="$ROOT/aws/functions/go_api/library.db"
 fi
-cp "$LIBRARY_DB_SOURCE" "$LOOKUP_ASSETS/library.db"
-if [[ "$LIBRARY_DB_SOURCE" != "$GO_API_ASSETS/library.db" ]]; then
-  cp "$LIBRARY_DB_SOURCE" "$GO_API_ASSETS/library.db"
-fi
+# Recover only ISBN-verified cached bibliography, without network calls.
+METADATA_OUTPUT="$ROOT/outputs/discovery/metadata.db"
+uv run --no-project python "$ROOT/scripts/import_cached_metadata.py" \
+  --db "$LIBRARY_DB_SOURCE" --output-db "$METADATA_OUTPUT"
+# Generate the browser index and the matching server-side facet tables together.
+DISCOVERY_OUTPUT="$ROOT/outputs/discovery/library.db"
+uv run --no-project python "$ROOT/scripts/build_discovery_index.py" \
+  --db "$METADATA_OUTPUT" --output-db "$DISCOVERY_OUTPUT" \
+  --output-index "$ROOT/frontend/public/search-index.json"
+uv run --no-project --with janome==0.5.0 python "$ROOT/scripts/build_related_recommendations.py" \
+  --db "$DISCOVERY_OUTPUT" --report "$ROOT/outputs/discovery/related-evaluation.json"
+cp "$DISCOVERY_OUTPUT" "$LOOKUP_ASSETS/library.db"
+cp "$DISCOVERY_OUTPUT" "$GO_API_ASSETS/library.db"
 cp "$ROOT/data/known_books.json" "$LOOKUP_ASSETS/known_books.json"
 
 echo "✓ assets ready"

@@ -21,19 +21,6 @@ body {
   color: #18181b;
 }
 
-html.home-scroll-lock,
-body.home-scroll-lock {
-  height: 100%;
-  overflow: hidden;
-  overscroll-behavior: none;
-}
-
-body.home-scroll-lock {
-  position: fixed;
-  inset: 0;
-  width: 100%;
-}
-
 button,
 input {
   font: inherit;

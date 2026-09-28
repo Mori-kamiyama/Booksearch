@@ -2,9 +2,18 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
+	"fmt"
+	"hash/fnv"
 	"math"
 	"net/url"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 	"unicode"
 
 	"golang.org/x/text/unicode/norm"
@@ -25,6 +34,101 @@ func normalizeQuery(value string) string {
 		b.WriteRune(r)
 	}
 	return b.String()
+}
+
+type searchTerm struct {
+	normalized string
+	isbn       string
+}
+
+type SearchResult struct {
+	Books []Book
+	Total int
+}
+
+func searchTerms(query string) []searchTerm {
+	var terms []searchTerm
+	for _, raw := range strings.Fields(norm.NFKC.String(query)) {
+		term := normalizeQuery(raw)
+		if term == "" || !hasSearchContent(term) {
+			continue
+		}
+		isbn := normalizeISBN(raw)
+		if len(isbn) < 10 {
+			isbn = ""
+		}
+		terms = append(terms, searchTerm{normalized: term, isbn: isbn})
+	}
+	return terms
+}
+
+func hasSearchContent(value string) bool {
+	for _, r := range value {
+		if unicode.IsLetter(r) || unicode.IsNumber(r) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeISBN(value string) string {
+	var b strings.Builder
+	for _, r := range value {
+		if r >= '0' && r <= '9' {
+			b.WriteRune(r)
+		} else if r == 'x' || r == 'X' {
+			b.WriteRune('X')
+		}
+	}
+	return b.String()
+}
+
+func escapeLike(value string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(value)
+}
+
+func searchWhere(terms []searchTerm) (string, []any) {
+	clauses := make([]string, 0, len(terms))
+	args := make([]any, 0, len(terms)*3)
+	for _, term := range terms {
+		pattern := "%" + escapeLike(term.normalized) + "%"
+		isbnPattern := pattern
+		if term.isbn != "" {
+			isbnPattern = "%" + escapeLike(term.isbn) + "%"
+		}
+		clauses = append(clauses, `(COALESCE(b.title_norm,'') LIKE ? ESCAPE '\' OR COALESCE(b.authors_norm,'') LIKE ? ESCAPE '\' OR COALESCE(b.isbn_norm,'') LIKE ? ESCAPE '\')`)
+		args = append(args, pattern, pattern, isbnPattern)
+	}
+	return strings.Join(clauses, " AND "), args
+}
+
+func searchOrder(terms []searchTerm) (string, []any) {
+	if len(terms) == 0 {
+		return "b.title_norm COLLATE NOCASE ASC, b.id ASC", nil
+	}
+	joined := make([]string, 0, len(terms))
+	for _, term := range terms {
+		joined = append(joined, term.normalized)
+	}
+	full := strings.Join(joined, "")
+	first := joined[0]
+	order := `CASE `
+	args := make([]any, 0, 6)
+	if len(terms) == 1 && terms[0].isbn != "" {
+		order += `WHEN LOWER(b.isbn_norm) = LOWER(?) THEN 500 `
+		args = append(args, terms[0].isbn)
+	}
+	order += `WHEN b.title_norm = ? THEN 400 `
+	args = append(args, full)
+	order += `WHEN b.title_norm LIKE ? ESCAPE '\' THEN 300 `
+	args = append(args, escapeLike(first)+"%")
+	order += `WHEN b.authors_norm LIKE ? ESCAPE '\' THEN 200 `
+	args = append(args, escapeLike(first)+"%")
+	order += `WHEN b.title_norm LIKE ? ESCAPE '\' THEN 100 `
+	args = append(args, "%"+escapeLike(full)+"%")
+	order += `WHEN b.authors_norm LIKE ? ESCAPE '\' THEN 50 ELSE 0 END DESC, b.title_norm COLLATE NOCASE ASC, b.id ASC`
+	args = append(args, "%"+escapeLike(full)+"%")
+	return order, args
 }
 
 func isStrippedPunct(r rune) bool {
@@ -77,7 +181,13 @@ type ShelfCandidateRow struct {
 }
 
 type Store struct {
-	db *sql.DB
+	db                *sql.DB
+	featuredMu        sync.Mutex
+	featuredWeek      string
+	featuredBooks     []Book
+	featuredLastWeek  string
+	featuredLastBooks []Book
+	featuredCachePath string
 }
 
 func Open(path string) (*Store, error) {
@@ -89,13 +199,57 @@ func Open(path string) (*Store, error) {
 		d.Close()
 		return nil, err
 	}
-	return &Store{db: d}, nil
+	return &Store{db: d, featuredCachePath: path + ".featured.json"}, nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) Search(query string, limit int) ([]Book, error) {
-	q := "%" + normalizeQuery(strings.TrimSpace(query)) + "%"
+	result, err := s.SearchWithTotal(query, limit)
+	return result.Books, err
+}
+
+func (s *Store) SearchWithTotal(query string, limit int) (SearchResult, error) {
+	return s.SearchWithTotalOffset(query, limit, 0)
+}
+
+func (s *Store) SearchWithTotalOffset(query string, limit, offset int) (SearchResult, error) {
+	return s.SearchFiltered(query, limit, offset, SearchFilters{})
+}
+
+func (s *Store) SearchFiltered(query string, limit, offset int, filters SearchFilters) (SearchResult, error) {
+	terms := searchTerms(query)
+	if len(terms) == 0 && filters.Empty() {
+		return SearchResult{Books: []Book{}, Total: 0}, nil
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	where, whereArgs := searchWhere(terms)
+	if len(terms) == 0 {
+		where = "1=1"
+		whereArgs = nil
+	}
+	filter, filterArgs, err := s.filterWhere(filters)
+	if err != nil {
+		return SearchResult{}, err
+	}
+	where = "(" + where + ") AND (" + filter + ")"
+	whereArgs = append(whereArgs, filterArgs...)
+	var total int
+	if err := s.db.QueryRow("SELECT COUNT(DISTINCT b.id) FROM books b WHERE "+where, whereArgs...).Scan(&total); err != nil {
+		return SearchResult{}, err
+	}
+	order, orderArgs := searchOrder(terms)
+	if len(terms) == 0 {
+		order = "b.title_norm COLLATE NOCASE ASC, b.id ASC"
+		orderArgs = nil
+	}
+	args := append(append([]any{}, whereArgs...), orderArgs...)
+	args = append(args, limit, offset)
 	rows, err := s.db.Query(`
 		SELECT b.id, b.title, COALESCE(b.authors,''), COALESCE(b.publisher,''),
 		       COALESCE(b.published_date,''), COALESCE(b.class_number,''),
@@ -103,21 +257,21 @@ func (s *Store) Search(query string, limit int) ([]Book, error) {
 		       bc.thumbnail, bc.info_link
 		FROM books b
 		LEFT JOIN book_covers bc ON b.id = bc.book_id
-		WHERE b.title_norm LIKE ?
-		   OR b.authors_norm LIKE ?
-		   OR b.isbn_norm = ?
-		LIMIT ?`,
-		q, q, strings.TrimSpace(query), limit,
+		WHERE `+where+` ORDER BY `+order+` LIMIT ? OFFSET ?`, args...,
 	)
 	if err != nil {
-		return nil, err
+		return SearchResult{}, err
 	}
 	defer rows.Close()
 	books, err := scanBooks(rows)
 	if err != nil {
-		return nil, err
+		return SearchResult{}, err
 	}
-	return s.attachShelfCandidates(books)
+	books, err = s.attachShelfCandidates(books)
+	if err != nil {
+		return SearchResult{}, err
+	}
+	return SearchResult{Books: books, Total: total}, nil
 }
 
 func (s *Store) GetByID(id int) (*Book, error) {
@@ -145,26 +299,32 @@ func (s *Store) GetByID(id int) (*Book, error) {
 	return &books[0], nil
 }
 
-// FeaturedBooks はサムネイルが登録済みの本からランダムにN件返す。
+// FeaturedBooks はサムネイルが登録済みの本から週単位で固定したN件を返す。
 // トップページの「今週のおすすめ」用で、実在する書影のない本は対象外にする。
-// 【一時的変更】書影の有無に関わらず、データベース内のすべての本からランダムに推薦するように変更。
 func (s *Store) FeaturedBooks(limit int) ([]Book, error) {
 	if limit <= 0 {
 		limit = 6
 	}
-	// 元のクエリ（書影のある本に限定）:
-	/*
-		rows, err := s.db.Query(`
-			SELECT b.id, b.title, COALESCE(b.authors,''), COALESCE(b.publisher,''),
-			       COALESCE(b.published_date,''), COALESCE(b.class_number,''),
-			       COALESCE(b.registration_number,''), COALESCE(b.isbn,''),
-			       bc.thumbnail, bc.info_link
-			FROM books b
-			JOIN book_covers bc ON b.id = bc.book_id
-			WHERE bc.thumbnail IS NOT NULL AND bc.thumbnail != ''
-			ORDER BY RANDOM()
-			LIMIT ?`, limit)
-	*/
+	if limit > 20 {
+		limit = 20
+	}
+	weekKey := featuredWeekKey()
+	s.featuredMu.Lock()
+	defer s.featuredMu.Unlock()
+	if s.featuredWeek == weekKey {
+		books := cloneBooks(s.featuredBooks)
+		if len(books) > limit {
+			books = books[:limit]
+		}
+		return s.attachShelfCandidates(books)
+	}
+	if manifest, err := s.loadFeaturedManifest(); err == nil && manifest.Week == weekKey {
+		s.setFeaturedSuccess(manifest)
+		return s.attachShelfCandidates(truncateFeatured(manifest.Books, limit))
+	} else if err == nil && manifest.Week != "" {
+		s.setFeaturedLast(manifest)
+	}
+	previousWeek, previousBooks := s.featuredLastWeek, cloneBooks(s.featuredLastBooks)
 	rows, err := s.db.Query(`
 		SELECT b.id, b.title, COALESCE(b.authors,''), COALESCE(b.publisher,''),
 		       COALESCE(b.published_date,''), COALESCE(b.class_number,''),
@@ -172,17 +332,170 @@ func (s *Store) FeaturedBooks(limit int) ([]Book, error) {
 		       bc.thumbnail, bc.info_link
 		FROM books b
 		LEFT JOIN book_covers bc ON b.id = bc.book_id
-		ORDER BY RANDOM()
-		LIMIT ?`, limit)
+		WHERE bc.thumbnail IS NOT NULL AND bc.thumbnail != ''
+		ORDER BY b.id`)
 	if err != nil {
+		if previousWeek != "" {
+			return s.featuredFallback(previousBooks, limit)
+		}
 		return nil, err
 	}
 	defer rows.Close()
 	books, err := scanBooks(rows)
 	if err != nil {
+		if previousWeek != "" {
+			return s.featuredFallback(previousBooks, limit)
+		}
 		return nil, err
 	}
-	return s.attachShelfCandidates(books)
+	seed := weekKey
+	sort.SliceStable(books, func(i, j int) bool {
+		return featuredSortKey(seed, books[i].ID) < featuredSortKey(seed, books[j].ID)
+	})
+	books = sanitizeFeaturedBooks(books)
+	if len(books) == 0 {
+		if previousWeek != "" {
+			return s.featuredFallback(previousBooks, limit)
+		}
+		return []Book{}, nil
+	}
+	manifest := featuredManifest{Week: weekKey, Books: cloneBooks(books)}
+	if err := s.saveFeaturedManifest(manifest); err != nil {
+		if previousWeek != "" {
+			return s.featuredFallback(previousBooks, limit)
+		}
+		// Leave this week uncached so a later request can retry the write.
+		return s.attachShelfCandidates(truncateFeatured(manifest.Books, limit))
+	}
+	s.setFeaturedSuccess(manifest)
+	return s.attachShelfCandidates(truncateFeatured(manifest.Books, limit))
+}
+
+type featuredManifest struct {
+	Week  string `json:"week"`
+	Books []Book `json:"books"`
+}
+
+func (s *Store) setFeaturedLast(manifest featuredManifest) {
+	s.featuredLastWeek = manifest.Week
+	s.featuredLastBooks = cloneBooks(manifest.Books)
+}
+
+func (s *Store) setFeaturedSuccess(manifest featuredManifest) {
+	s.featuredWeek = manifest.Week
+	s.featuredBooks = cloneBooks(manifest.Books)
+	s.setFeaturedLast(manifest)
+}
+
+func truncateFeatured(books []Book, limit int) []Book {
+	books = cloneBooks(books)
+	if len(books) > limit {
+		books = books[:limit]
+	}
+	return books
+}
+
+func sanitizeFeaturedBooks(books []Book) []Book {
+	seen := make(map[int]struct{}, len(books))
+	clean := make([]Book, 0, minInt(len(books), 20))
+	for _, book := range books {
+		if book.ID <= 0 {
+			continue
+		}
+		if _, ok := seen[book.ID]; ok {
+			continue
+		}
+		seen[book.ID] = struct{}{}
+		clean = append(clean, book)
+		if len(clean) == 20 {
+			break
+		}
+	}
+	return clean
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func (s *Store) featuredFallback(books []Book, limit int) ([]Book, error) {
+	result := truncateFeatured(books, limit)
+	enriched, err := s.attachShelfCandidates(result)
+	if err != nil {
+		// The weekly snapshot is still useful when the auxiliary shelf table is
+		// temporarily unavailable. Keep the persisted book data visible.
+		return result, nil
+	}
+	return enriched, nil
+}
+
+func (s *Store) loadFeaturedManifest() (featuredManifest, error) {
+	data, err := os.ReadFile(s.featuredCachePath)
+	if err != nil {
+		return featuredManifest{}, err
+	}
+	var manifest featuredManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return featuredManifest{}, err
+	}
+	if manifest.Week == "" || len(manifest.Books) == 0 || len(manifest.Books) > 20 {
+		return featuredManifest{}, fmt.Errorf("invalid featured manifest book count")
+	}
+	if len(sanitizeFeaturedBooks(manifest.Books)) != len(manifest.Books) {
+		return featuredManifest{}, fmt.Errorf("invalid featured manifest book IDs")
+	}
+	return manifest, nil
+}
+
+func (s *Store) saveFeaturedManifest(manifest featuredManifest) error {
+	if manifest.Week == "" || len(manifest.Books) == 0 || len(manifest.Books) > 20 ||
+		len(sanitizeFeaturedBooks(manifest.Books)) != len(manifest.Books) {
+		return fmt.Errorf("invalid featured manifest")
+	}
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(s.featuredCachePath), ".booksearch-featured-")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0o644); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, s.featuredCachePath)
+}
+
+var featuredNow = time.Now
+
+func featuredWeekKey() string {
+	year, week := featuredNow().UTC().ISOWeek()
+	return strconv.Itoa(year) + "-" + strconv.Itoa(week)
+}
+
+func cloneBooks(books []Book) []Book {
+	cloned := make([]Book, len(books))
+	copy(cloned, books)
+	return cloned
+}
+
+func featuredSortKey(seed string, id int) uint64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(seed + ":" + strconv.Itoa(id)))
+	return h.Sum64()
 }
 
 func (s *Store) ShelfCandidates(bookID int, limit int) ([]ShelfCandidate, error) {

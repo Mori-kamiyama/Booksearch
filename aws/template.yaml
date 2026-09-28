@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: Booksearch (ホンノキ) backend on AWS — 4 Lambdas + S3 + DynamoDB + SQS
+Description: Booksearch (ホンノキ) backend on AWS — Lambdas + S3 + DynamoDB + SQS
 
 Parameters:
   ProjectName:
@@ -13,6 +13,14 @@ Parameters:
     Type: String
     NoEcho: true
     Description: Gemini API key. Stored in Secrets Manager.
+  AlarmEmail:
+    Type: String
+    Default: ''
+    NoEcho: true
+    Description: Optional email address for CloudWatch alarm and recovery notifications.
+
+Conditions:
+  HasAlarmEmail: !Not [!Equals [!Ref AlarmEmail, '']]
 
 Globals:
   Function:
@@ -24,6 +32,8 @@ Globals:
         PROJECT_NAME: !Ref ProjectName
         BUCKET: !Ref AssetsBucket
         JOBS_TABLE: !Ref JobsTable
+        SCAN_TASKS_TABLE: !Ref ScanTasksTable
+        YOLO_QUEUE_URL: !Ref YoloQueue
         CROPS_TABLE: !Ref CropsTable
         CROP_FINGERPRINTS_TABLE: !Ref CropFingerprintsTable
         SHELF_OBSERVATIONS_TABLE: !Ref ShelfObservationsTable
@@ -44,20 +54,14 @@ Resources:
     Type: AWS::S3::Bucket
     Properties:
       BucketName: !Sub ${ProjectName}-${AWS::AccountId}-${AWS::Region}
+      VersioningConfiguration:
+        Status: Enabled
       LifecycleConfiguration:
         Rules:
-          - Id: ExpireUploads
+          - Id: AbortIncompleteMultipartUploads
             Status: Enabled
-            Prefix: uploads/
-            ExpirationInDays: 30
-          - Id: ExpireCrops
-            Status: Enabled
-            Prefix: crops/
-            ExpirationInDays: 30
-          - Id: ExpireLiveFrames
-            Status: Enabled
-            Prefix: live/
-            ExpirationInDays: 7
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
       CorsConfiguration:
         CorsRules:
           - AllowedHeaders: ['*']
@@ -70,12 +74,32 @@ Resources:
     Properties:
       TableName: !Sub ${ProjectName}-jobs
       BillingMode: PAY_PER_REQUEST
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
       AttributeDefinitions:
         - AttributeName: job_id
           AttributeType: S
       KeySchema:
         - AttributeName: job_id
           KeyType: HASH
+
+  ScanTasksTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${ProjectName}-scan-tasks
+      BillingMode: PAY_PER_REQUEST
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      AttributeDefinitions:
+        - AttributeName: job_id
+          AttributeType: S
+        - AttributeName: task_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: job_id
+          KeyType: HASH
+        - AttributeName: task_id
+          KeyType: RANGE
 
   CropsTable:
     Type: AWS::DynamoDB::Table
@@ -179,6 +203,163 @@ Resources:
         deadLetterTargetArn: !GetAtt LookupDLQ.Arn
         maxReceiveCount: 2
 
+  AlarmTopic:
+    Type: AWS::SNS::Topic
+    Condition: HasAlarmEmail
+    Properties:
+      TopicName: !Sub ${ProjectName}-alarm-notifications
+
+  AlarmTopicSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlarmEmail
+    Properties:
+      Endpoint: !Ref AlarmEmail
+      Protocol: email
+      TopicArn: !Ref AlarmTopic
+
+  AlarmTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Condition: HasAlarmEmail
+    Properties:
+      Topics:
+        - !Ref AlarmTopic
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudWatchAlarmsToPublish
+            Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref AlarmTopic
+            Condition:
+              StringEquals:
+                AWS:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                # Keep this policy limited to the alarms below. Do not add
+                # an explicit Alarm -> AlarmTopicPolicy DependsOn: it would
+                # introduce a dependency cycle through AlarmTopic.
+                AWS:SourceArn:
+                  - !GetAtt YoloQueueAgeAlarm.Arn
+                  - !GetAtt OcrQueueAgeAlarm.Arn
+                  - !GetAtt LookupQueueAgeAlarm.Arn
+                  - !GetAtt YoloDLQAlarm.Arn
+                  - !GetAtt OcrDLQAlarm.Arn
+                  - !GetAtt HomePublisherErrorAlarm.Arn
+                  - !GetAtt MaintenanceErrorAlarm.Arn
+                  - !GetAtt FeaturedStaleAlarm.Arn
+                  - !GetAtt MaintenanceMissingAlarm.Arn
+                  - !GetAtt StalledJobsSkippedAlarm.Arn
+                  - !GetAtt LookupDLQAlarm.Arn
+
+  YoloQueueAgeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: YOLO queue oldest message remains above 15 minutes
+      Namespace: AWS/SQS
+      MetricName: ApproximateAgeOfOldestMessage
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt YoloQueue.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 900
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+      OKActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+
+  OcrQueueAgeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: OCR queue oldest message remains above 10 minutes
+      Namespace: AWS/SQS
+      MetricName: ApproximateAgeOfOldestMessage
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt OcrQueue.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 600
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+      OKActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+
+  LookupQueueAgeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: lookup queue oldest message remains above 10 minutes
+      Namespace: AWS/SQS
+      MetricName: ApproximateAgeOfOldestMessage
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt LookupQueue.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 600
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+      OKActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+
+  YoloDLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: YOLO DLQ contains messages
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt YoloDLQ.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+      OKActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+
+  OcrDLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: OCR DLQ contains messages
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt OcrDLQ.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+      OKActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+
+  LookupDLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: lookup DLQ contains messages
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt LookupDLQ.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+      OKActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+
   # ---------- Secrets ----------
   GeminiSecret:
     Type: AWS::SecretsManager::Secret
@@ -195,9 +376,177 @@ Resources:
         AllowHeaders: ['*']
         AllowMethods: [GET, POST, OPTIONS]
 
+  HomePublisherErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref HomePublisherFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+      OKActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+
+  MaintenanceErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref MaintenanceFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+      OKActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+
+  FeaturedStaleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      Namespace: Booksearch/Operations
+      MetricName: FeaturedStale
+      Dimensions:
+        - Name: Project
+          Value: !Ref ProjectName
+      Statistic: Maximum
+      Period: 3600
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: breaching
+      AlarmActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+      OKActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+
+  MaintenanceMissingAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      Namespace: Booksearch/Operations
+      MetricName: MaintenanceHealthy
+      Dimensions:
+        - Name: Project
+          Value: !Ref ProjectName
+      Statistic: Maximum
+      Period: 3600
+      EvaluationPeriods: 3
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+      OKActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+
+  StalledJobsSkippedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      Namespace: Booksearch/Operations
+      MetricName: StalledJobsSkipped
+      Dimensions:
+        - Name: Project
+          Value: !Ref ProjectName
+      Statistic: Maximum
+      Period: 3600
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+      OKActions: !If [HasAlarmEmail, [!Ref AlarmTopic], !Ref AWS::NoValue]
+
   # ---------- Lambdas ----------
+  HomePublisherFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      FunctionName: !Sub ${ProjectName}-home-publisher
+      CodeUri: functions/home_publisher/
+      Handler: handler.handler
+      Runtime: nodejs22.x
+      Architectures: [arm64]
+      Timeout: 120
+      MemorySize: 512
+      Environment:
+        Variables:
+          FRONTEND_BUCKET: !Sub ${ProjectName}-web-${AWS::AccountId}-${AWS::Region}
+          DATA_BUCKET: !Ref AssetsBucket
+          API_FUNCTION_NAME: !Ref ApiFunction
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: s3:GetObject
+              Resource: !Sub ${AssetsBucket.Arn}/featured/weeks/*
+            - Effect: Allow
+              Action: s3:ListBucket
+              Resource:
+                - !GetAtt AssetsBucket.Arn
+                - !Sub arn:${AWS::Partition}:s3:::${ProjectName}-web-${AWS::AccountId}-${AWS::Region}
+            - Effect: Allow
+              Action: [s3:GetObject, s3:PutObject]
+              Resource: !Sub arn:${AWS::Partition}:s3:::${ProjectName}-web-${AWS::AccountId}-${AWS::Region}/home.html
+            - Effect: Allow
+              Action: lambda:InvokeFunction
+              Resource: !GetAtt ApiFunction.Arn
+      Events:
+        RefreshHome:
+          Type: Schedule
+          Properties:
+            Schedule: cron(5 * * * ? *)
+            Input: '{}'
+            Enabled: true
+
+  MaintenanceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ProjectName}-maintenance
+      CodeUri: functions/maintenance/
+      Handler: handler.handler
+      Runtime: python3.12
+      Architectures: [arm64]
+      MemorySize: 256
+      Timeout: 120
+      Environment:
+        Variables:
+          FRONTEND_BUCKET: !Sub ${ProjectName}-web-${AWS::AccountId}-${AWS::Region}
+      Policies:
+        - DynamoDBReadPolicy: { TableName: !Ref JobsTable }
+        - DynamoDBReadPolicy: { TableName: !Ref ScanTasksTable }
+        - DynamoDBReadPolicy: { TableName: !Ref CropsTable }
+        - Statement:
+            - Effect: Allow
+              Action: dynamodb:UpdateItem
+              Resource: !GetAtt JobsTable.Arn
+            - Effect: Allow
+              Action: dynamodb:ConditionCheckItem
+              Resource: [!GetAtt ScanTasksTable.Arn, !GetAtt CropsTable.Arn]
+            - Effect: Allow
+              Action: s3:GetObject
+              Resource: !Sub arn:${AWS::Partition}:s3:::${ProjectName}-web-${AWS::AccountId}-${AWS::Region}/home.html
+            - Effect: Allow
+              Action: cloudwatch:PutMetricData
+              Resource: '*'
+              Condition:
+                StringEquals:
+                  cloudwatch:namespace: Booksearch/Operations
+      Events:
+        HourlyMaintenance:
+          Type: Schedule
+          Properties:
+            Schedule: cron(35 * * * ? *)
+            Enabled: true
+
   ApiFunction:
     Type: AWS::Serverless::Function
+    # New task-producing API code must follow compatible workers during updates.
+    DependsOn: [YoloFunction, OcrFunction, LookupFunction, LookupDispatcherFunction]
     Properties:
       FunctionName: !Sub ${ProjectName}-api
       CodeUri: functions/go_api/
@@ -210,6 +559,7 @@ Resources:
         Variables:
           YOLO_QUEUE_URL: !Ref YoloQueue
       Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref ScanTasksTable }
         - S3CrudPolicy: { BucketName: !Ref AssetsBucket }
         - DynamoDBCrudPolicy: { TableName: !Ref JobsTable }
         - DynamoDBReadPolicy: { TableName: !Ref CropsTable }
@@ -217,6 +567,12 @@ Resources:
         - SQSSendMessagePolicy: { QueueName: !GetAtt YoloQueue.QueueName }
         - SQSSendMessagePolicy: { QueueName: !GetAtt LookupQueue.QueueName }
       Events:
+        WeeklyFeatured:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 0 ? * MON *)
+            Input: '{"source":"booksearch.featured.refresh"}'
+            Enabled: true
         AnyRoot:
           Type: HttpApi
           Properties:
@@ -230,6 +586,9 @@ Resources:
             Method: ANY
             Path: /
 
+    Metadata:
+      BuildMethod: makefile
+
   YoloFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -240,6 +599,7 @@ Resources:
       Timeout: 600
       EphemeralStorage: { Size: 2048 }
       Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref ScanTasksTable }
         - S3CrudPolicy: { BucketName: !Ref AssetsBucket }
         - DynamoDBCrudPolicy: { TableName: !Ref JobsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref CropsTable }
@@ -252,6 +612,8 @@ Resources:
           Properties:
             Queue: !GetAtt YoloQueue.Arn
             BatchSize: 1
+            ScalingConfig:
+              MaximumConcurrency: 2
     Metadata:
       Dockerfile: Dockerfile
       DockerContext: ./functions/yolo_worker
@@ -271,6 +633,7 @@ Resources:
         Variables:
           GEMINI_MODEL: !Ref GeminiModel
       Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref ScanTasksTable }
         - S3CrudPolicy: { BucketName: !Ref AssetsBucket }
         - DynamoDBCrudPolicy: { TableName: !Ref JobsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref CropsTable }
@@ -286,6 +649,52 @@ Resources:
           Properties:
             Queue: !GetAtt OcrQueue.Arn
             BatchSize: 1
+            ScalingConfig:
+              MaximumConcurrency: 2
+
+  LookupDispatcherFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ProjectName}-lookup-dispatcher
+      CodeUri: functions/lookup_dispatcher/
+      Handler: handler.handler
+      Runtime: python3.12
+      Architectures: [arm64]
+      MemorySize: 256
+      Timeout: 30
+      Policies:
+        - S3ReadPolicy: { BucketName: !Ref AssetsBucket }
+        - DynamoDBReadPolicy: { TableName: !Ref ScanTasksTable }
+        - DynamoDBReadPolicy: { TableName: !Ref CropsTable }
+        - SQSSendMessagePolicy: { QueueName: !GetAtt YoloQueue.QueueName }
+        - SQSSendMessagePolicy: { QueueName: !GetAtt OcrQueue.QueueName }
+        - DynamoDBReadPolicy: { TableName: !Ref JobsTable }
+        - Statement:
+            Effect: Allow
+            Action: dynamodb:UpdateItem
+            Resource: !GetAtt JobsTable.Arn
+        - SQSSendMessagePolicy: { QueueName: !GetAtt LookupQueue.QueueName }
+      Events:
+        FromScanTasksStream:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt ScanTasksTable.StreamArn
+            StartingPosition: TRIM_HORIZON
+            BatchSize: 10
+            FunctionResponseTypes: [ReportBatchItemFailures]
+        FromJobsStream:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt JobsTable.StreamArn
+            StartingPosition: LATEST
+            BatchSize: 10
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+        ReconcilePendingOutbox:
+          Type: Schedule
+          Properties:
+            Schedule: rate(5 minutes)
+            Enabled: true
 
   LookupFunction:
     Type: AWS::Serverless::Function
@@ -296,6 +705,7 @@ Resources:
       MemorySize: 1024
       Timeout: 120
       Policies:
+        - DynamoDBReadPolicy: { TableName: !Ref ScanTasksTable }
         - S3CrudPolicy: { BucketName: !Ref AssetsBucket }
         - DynamoDBCrudPolicy: { TableName: !Ref JobsTable }
         - DynamoDBReadPolicy: { TableName: !Ref CropsTable }
@@ -307,6 +717,8 @@ Resources:
           Properties:
             Queue: !GetAtt LookupQueue.Arn
             BatchSize: 1
+            ScalingConfig:
+              MaximumConcurrency: 2
     Metadata:
       Dockerfile: Dockerfile
       DockerContext: ./functions/lookup_worker

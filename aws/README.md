@@ -1,48 +1,24 @@
 # Booksearch AWS Backend
 
-ホンノキ バックエンドの AWS (SAM) 移植版。プランの「Go API + S3 + DynamoDB + SQS + Python Worker」分割を、4 つの Lambda として実装した。
+ホンノキ バックエンドの AWS (SAM) 移植版。プランの「Go API + S3 + DynamoDB + SQS + Python Worker」分割を、Lambda 群として実装した。
 
 ## アーキテクチャ
 
+```text
+Client → API
+  → JobsTableの受付とScanTasksTable.pendingを同時保存
+  → Streams / 定期再照合 → dispatcher → YOLO queue
+  → YOLO: cropとmanifestを保存、task.doneとジョブ件数を同時確定
+  → dispatcher → OCR queue
+  → OCR: crop結果と完了件数を同時保存
+  → JobsTableの最終lookup送信予定
+  → Streams / 定期再照合 → dispatcher → lookup queue
+  → lookup: 採用済みcropを照合、catalog保存、条件付き完了
 ```
-[Client]
-    │ POST /api/scan {filename, content_base64}
-    ▼
-[API Gateway HTTP API]
-    │
-    ▼
-[ApiFunction] (Go, provided.al2023, arm64)
-    ├─ S3 PUT uploads/{job_id}/upload.jpg
-    ├─ DDB PutItem jobs (status=pending)
-    └─ SQS yolo-queue へ
-            │
-            ▼
-    [YoloFunction] (Container, x86_64, 3GB)
-        ├─ S3 GET image
-        ├─ YOLO 推論 (model.pt は image 同梱)
-        ├─ AprilTag 検出 + shelf 割当
-        ├─ crop S3 PUT crops/{job_id}/{crop_id}.jpg
-        ├─ DDB PutItem crops × N
-        ├─ DDB Update jobs.crop_total = N
-        └─ SQS ocr-queue へ × N (readable のみ)
-                │
-                ▼
-        [OcrFunction] (Python zip, arm64) × N 並列
-            ├─ Secrets Manager から GEMINI_API_KEY
-            ├─ S3 GET crop
-            ├─ Gemini OCR
-            ├─ DDB Update crops.titles
-            ├─ DDB ADD jobs.ocr_done += 1 (ATOMIC)
-            └─ 最後の 1 件のみ SQS lookup-queue へ
-                    │
-                    ▼
-            [LookupFunction] (Container, arm64)
-                ├─ DDB Query crops (全件)
-                ├─ library.db (image 同梱) で照合
-                ├─ known_books.json で補完
-                ├─ catalog.json を S3 PUT catalogs/{job_id}/
-                └─ DDB Update jobs.status=done
-```
+
+配送・再送・重複実行の契約は [scan_delivery_and_featured_cache.md](../docs/scan_delivery_and_featured_cache.md)、最終確定は [final_lookup_outbox.md](../docs/final_lookup_outbox.md)、滞留の読み取り専用診断は [scan_operations.md](../docs/scan_operations.md) を参照。
+
+APIは互換ワーカーの更新後に更新する依存関係を持つ。旧taskなしジョブは自動移行しない。週次おすすめはS3保存と週次スケジュール、関連本は同梱SQLiteの事前計算結果を使う。
 
 ## 前提
 
@@ -81,7 +57,7 @@ sam deploy --parameter-overrides "GeminiApiKey=$GEMINI_API_KEY"
 - Stack Name: `booksearch`
 - Region: `ap-northeast-1`
 - `Save arguments to samconfig.toml`: yes
-- 4 つの Lambda の image repo: `277707097118.dkr.ecr.ap-northeast-1.amazonaws.com/booksearch/yolo` 等
+- 2 つのコンテナ Lambda の image repo: `277707097118.dkr.ecr.ap-northeast-1.amazonaws.com/booksearch/yolo` 等
 
 ## アセットの S3 配置 (任意)
 
@@ -93,7 +69,7 @@ sam deploy --parameter-overrides "GeminiApiKey=$GEMINI_API_KEY"
 
 ## フロントエンドのデプロイ
 
-S3 + CloudFront のスタックは `frontend-stack.yaml` で別管理。初回のみ:
+S3 + CloudFront のスタックは `frontend-stack.yaml` で別管理。ホームのroot objectはpublisherが作る `home.html`、検索・詳細等のSPA fallbackは `index.html`。初回切り替えは下記publisherの生成成功後に実施する:
 
 ```bash
 cd aws
@@ -104,23 +80,30 @@ aws cloudformation deploy \
   --capabilities CAPABILITY_IAM
 ```
 
-ビルド + 同期 + キャッシュ無効化:
+ホームは5冊の実表紙をHTMLに埋め込んで事前生成する。フロント変更時はpublisherも同じビルド成果物で更新する。リポジトリのルートで:
 
 ```bash
-cd ../frontend
-npm install
-npm run build
+npm --prefix frontend ci
+node scripts/build-home-publisher.mjs
+# 以下のassetsをアップロードしてからHomePublisherFunctionを更新する。
 BUCKET=$(aws cloudformation describe-stacks --stack-name booksearch-frontend \
   --query "Stacks[0].Outputs[?OutputKey=='FrontendBucketName'].OutputValue" --output text)
 DIST=$(aws cloudformation describe-stacks --stack-name booksearch-frontend \
   --query "Stacks[0].Outputs[?OutputKey=='FrontendDistributionId'].OutputValue" --output text)
-aws s3 sync dist/ s3://$BUCKET/ --delete --exclude ".DS_Store" --cache-control "public, max-age=300"
+aws s3 sync frontend/dist/ s3://$BUCKET/ --exclude index.html --exclude home.html --exclude ".DS_Store" --cache-control "public, max-age=300"
+aws s3 cp frontend/dist/index.html s3://$BUCKET/index.html --content-type text/html --cache-control no-cache
+# ここで aws/template.yaml をSAM build/deployし、HomePublisherFunctionも更新する。
+aws lambda invoke --function-name booksearch-home-publisher \
+  --cli-binary-format raw-in-base64-out --payload '{"force":true}' /tmp/booksearch-home-publish.json
+# FunctionErrorがなく、payloadがstatus=publishedであることを確認してから無効化する。
 aws cloudfront create-invalidation --distribution-id $DIST --paths "/*"
 ```
 
 現在の配信 URL: <https://d2uel8nex1m4w7.cloudfront.net>
 
 API base URL は `frontend/.env.production` で固定。差し替える場合は `VITE_API_BASE_URL` を書き換えてから `npm run build`。
+
+`home.html` と旧hash付きassetは削除しない。旧HTMLを開いているブラウザもそのassetを参照するため、`sync --delete` は使わない。publisherは毎時05分に週とclient templateのhashを確認し、変更時のみ更新する。画像取得・実decode・5冊の準備が失敗した場合は成功済みHTMLを上書きしない。配信待ち時間は最大5分のキャッシュTTLを含む。詳細と検証は `docs/featured_initial_html.md` を参照。
 
 ## E2E テスト
 

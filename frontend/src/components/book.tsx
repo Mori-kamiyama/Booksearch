@@ -1,5 +1,9 @@
-import { ExternalLink, X } from 'lucide-react'
-import type { FormEvent } from 'react'
+import { BookOpen, ExternalLink, X } from 'lucide-react'
+import { useEffect, useId, useRef, useState } from 'react'
+import type { FormEvent, KeyboardEvent } from 'react'
+import { loadDiscoveryIndex } from '../lib/discoveryIndex'
+import { buildSearchSuggestions } from '../lib/searchSuggestions'
+import type { SearchSuggestion } from '../lib/searchSuggestions'
 import { useNavigate } from 'react-router-dom'
 import type { Book, ShelfCandidate } from '../lib/types'
 import { confidenceLevel, formatShelfLabel, getSlot, getUnitId, shortShelfLabel, splitShelfId } from '../lib/shelf'
@@ -25,35 +29,118 @@ export function SearchBar({
 }: {
   value: string
   onChange: (value: string) => void
-  onSubmit: () => void
+  onSubmit: (query: string, topic?: string) => void
   autoFocus?: boolean
 }) {
+  const inputRef = useRef<HTMLInputElement>(null)
+  const id = useId()
+  const [focused, setFocused] = useState(false)
+  const [composing, setComposing] = useState(false)
+  const [dismissed, setDismissed] = useState(false)
+  const [active, setActive] = useState(-1)
+  const [result, setResult] = useState<{ query: string; items: SearchSuggestion[] } | null>(null)
+  const query = value.trim()
+  const items = result?.query === query ? result.items : []
+  const open = focused && !composing && !dismissed && items.length > 0
+
+  useEffect(() => {
+    setActive(-1)
+    setResult(null)
+    if (!focused || composing || dismissed || !query) return
+    const controller = new AbortController()
+    const timer = window.setTimeout(() => {
+      loadDiscoveryIndex().then(index => {
+        if (!controller.signal.aborted) setResult({ query, items: buildSearchSuggestions(index, query) })
+      }).catch(() => {
+        // Suggestions are optional: normal search remains available on failure.
+      })
+    }, 250)
+    return () => { window.clearTimeout(timer); controller.abort() }
+  }, [query, focused, composing, dismissed])
+
+  const choose = (text: string, topic?: string) => {
+    setDismissed(true)
+    setActive(-1)
+    onChange(text)
+    onSubmit(topic ? '' : text, topic)
+  }
   const submit = (event: FormEvent) => {
     event.preventDefault()
-    onSubmit()
+    if (!composing) choose(value)
+  }
+  const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (composing || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) {
+      if (event.key === 'Enter') event.preventDefault()
+      return
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      setDismissed(true)
+      setActive(-1)
+    } else if (open && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+      event.preventDefault()
+      setActive(index => event.key === 'ArrowDown' ? (index + 1) % items.length : (index <= 0 ? items.length - 1 : index - 1))
+    } else if (event.key === 'Enter' && open && active >= 0 && items[active]) {
+      event.preventDefault()
+      choose(items[active].value, items[active].topicId)
+    }
+  }
+  const clear = () => {
+    onChange('')
+    setActive(-1)
+    setDismissed(false)
+    window.requestAnimationFrame(() => inputRef.current?.focus())
   }
   return (
     <form
       onSubmit={submit}
-      className="flex w-full items-center gap-2 rounded-[24px] bg-white px-[14px] py-3 shadow-[0_3px_2.9px_rgba(0,0,0,0.1)] focus-within:ring-2 focus-within:ring-primary-soft"
+      onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setFocused(false) }}
+      aria-label="蔵書を検索"
+      className="relative z-30 flex w-full items-center gap-2 rounded-[24px] bg-white px-[14px] py-3 shadow-[0_3px_2.9px_rgba(0,0,0,0.1)] focus-within:ring-2 focus-within:ring-primary-soft"
     >
-      <SearchIcon className="size-6 shrink-0 text-[#087f5b]" />
+      <label htmlFor={id} className="sr-only">本を検索</label>
+      <button type="submit" aria-label="検索" className="grid size-6 shrink-0 place-items-center text-[#087f5b]">
+        <SearchIcon className="size-6" />
+      </button>
       <input
+        ref={inputRef}
+        id={id}
+        type="search"
+        role="combobox"
+        aria-autocomplete="list"
+        aria-expanded={open}
+        aria-controls={open ? `${id}-suggestions` : undefined}
+        aria-activedescendant={open && active >= 0 ? `${id}-option-${active}` : undefined}
         value={value}
-        onChange={event => onChange(event.target.value)}
+        onChange={event => { onChange(event.target.value); setActive(-1); setDismissed(false) }}
+        onFocus={() => { setFocused(true); setDismissed(false) }}
+        onCompositionStart={() => { setComposing(true); setActive(-1) }}
+        onCompositionEnd={() => setComposing(false)}
+        onKeyDown={handleKeyDown}
         autoFocus={autoFocus}
-        placeholder="蟹工船"
-        className="min-w-0 flex-1 border-0 bg-transparent p-0 text-base text-ink outline-none placeholder:text-black/50"
+        enterKeyHint="search"
+        autoComplete="off"
+        placeholder="書名・著者・テーマを検索"
+        className="min-w-0 flex-1 border-0 bg-transparent p-0 text-base text-ink outline-none placeholder:text-black/50 [&::-webkit-search-cancel-button]:appearance-none"
       />
       {value && (
-        <button
-          type="button"
-          aria-label="検索語を消す"
-          onClick={() => onChange('')}
-          className="grid size-8 shrink-0 place-items-center rounded-full text-ink-muted hover:bg-zinc-100"
-        >
+        <button type="button" aria-label="検索語を消す" onClick={clear} className="grid size-8 shrink-0 place-items-center rounded-full text-ink-muted hover:bg-zinc-100">
           <X className="size-4" />
         </button>
+      )}
+      {open && (
+        <ul id={`${id}-suggestions`} role="listbox" aria-label="検索候補" className="absolute inset-x-0 top-full mt-2 overflow-hidden rounded-2xl border border-line bg-white py-1 shadow-lg">
+          {items.map((item, index) => (
+            <li key={`${item.kind}:${item.value}`} id={`${id}-option-${index}`} role="option" aria-selected={active === index}
+              onMouseDown={event => event.preventDefault()}
+              onClick={() => choose(item.value, item.topicId)}
+              className={`flex min-h-11 cursor-pointer items-center gap-3 px-4 py-3 text-left hover:bg-primary-soft ${active === index ? 'bg-primary-soft' : ''}`}>
+              <SearchIcon className="size-4 shrink-0 text-ink-muted" />
+              <span className="min-w-0 flex-1 break-words text-sm text-ink">{item.value}</span>
+              <span className="shrink-0 text-xs text-ink-muted">{item.kind === 'topic' ? (item.topicId?.startsWith('ndc-') ? 'ジャンル' : 'テーマ') : item.kind === 'author' ? '著者' : '書名'}</span>
+            </li>
+          ))}
+        </ul>
       )}
     </form>
   )
@@ -105,12 +192,44 @@ export function BookHero({ book }: { book: Book }) {
   )
 }
 
-function BookCover({ book, size }: { book: Book; size: 'sm' | 'lg' }) {
+export function CoverImage({
+  src,
+  alt = '',
+  className = '',
+  fallbackClassName = '',
+}: {
+  src?: string | null
+  alt?: string
+  className?: string
+  fallbackClassName?: string
+}) {
+  const [imageFailed, setImageFailed] = useState(false)
+  useEffect(() => setImageFailed(false), [src])
+  if (!src || imageFailed) {
+    return (
+      <div className={fallbackClassName || className} aria-label={alt || '表紙なし'} aria-hidden={!alt}>
+        <BookOpen className="size-6 text-ink-muted" aria-hidden="true" />
+      </div>
+    )
+  }
+  return <img src={src} alt={alt} onError={() => setImageFailed(true)} className={className} loading="lazy" />
+}
+
+export function BookCover({ book, size }: { book: Book; size: 'sm' | 'lg' }) {
   const stageCls = size === 'lg' ? 'h-32 w-24' : 'h-20 w-14'
-  if (book.thumbnail) {
+  const [imageFailed, setImageFailed] = useState(false)
+  useEffect(() => setImageFailed(false), [book.thumbnail])
+  const cover = imageFailed ? null : book.thumbnail
+  if (cover) {
     return (
       <div className={`${stageCls} flex shrink-0 items-end justify-center`}>
-        <img src={book.thumbnail} alt="" className="max-h-full max-w-full rounded-lg border border-line bg-zinc-100 object-contain" loading="lazy" />
+        <img
+          src={cover}
+          alt=""
+          onError={() => setImageFailed(true)}
+          className="max-h-full max-w-full rounded-lg border border-line bg-zinc-100 object-contain"
+          loading="lazy"
+        />
       </div>
     )
   }
@@ -196,7 +315,7 @@ export function shelfBookFromCandidate(candidate: ShelfCandidate): Book {
     class_number: '',
     registration_number: '',
     isbn: '',
-    thumbnail: null,
+    thumbnail: candidate.thumbnail ?? null,
     info_link: null,
     shelf_candidates: [candidate],
   }

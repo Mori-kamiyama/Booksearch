@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -73,6 +75,19 @@ func main() {
 }
 
 func handler(ctx context.Context, raw json.RawMessage) (events.APIGatewayV2HTTPResponse, error) {
+	var scheduled struct {
+		Source string `json:"source"`
+	}
+	_ = json.Unmarshal(raw, &scheduled)
+	if scheduled.Source == "booksearch.featured.refresh" {
+		if bookStore == nil {
+			return events.APIGatewayV2HTTPResponse{}, fmt.Errorf("featured library unavailable")
+		}
+		if err := bookStore.RefreshFeatured(); err != nil {
+			return events.APIGatewayV2HTTPResponse{}, err
+		}
+		return okJSON(200, map[string]any{"status": "refreshed"}), nil
+	}
 	req, method, path := parseRequest(raw)
 
 	if method == "OPTIONS" {
@@ -90,6 +105,8 @@ func handler(ctx context.Context, raw json.RawMessage) (events.APIGatewayV2HTTPR
 		return indexBooks()
 	case method == "GET" && path == "/api/shelf-candidates":
 		return listShelfCandidates(ctx)
+	case method == "GET" && strings.HasPrefix(path, "/api/books/") && strings.HasSuffix(path, "/related"):
+		return relatedBooks(ctx, req)
 	case method == "GET" && strings.HasPrefix(path, "/api/books/"):
 		return getBook(ctx, req)
 	case method == "GET" && strings.HasPrefix(path, "/api/jobs/"):
@@ -159,7 +176,8 @@ func liveSessionFrame(ctx context.Context, req events.APIGatewayV2HTTPRequest, p
 	if err := json.Unmarshal([]byte(decodeBody(req)), &payload); err != nil || payload.Filename == "" {
 		return errJSON(400, "expected JSON {filename}"), nil
 	}
-	key := fmt.Sprintf("live/%s/frames/%s.jpg", id, uuid.New().String())
+	// A lost response must not allocate another frame on retry.
+	key := fmt.Sprintf("live/%s/frames/%x.jpg", id, sha256.Sum256([]byte(payload.Filename)))
 	presigner := s3.NewPresignClient(s3Client)
 	p, err := presigner.PresignPutObject(ctx, &s3.PutObjectInput{Bucket: aws.String(bucket), Key: aws.String(key), ContentType: aws.String("image/jpeg")}, func(o *s3.PresignOptions) { o.Expires = 15 * time.Minute })
 	if err != nil {
@@ -168,13 +186,30 @@ func liveSessionFrame(ctx context.Context, req events.APIGatewayV2HTTPRequest, p
 	_, err = ddbClient.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(jobsTable), Key: map[string]ddbtypes.AttributeValue{"job_id": &ddbtypes.AttributeValueMemberS{Value: id}},
 		UpdateExpression:    aws.String("SET frame_keys = list_append(frame_keys, :k), updated_at = :u"),
-		ConditionExpression: aws.String("#s = :collecting"), ExpressionAttributeNames: map[string]string{"#s": "status"},
+		ConditionExpression: aws.String("#s = :collecting AND NOT contains(frame_keys, :key)"), ExpressionAttributeNames: map[string]string{"#s": "status"},
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":k": &ddbtypes.AttributeValueMemberL{Value: []ddbtypes.AttributeValue{&ddbtypes.AttributeValueMemberS{Value: key}}},
-			":u": &ddbtypes.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)}, ":collecting": &ddbtypes.AttributeValueMemberS{Value: "collecting"},
+			":k":   &ddbtypes.AttributeValueMemberL{Value: []ddbtypes.AttributeValue{&ddbtypes.AttributeValueMemberS{Value: key}}},
+			":key": &ddbtypes.AttributeValueMemberS{Value: key},
+			":u":   &ddbtypes.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)}, ":collecting": &ddbtypes.AttributeValueMemberS{Value: "collecting"},
 		},
 	})
 	if err != nil {
+		if strings.Contains(err.Error(), "ConditionalCheckFailedException") {
+			current, readErr := ddbClient.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String(jobsTable), Key: map[string]ddbtypes.AttributeValue{"job_id": &ddbtypes.AttributeValueMemberS{Value: id}}, ConsistentRead: aws.Bool(true)})
+			if readErr != nil {
+				return errJSON(500, "frame lookup: "+readErr.Error()), nil
+			}
+			status, _ := current.Item["status"].(*ddbtypes.AttributeValueMemberS)
+			frames, _ := current.Item["frame_keys"].(*ddbtypes.AttributeValueMemberL)
+			if status != nil && status.Value == "collecting" && frames != nil {
+				for _, frame := range frames.Value {
+					if value, ok := frame.(*ddbtypes.AttributeValueMemberS); ok && value.Value == key {
+						return okJSON(200, map[string]any{"frame_id": filepath.Base(key), "frame_key": key, "upload_url": p.URL, "content_type": "image/jpeg"}), nil
+					}
+				}
+			}
+			return errJSON(409, "session is no longer accepting frames"), nil
+		}
 		return errJSON(500, "ddb frame: "+err.Error()), nil
 	}
 	return okJSON(200, map[string]any{"frame_id": filepath.Base(key), "frame_key": key, "upload_url": p.URL, "content_type": "image/jpeg"}), nil
@@ -197,40 +232,58 @@ func liveSessionFrameCommit(ctx context.Context, req events.APIGatewayV2HTTPRequ
 	}
 
 	keySet := &ddbtypes.AttributeValueMemberSS{Value: []string{payload.FrameKey}}
-	_, err := ddbClient.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+	err := persistDetectionTask(ctx, ddbtypes.TransactWriteItem{Update: &ddbtypes.Update{
 		TableName: aws.String(jobsTable), Key: map[string]ddbtypes.AttributeValue{"job_id": &ddbtypes.AttributeValueMemberS{Value: id}},
 		UpdateExpression:         aws.String("SET updated_at = :u ADD committed_frame_keys :keys, accepted_frames :one"),
-		ConditionExpression:      aws.String("#s = :collecting AND (attribute_not_exists(committed_frame_keys) OR NOT contains(committed_frame_keys, :key))"),
+		ConditionExpression:      aws.String("#s = :collecting AND contains(frame_keys, :key) AND (attribute_not_exists(committed_frame_keys) OR NOT contains(committed_frame_keys, :key))"),
 		ExpressionAttributeNames: map[string]string{"#s": "status"},
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
 			":keys": keySet, ":key": &ddbtypes.AttributeValueMemberS{Value: payload.FrameKey},
 			":one": &ddbtypes.AttributeValueMemberN{Value: "1"}, ":collecting": &ddbtypes.AttributeValueMemberS{Value: "collecting"},
 			":u": &ddbtypes.AttributeValueMemberS{Value: time.Now().UTC().Format(time.RFC3339)},
 		},
-	})
+	}}, detectionTask(id, frameTaskID(payload.FrameKey), payload.FrameKey, time.Now().UTC().Format(time.RFC3339), true))
 	if err != nil {
-		if strings.Contains(err.Error(), "ConditionalCheckFailedException") {
+		saved, readErr := savedDetectionTask(ctx, id, frameTaskID(payload.FrameKey))
+		if readErr == nil && saved {
 			return okJSON(200, map[string]any{"session_id": id, "frame_key": payload.FrameKey, "status": "already_committed"}), nil
 		}
+		if strings.Contains(err.Error(), "TransactionCanceledException") {
+			return errJSON(409, "session is no longer accepting frames"), nil
+		}
 		return errJSON(500, "commit frame: "+err.Error()), nil
-	}
-
-	msg, _ := json.Marshal(map[string]any{"job_id": id, "image_keys": []string{payload.FrameKey}, "incremental": true})
-	if _, err := sqsClient.SendMessage(ctx, &sqs.SendMessageInput{QueueUrl: aws.String(yoloQueueURL), MessageBody: aws.String(string(msg))}); err != nil {
-		_, _ = ddbClient.UpdateItem(ctx, &dynamodb.UpdateItemInput{
-			TableName: aws.String(jobsTable), Key: map[string]ddbtypes.AttributeValue{"job_id": &ddbtypes.AttributeValueMemberS{Value: id}},
-			UpdateExpression:          aws.String("ADD accepted_frames :minusOne DELETE committed_frame_keys :keys"),
-			ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{":keys": keySet, ":minusOne": &ddbtypes.AttributeValueMemberN{Value: "-1"}},
-		})
-		return errJSON(500, "queue frame: "+err.Error()), nil
 	}
 	return okJSON(202, map[string]any{"session_id": id, "frame_key": payload.FrameKey, "status": "processing"}), nil
 }
 func liveSessionComplete(ctx context.Context, path string) (events.APIGatewayV2HTTPResponse, error) {
 	id := liveSessionID(path, "/complete")
-	out, err := ddbClient.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String(jobsTable), Key: map[string]ddbtypes.AttributeValue{"job_id": &ddbtypes.AttributeValueMemberS{Value: id}}})
-	if err != nil || out.Item == nil {
+	out, err := ddbClient.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String(jobsTable), Key: map[string]ddbtypes.AttributeValue{"job_id": &ddbtypes.AttributeValueMemberS{Value: id}}, ConsistentRead: aws.Bool(true)})
+	if err != nil {
+		return errJSON(500, "session lookup: "+err.Error()), nil
+	}
+	if out.Item == nil {
 		return errJSON(404, "session not found"), nil
+	}
+	status, _ := out.Item["status"].(*ddbtypes.AttributeValueMemberS)
+	if status != nil && status.Value != "collecting" {
+		// Completion is retryable after a transient final-lookup enqueue failure.
+		// Reuse the current counters and queue the lookup once the workers have
+		// finished; completed/queued sessions are already idempotently complete.
+		switch status.Value {
+		case "processing":
+			if liveWorkFinished(out.Item) {
+				if err := queueFinalLookup(ctx, id); err != nil {
+					return errJSON(500, err.Error()), nil
+				}
+			}
+		case "lookup_pending", "done", "no_detection", "no_readable_crops":
+			// These states are already closed or have their final lookup queued.
+		case "canceled":
+			return errJSON(409, "session canceled"), nil
+		default:
+			return errJSON(409, "session is not completable"), nil
+		}
+		return okJSON(202, map[string]any{"job_id": id, "status": status.Value}), nil
 	}
 	committed, _ := out.Item["committed_frame_keys"].(*ddbtypes.AttributeValueMemberSS)
 	if committed == nil || len(committed.Value) == 0 {
@@ -250,6 +303,9 @@ func liveSessionComplete(ctx context.Context, path string) (events.APIGatewayV2H
 		ReturnValues: ddbtypes.ReturnValueAllNew,
 	})
 	if err != nil {
+		if strings.Contains(err.Error(), "ConditionalCheckFailedException") {
+			return errJSON(409, "session state changed; retry completion"), nil
+		}
 		return errJSON(500, err.Error()), nil
 	}
 	if liveWorkFinished(closed.Attributes) {
@@ -276,11 +332,12 @@ func liveWorkFinished(item map[string]ddbtypes.AttributeValue) bool {
 func queueFinalLookup(ctx context.Context, id string) error {
 	_, err := ddbClient.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(jobsTable), Key: map[string]ddbtypes.AttributeValue{"job_id": &ddbtypes.AttributeValueMemberS{Value: id}},
-		UpdateExpression:         aws.String("SET final_lookup_queued = :yes, #s = :pending"),
-		ConditionExpression:      aws.String("attribute_not_exists(final_lookup_queued)"),
+		UpdateExpression:         aws.String("SET final_lookup_queued = :yes, final_lookup_outbox_version = :version, #s = :pending"),
+		ConditionExpression:      aws.String("attribute_not_exists(final_lookup_outbox_version) AND #s = :processing"),
 		ExpressionAttributeNames: map[string]string{"#s": "status"},
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":yes": &ddbtypes.AttributeValueMemberBOOL{Value: true}, ":pending": &ddbtypes.AttributeValueMemberS{Value: "lookup_pending"},
+			":yes": &ddbtypes.AttributeValueMemberBOOL{Value: true}, ":version": &ddbtypes.AttributeValueMemberN{Value: "1"},
+			":pending": &ddbtypes.AttributeValueMemberS{Value: "lookup_pending"}, ":processing": &ddbtypes.AttributeValueMemberS{Value: "processing"},
 		},
 	})
 	if err != nil {
@@ -289,34 +346,37 @@ func queueFinalLookup(ctx context.Context, id string) error {
 		}
 		return fmt.Errorf("finalize live session: %w", err)
 	}
-	msg, _ := json.Marshal(map[string]any{"job_id": id, "incremental": false})
-	if _, err := sqsClient.SendMessage(ctx, &sqs.SendMessageInput{QueueUrl: aws.String(lookupQueueURL), MessageBody: aws.String(string(msg))}); err != nil {
-		_, _ = ddbClient.UpdateItem(ctx, &dynamodb.UpdateItemInput{
-			TableName: aws.String(jobsTable), Key: map[string]ddbtypes.AttributeValue{"job_id": &ddbtypes.AttributeValueMemberS{Value: id}},
-			UpdateExpression:          aws.String("SET #s = :processing REMOVE final_lookup_queued"),
-			ExpressionAttributeNames:  map[string]string{"#s": "status"},
-			ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{":processing": &ddbtypes.AttributeValueMemberS{Value: "processing"}},
-		})
-		return fmt.Errorf("queue final lookup: %w", err)
-	}
 	return nil
 }
 func liveSessionCancel(ctx context.Context, path string) (events.APIGatewayV2HTTPResponse, error) {
 	id := liveSessionID(path, "/cancel")
-	out, getErr := ddbClient.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String(jobsTable), Key: map[string]ddbtypes.AttributeValue{"job_id": &ddbtypes.AttributeValueMemberS{Value: id}}})
-	if getErr != nil || out.Item == nil {
+	out, getErr := ddbClient.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String(jobsTable), Key: map[string]ddbtypes.AttributeValue{"job_id": &ddbtypes.AttributeValueMemberS{Value: id}}, ConsistentRead: aws.Bool(true)})
+	if getErr != nil {
+		return errJSON(500, "session lookup: "+getErr.Error()), nil
+	}
+	if out.Item == nil {
 		return errJSON(404, "session not found"), nil
 	}
-	if frames, ok := out.Item["frame_keys"].(*ddbtypes.AttributeValueMemberL); ok {
+	status, _ := out.Item["status"].(*ddbtypes.AttributeValueMemberS)
+	if status != nil && status.Value != "collecting" {
+		if status.Value == "canceled" {
+			return okJSON(200, map[string]any{"session_id": id, "status": "canceled"}), nil
+		}
+		return errJSON(409, "session already closed"), nil
+	}
+	updated, err := ddbClient.UpdateItem(ctx, &dynamodb.UpdateItemInput{TableName: aws.String(jobsTable), Key: map[string]ddbtypes.AttributeValue{"job_id": &ddbtypes.AttributeValueMemberS{Value: id}}, UpdateExpression: aws.String("SET #s = :s"), ConditionExpression: aws.String("#s = :collecting"), ExpressionAttributeNames: map[string]string{"#s": "status"}, ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{":s": &ddbtypes.AttributeValueMemberS{Value: "canceled"}, ":collecting": &ddbtypes.AttributeValueMemberS{Value: "collecting"}}, ReturnValues: ddbtypes.ReturnValueAllNew})
+	if err != nil {
+		if strings.Contains(err.Error(), "ConditionalCheckFailedException") {
+			return okJSON(200, map[string]any{"session_id": id, "status": "already_closed"}), nil
+		}
+		return errJSON(500, err.Error()), nil
+	}
+	if frames, ok := updated.Attributes["frame_keys"].(*ddbtypes.AttributeValueMemberL); ok {
 		for _, v := range frames.Value {
 			if s, ok := v.(*ddbtypes.AttributeValueMemberS); ok {
 				_, _ = s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String(s.Value)})
 			}
 		}
-	}
-	_, err := ddbClient.UpdateItem(ctx, &dynamodb.UpdateItemInput{TableName: aws.String(jobsTable), Key: map[string]ddbtypes.AttributeValue{"job_id": &ddbtypes.AttributeValueMemberS{Value: id}}, UpdateExpression: aws.String("SET #s = :s"), ConditionExpression: aws.String("#s = :collecting"), ExpressionAttributeNames: map[string]string{"#s": "status"}, ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{":s": &ddbtypes.AttributeValueMemberS{Value: "canceled"}, ":collecting": &ddbtypes.AttributeValueMemberS{Value: "collecting"}}})
-	if err != nil {
-		return errJSON(500, err.Error()), nil
 	}
 	return okJSON(200, map[string]any{"session_id": id, "status": "canceled"}), nil
 }
@@ -390,7 +450,15 @@ func parseRequest(raw json.RawMessage) (events.APIGatewayV2HTTPRequest, string, 
 // ---- /api/books/search ----
 func searchBooks(ctx context.Context, req events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {
 	q := req.QueryStringParameters["q"]
-	if q == "" {
+	filterValues := url.Values{}
+	for key, value := range req.QueryStringParameters {
+		filterValues.Set(key, value)
+	}
+	filters, filterErr := ParseSearchFilters(filterValues)
+	if filterErr != nil {
+		return errJSON(400, filterErr.Error()), nil
+	}
+	if strings.TrimSpace(q) == "" && filters.Empty() {
 		return errJSON(400, "q is required"), nil
 	}
 	limit := 20
@@ -399,16 +467,26 @@ func searchBooks(ctx context.Context, req events.APIGatewayV2HTTPRequest) (event
 			limit = n
 		}
 	}
+	offset := 0
+	if value := req.QueryStringParameters["offset"]; value != "" {
+		if n, err := strconv.Atoi(value); err == nil && n > 0 {
+			offset = n
+		}
+	}
 	if bookStore == nil {
 		return errJSON(503, "library DB not available"), nil
 	}
-	books, err := bookStore.Search(q, limit)
+	result, err := bookStore.SearchFiltered(q, limit, offset, filters)
 	if err != nil {
 		return errJSON(500, err.Error()), nil
 	}
+	books := result.Books
+	if books == nil {
+		books = []Book{}
+	}
 	attachShelfCandidates(ctx, books)
 	attachCoverCache(ctx, books)
-	return okJSON(200, map[string]any{"books": books, "query": q}), nil
+	return okJSON(200, map[string]any{"books": books, "query": q, "total": result.Total}), nil
 }
 
 // ---- /api/books/featured ----
@@ -427,7 +505,9 @@ func featuredBooks(ctx context.Context, req events.APIGatewayV2HTTPRequest) (eve
 		return errJSON(500, err.Error()), nil
 	}
 	attachShelfCandidates(ctx, books)
-	return okJSON(200, map[string]any{"books": books}), nil
+	response := okJSON(200, map[string]any{"books": books})
+	response.Headers["Cache-Control"] = "public, max-age=300, s-maxage=3600"
+	return response, nil
 }
 
 // ---- /api/books/{id} ----
@@ -708,19 +788,27 @@ func normalizedISBN(raw string) string {
 }
 
 func fetchShelfCandidates(ctx context.Context, bookID int) ([]ShelfCandidate, error) {
-	out, err := ddbClient.Query(ctx, &dynamodb.QueryInput{
-		TableName:              aws.String(shelfCandidatesTable),
-		KeyConditionExpression: aws.String("book_id = :b"),
-		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":b": &ddbtypes.AttributeValueMemberN{Value: strconv.Itoa(bookID)},
-		},
-	})
-	if err != nil {
-		return nil, err
-	}
-	candidates := make([]ShelfCandidate, 0, len(out.Items))
-	for _, item := range out.Items {
-		candidates = append(candidates, shelfCandidateFromItem(item))
+	candidates := make([]ShelfCandidate, 0)
+	var startKey map[string]ddbtypes.AttributeValue
+	for {
+		out, err := ddbClient.Query(ctx, &dynamodb.QueryInput{
+			TableName:              aws.String(shelfCandidatesTable),
+			KeyConditionExpression: aws.String("book_id = :b"),
+			ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+				":b": &ddbtypes.AttributeValueMemberN{Value: strconv.Itoa(bookID)},
+			},
+			ExclusiveStartKey: startKey,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range out.Items {
+			candidates = append(candidates, shelfCandidateFromItem(item))
+		}
+		if len(out.LastEvaluatedKey) == 0 {
+			break
+		}
+		startKey = out.LastEvaluatedKey
 	}
 	return candidates, nil
 }
@@ -729,17 +817,34 @@ func listShelfCandidates(ctx context.Context) (events.APIGatewayV2HTTPResponse, 
 	if shelfCandidatesTable == "" {
 		return okJSON(200, map[string]any{"candidates": []any{}}), nil
 	}
-	out, err := ddbClient.Scan(ctx, &dynamodb.ScanInput{
-		TableName: aws.String(shelfCandidatesTable),
-		Limit:     aws.Int32(500),
+	candidates := make([]ShelfCandidate, 0)
+	var startKey map[string]ddbtypes.AttributeValue
+	for {
+		out, err := ddbClient.Scan(ctx, &dynamodb.ScanInput{
+			TableName:         aws.String(shelfCandidatesTable),
+			Limit:             aws.Int32(500),
+			ExclusiveStartKey: startKey,
+		})
+		if err != nil {
+			return errJSON(500, err.Error()), nil
+		}
+		for _, item := range out.Items {
+			candidates = append(candidates, shelfCandidateFromItem(item))
+		}
+		if len(out.LastEvaluatedKey) == 0 {
+			break
+		}
+		startKey = out.LastEvaluatedKey
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].ShelfID != candidates[j].ShelfID {
+			return candidates[i].ShelfID < candidates[j].ShelfID
+		}
+		if candidates[i].Confidence != candidates[j].Confidence {
+			return candidates[i].Confidence > candidates[j].Confidence
+		}
+		return candidates[i].BookID < candidates[j].BookID
 	})
-	if err != nil {
-		return errJSON(500, err.Error()), nil
-	}
-	candidates := make([]ShelfCandidate, 0, len(out.Items))
-	for _, item := range out.Items {
-		candidates = append(candidates, shelfCandidateFromItem(item))
-	}
 	if bookStore != nil {
 		ids := make([]int, 0, len(candidates))
 		for _, candidate := range candidates {
@@ -833,7 +938,7 @@ func scan(ctx context.Context, req events.APIGatewayV2HTTPRequest) (events.APIGa
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
-	if _, err := ddbClient.PutItem(ctx, &dynamodb.PutItemInput{
+	if err := persistDetectionTask(ctx, ddbtypes.TransactWriteItem{Put: &ddbtypes.Put{
 		TableName: aws.String(jobsTable),
 		Item: map[string]ddbtypes.AttributeValue{
 			"job_id":     &ddbtypes.AttributeValueMemberS{Value: jobID},
@@ -842,16 +947,8 @@ func scan(ctx context.Context, req events.APIGatewayV2HTTPRequest) (events.APIGa
 			"created_at": &ddbtypes.AttributeValueMemberS{Value: now},
 			"updated_at": &ddbtypes.AttributeValueMemberS{Value: now},
 		},
-	}); err != nil {
+	}}, detectionTask(jobID, "batch", key, now, false)); err != nil {
 		return errJSON(500, "ddb put: "+err.Error()), nil
-	}
-
-	msg, _ := json.Marshal(map[string]string{"job_id": jobID, "image_key": key})
-	if _, err := sqsClient.SendMessage(ctx, &sqs.SendMessageInput{
-		QueueUrl:    aws.String(yoloQueueURL),
-		MessageBody: aws.String(string(msg)),
-	}); err != nil {
-		return errJSON(500, "sqs send: "+err.Error()), nil
 	}
 
 	return okJSON(202, map[string]any{"job_id": jobID}), nil
@@ -929,13 +1026,24 @@ func scanStart(ctx context.Context, req events.APIGatewayV2HTTPRequest) (events.
 		return errJSON(400, "expected JSON {job_id}"), nil
 	}
 	out, err := ddbClient.GetItem(ctx, &dynamodb.GetItemInput{
-		TableName: aws.String(jobsTable),
+		TableName: aws.String(jobsTable), ConsistentRead: aws.Bool(true),
 		Key: map[string]ddbtypes.AttributeValue{
 			"job_id": &ddbtypes.AttributeValueMemberS{Value: payload.JobID},
 		},
 	})
-	if err != nil || out.Item == nil {
+	if err != nil {
+		return errJSON(500, "job lookup: "+err.Error()), nil
+	}
+	if out.Item == nil {
 		return errJSON(404, "job not found"), nil
+	}
+	if status, ok := out.Item["status"].(*ddbtypes.AttributeValueMemberS); !ok || status.Value != "uploading" {
+		if status != nil && status.Value != "canceled" && status.Value != "failed" {
+			if saved, readErr := savedDetectionTask(ctx, payload.JobID, "batch"); readErr == nil && saved {
+				return okJSON(202, map[string]any{"job_id": payload.JobID}), nil
+			}
+		}
+		return errJSON(409, "job cannot be started"), nil
 	}
 	var key string
 	if v, ok := out.Item["image_key"].(*ddbtypes.AttributeValueMemberS); ok {
@@ -949,26 +1057,28 @@ func scanStart(ctx context.Context, req events.APIGatewayV2HTTPRequest) (events.
 		return errJSON(400, "upload not found in S3: "+err.Error()), nil
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	if _, err := ddbClient.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+	if err := persistDetectionTask(ctx, ddbtypes.TransactWriteItem{Update: &ddbtypes.Update{
 		TableName: aws.String(jobsTable),
 		Key: map[string]ddbtypes.AttributeValue{
 			"job_id": &ddbtypes.AttributeValueMemberS{Value: payload.JobID},
 		},
 		UpdateExpression:         aws.String("SET #s = :s, updated_at = :u"),
+		ConditionExpression:      aws.String("#s = :uploading"),
 		ExpressionAttributeNames: map[string]string{"#s": "status"},
 		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
-			":s": &ddbtypes.AttributeValueMemberS{Value: "pending"},
-			":u": &ddbtypes.AttributeValueMemberS{Value: now},
+			":s":         &ddbtypes.AttributeValueMemberS{Value: "pending"},
+			":uploading": &ddbtypes.AttributeValueMemberS{Value: "uploading"},
+			":u":         &ddbtypes.AttributeValueMemberS{Value: now},
 		},
-	}); err != nil {
-		return errJSON(500, "ddb update: "+err.Error()), nil
-	}
-	msg, _ := json.Marshal(map[string]string{"job_id": payload.JobID, "image_key": key})
-	if _, err := sqsClient.SendMessage(ctx, &sqs.SendMessageInput{
-		QueueUrl:    aws.String(yoloQueueURL),
-		MessageBody: aws.String(string(msg)),
-	}); err != nil {
-		return errJSON(500, "sqs send: "+err.Error()), nil
+	}}, detectionTask(payload.JobID, "batch", key, now, false)); err != nil {
+		saved, readErr := savedDetectionTask(ctx, payload.JobID, "batch")
+		if readErr == nil && saved {
+			return okJSON(202, map[string]any{"job_id": payload.JobID}), nil
+		}
+		if strings.Contains(err.Error(), "TransactionCanceledException") {
+			return errJSON(409, "job cannot be started"), nil
+		}
+		return errJSON(500, "start job: "+err.Error()), nil
 	}
 	return okJSON(202, map[string]any{"job_id": payload.JobID}), nil
 }

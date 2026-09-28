@@ -1,60 +1,98 @@
 import { Link, useParams } from 'react-router-dom'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ScanLine } from 'lucide-react'
 import { getShelfCandidates } from '../lib/api'
 import type { ShelfCandidate } from '../lib/types'
+import { getSlot } from '../lib/shelf'
 import { BookCard, shelfBookFromCandidate } from '../components/book'
 import { EmptyState, ErrorState, PageHeader, Skeleton } from '../components/common'
 import { FreshnessBadge, ShelfLocationLabel, ShelfMiniMap } from '../components/shelf'
 
 export default function ShelfDetailPage() {
   const { shelfId } = useParams<{ shelfId: string }>()
-  const decodedShelfId = shelfId ? decodeURIComponent(shelfId) : ''
+  const shelf = getSlot(shelfId)
+  const validShelfId = shelf?.shelf_id ?? ''
   const [candidates, setCandidates] = useState<ShelfCandidate[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
+  const mountedRef = useRef(false)
+  const requestIdRef = useRef(0)
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (requestId: number) => {
+    const isCurrent = () => mountedRef.current && requestIdRef.current === requestId
+    if (!isCurrent()) return
     setLoading(true)
     setError(false)
     try {
-      setCandidates(await getShelfCandidates())
+      const loadedCandidates = await getShelfCandidates()
+      if (!isCurrent()) return
+      setCandidates(loadedCandidates)
     } catch {
+      if (!isCurrent()) return
       setCandidates([])
       setError(true)
     } finally {
-      setLoading(false)
+      if (isCurrent()) setLoading(false)
     }
   }, [])
 
   useEffect(() => {
-    load()
-  }, [load])
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
+
+  useEffect(() => {
+    const requestId = ++requestIdRef.current
+    if (!shelf) {
+      setCandidates([])
+      setLoading(false)
+      setError(false)
+      return
+    }
+    load(requestId)
+  }, [load, shelf])
 
   const books = useMemo(
     () => candidates
-      .filter(candidate => candidate.shelf_id === decodedShelfId)
+      .filter(candidate => candidate.shelf_id === validShelfId)
       .sort((a, b) => b.confidence - a.confidence),
-    [candidates, decodedShelfId],
+    [candidates, validShelfId],
   )
-  const lastSeenAt = books[0]?.last_seen_at ?? books[0]?.updated_at
+  const lastSeenAt = books.map(book => book.last_seen_at ?? book.updated_at)
+    .filter((date): date is string => !!date && Number.isFinite(Date.parse(date)))
+    .sort((a, b) => Date.parse(b) - Date.parse(a))[0]
 
   return (
     <div>
       <PageHeader title="棚区画" back />
-      {loading ? (
+      {!shelf ? (
+        <EmptyState
+          title="棚区画が見つかりません"
+          hint="指定された棚区画は存在しません。図書室マップから選択してください。"
+          action={(
+            <Link
+              to="/map"
+              className="inline-flex min-h-11 items-center justify-center rounded-lg bg-primary px-4 text-sm font-bold text-white"
+            >
+              図書室マップを見る
+            </Link>
+          )}
+        />
+      ) : loading ? (
         <Skeleton variant="card" />
       ) : error ? (
-        <ErrorState message="棚の本を読み込めませんでした。" onRetry={load} />
+        <ErrorState message="棚の本を読み込めませんでした。" onRetry={() => load(++requestIdRef.current)} />
       ) : (
         <div className="grid gap-4">
           <section className="rounded-xl border border-line bg-white p-4 shadow-sm">
             <div className="flex items-start justify-between gap-3">
-              <ShelfLocationLabel shelfId={decodedShelfId} size="lg" />
-              <FreshnessBadge lastSeenAt={lastSeenAt} />
+              <ShelfLocationLabel shelfId={validShelfId} size="lg" />
+              <div className="text-right"><p className="mb-1 text-xs text-ink-muted">本の最新観測（棚全体の確認日ではありません）</p><FreshnessBadge lastSeenAt={lastSeenAt} /></div>
             </div>
             <div className="mt-4">
-              <ShelfMiniMap shelfId={decodedShelfId} />
+              <ShelfMiniMap shelfId={validShelfId} />
             </div>
           </section>
 
@@ -69,7 +107,7 @@ export default function ShelfDetailPage() {
           )}
 
           <Link
-            to={`/scan?shelf=${encodeURIComponent(decodedShelfId)}`}
+            to={`/scan?shelf=${encodeURIComponent(validShelfId)}`}
             className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg bg-primary px-4 text-sm font-bold text-white"
           >
             <ScanLine className="size-4" />

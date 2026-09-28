@@ -302,11 +302,12 @@ function densityBackground(count: number): string {
 }
 
 function freshnessLabel(value: string | undefined): string {
-  if (!value) return '確認日不明'
+  if (!value) return '観測日不明'
   const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return '確認日不明'
+  if (Number.isNaN(date.getTime())) return '観測日不明'
   const days = Math.floor((Date.now() - date.getTime()) / 86400000)
-  if (days <= 0) return '今日確認'
+  if (days < 0) return '観測日を確認中'
+  if (days === 0) return '今日観測'
   if (days < 14) return `${days}日前`
   return '2週間以上前'
 }

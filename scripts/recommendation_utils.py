@@ -6,8 +6,9 @@ import math
 import re
 import unicodedata
 from collections import Counter
+from dataclasses import dataclass
 from difflib import SequenceMatcher
-from typing import Iterable
+from typing import Iterable, Mapping
 
 
 ASCII_TOKEN_RE = re.compile(r"[a-z0-9]+")
@@ -105,28 +106,61 @@ def class_similarity(left: str | None, right: str | None) -> float:
     return 0.0
 
 
-def bm25_scores(documents: list[list[str]], query: list[str], k1: float = 1.5, b: float = 0.75) -> list[float]:
-    """Calculate Okapi BM25 scores for one tokenised query against documents."""
+@dataclass(frozen=True)
+class BM25Index:
+    """Corpus statistics reused by every BM25 query over the same catalogue."""
+
+    term_frequencies: tuple[Counter[str], ...]
+    document_frequency: Counter[str]
+    postings: dict[str, tuple[tuple[int, int], ...]]
+    average_length: float
+
+
+def prepare_bm25(documents: list[list[str]]) -> BM25Index:
+    """Prepare document counters and corpus statistics once for many queries."""
+    term_frequencies = tuple(Counter(document) for document in documents)
+    document_frequency: Counter[str] = Counter()
+    postings: dict[str, list[tuple[int, int]]] = {}
+    for index, frequencies in enumerate(term_frequencies):
+        document_frequency.update(frequencies.keys())
+        for term, frequency in frequencies.items():
+            postings.setdefault(term, []).append((index, frequency))
+    average_length = sum(len(document) for document in documents) / len(documents) if documents else 0.0
+    frozen_postings = {term: tuple(values) for term, values in postings.items()}
+    return BM25Index(term_frequencies, document_frequency, frozen_postings, average_length)
+
+
+def bm25_scores(
+    documents: list[list[str]],
+    query: list[str],
+    k1: float = 1.5,
+    b: float = 0.75,
+    *,
+    prepared: BM25Index | None = None,
+    query_frequencies: Mapping[str, int] | None = None,
+) -> list[float]:
+    """Calculate Okapi BM25 scores for one tokenised query against documents.
+
+    ``prepared`` and ``query_frequencies`` are optional so existing callers keep
+    the original API while repeated queries can reuse corpus work.
+    """
     if not documents or not query:
         return [0.0] * len(documents)
-    document_frequency: Counter[str] = Counter()
-    for document in documents:
-        document_frequency.update(set(document))
-    average_length = sum(len(document) for document in documents) / len(documents)
+    prepared = prepared or prepare_bm25(documents)
+    document_frequency = prepared.document_frequency
+    average_length = prepared.average_length
     if average_length == 0:
         return [0.0] * len(documents)
 
-    query_terms = Counter(query)
-    scores: list[float] = []
-    for document in documents:
-        frequencies = Counter(document)
-        length_factor = k1 * (1 - b + b * len(document) / average_length)
-        score = 0.0
-        for term, query_frequency in query_terms.items():
-            frequency = frequencies.get(term, 0)
-            if not frequency:
-                continue
-            idf = math.log(1 + (len(documents) - document_frequency[term] + 0.5) / (document_frequency[term] + 0.5))
-            score += query_frequency * idf * (frequency * (k1 + 1) / (frequency + length_factor))
-        scores.append(score)
+    query_terms = query_frequencies or Counter(query)
+    scores = [0.0] * len(documents)
+    for term, query_frequency in query_terms.items():
+        postings = prepared.postings.get(term)
+        if not postings:
+            continue
+        idf = math.log(1 + (len(documents) - document_frequency[term] + 0.5) / (document_frequency[term] + 0.5))
+        for index, frequency in postings:
+            document = documents[index]
+            length_factor = k1 * (1 - b + b * len(document) / average_length)
+            scores[index] += query_frequency * idf * (frequency * (k1 + 1) / (frequency + length_factor))
     return scores

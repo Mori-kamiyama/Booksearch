@@ -20,16 +20,25 @@ import json
 import math
 import os
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import boto3
-import cv2
-import numpy as np
 from botocore.exceptions import ClientError
-from ultralytics import YOLO
+
+if TYPE_CHECKING:
+    import cv2
+    import numpy as np
+    from ultralytics import YOLO
+
+# Lambda's read-only home directory makes Ultralytics/Matplotlib create a new
+# fallback cache on every cold start. Point both caches at writable /tmp before
+# the optional YOLO import runs.
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+os.environ.setdefault("YOLO_CONFIG_DIR", "/tmp/Ultralytics")
 
 BUCKET = os.environ["BUCKET"]
 JOBS_TABLE = os.environ["JOBS_TABLE"]
@@ -37,6 +46,7 @@ CROPS_TABLE = os.environ["CROPS_TABLE"]
 FINGERPRINTS_TABLE = os.environ.get("CROP_FINGERPRINTS_TABLE")
 OCR_QUEUE_URL = os.environ["OCR_QUEUE_URL"]
 LOOKUP_QUEUE_URL = os.environ["LOOKUP_QUEUE_URL"]
+SCAN_TASKS_TABLE = os.environ.get("SCAN_TASKS_TABLE", "")
 TASK_ROOT = os.environ.get("LAMBDA_TASK_ROOT", ".")
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 # Must match the YoloQueue RedrivePolicy so the last attempt is recognized
@@ -53,20 +63,27 @@ sqs = boto3.client("sqs")
 ddb = boto3.resource("dynamodb")
 jobs_table = ddb.Table(JOBS_TABLE)
 crops_table = ddb.Table(CROPS_TABLE)
+scan_tasks_table = ddb.Table(SCAN_TASKS_TABLE) if SCAN_TASKS_TABLE else None
 fingerprints_table = ddb.Table(FINGERPRINTS_TABLE) if FINGERPRINTS_TABLE else None
 
 
-def get_model() -> YOLO:
+def get_model() -> "YOLO":
     global _yolo_model
     if _yolo_model is None:
+        started = time.perf_counter()
+        from ultralytics import YOLO
+
         print(f"loading YOLO model: {MODEL_PATH}")
         _yolo_model = YOLO(str(MODEL_PATH))
+        print(f"[yolo] model initialization seconds={time.perf_counter() - started:.3f}")
     return _yolo_model
 
 
 # ---------- crop quality ----------
 def assess_quality(crop: np.ndarray, box: tuple[int, int, int, int],
                    image_size: tuple[int, int]) -> dict[str, Any]:
+    import cv2
+
     width, height = image_size
     x1, y1, x2, y2 = box
     h, w = crop.shape[:2]
@@ -115,16 +132,16 @@ def assess_quality(crop: np.ndarray, box: tuple[int, int, int, int],
 
 
 # ---------- AprilTag ----------
-ARUCO_DICTIONARIES = {
-    "DICT_4X4_50": cv2.aruco.DICT_4X4_50,
-    "DICT_4X4_100": cv2.aruco.DICT_4X4_100,
-    "DICT_5X5_100": cv2.aruco.DICT_5X5_100,
-    "DICT_6X6_250": cv2.aruco.DICT_6X6_250,
-    "DICT_APRILTAG_16h5": cv2.aruco.DICT_APRILTAG_16h5,
-    "DICT_APRILTAG_25h9": cv2.aruco.DICT_APRILTAG_25h9,
-    "DICT_APRILTAG_36h10": cv2.aruco.DICT_APRILTAG_36h10,
-    "DICT_APRILTAG_36h11": cv2.aruco.DICT_APRILTAG_36h11,
-}
+ARUCO_DICTIONARIES = (
+    "DICT_4X4_50",
+    "DICT_4X4_100",
+    "DICT_5X5_100",
+    "DICT_6X6_250",
+    "DICT_APRILTAG_16h5",
+    "DICT_APRILTAG_25h9",
+    "DICT_APRILTAG_36h10",
+    "DICT_APRILTAG_36h11",
+)
 
 
 @dataclass
@@ -146,21 +163,29 @@ class DetectedTag:
         return "bottom_left"
 
     def distance_to_point(self, point) -> float:
+        import numpy as np
+
         return float(np.linalg.norm(np.array(point, dtype=np.float32) - self.center))
 
 
 def detect_tags(image: np.ndarray, mapping: dict[str, Any]) -> tuple[list[DetectedTag], dict[str, Any]]:
     """AprilTag/ArUco を検出。mapping の辞書で失敗したら全辞書を試行し、
     最も多く検出できた辞書を採用する。検出サマリも返す。"""
+    import cv2
+    import numpy as np
+
     primary = mapping.get("dictionary", "DICT_APRILTAG_36h11")
-    candidates = [primary] + [k for k in ARUCO_DICTIONARIES if k != primary]
+    candidates = [primary] + [name for name in ARUCO_DICTIONARIES if name != primary]
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     best: tuple[list[Any], Any, str] = ([], None, primary)
     diagnostics: dict[str, Any] = {"tried": [], "selected": None, "raw_ids": []}
     for name in candidates:
         if name not in ARUCO_DICTIONARIES:
             continue
-        aruco_dict = cv2.aruco.getPredefinedDictionary(ARUCO_DICTIONARIES[name])
+        dictionary_id = getattr(cv2.aruco, name, None)
+        if dictionary_id is None:
+            continue
+        aruco_dict = cv2.aruco.getPredefinedDictionary(dictionary_id)
         detector = cv2.aruco.ArucoDetector(aruco_dict)
         corners, ids, _ = detector.detectMarkers(gray)
         n = 0 if ids is None else len(ids)
@@ -258,6 +283,8 @@ def clamp_box(xyxy, image_size, pad_ratio=0.02):
 
 
 def crop_phash(crop: np.ndarray, hash_size: int = 8) -> int:
+    import cv2
+
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
     resized = cv2.resize(gray, (hash_size, hash_size), interpolation=cv2.INTER_AREA)
     average = float(resized.mean())
@@ -300,8 +327,11 @@ def persistent_duplicate(scope: str | None, phash: int) -> dict[str, Any] | None
 
 
 def process_frame(job_id: str, image_key: str, frame_index: int,
-                  seen_hashes: list[tuple[int, str]], local_path: str | None = None
+                  seen_hashes: list[tuple[int, str]], local_path: str | None = None,
+                  *, task_id: str | None = None, detection_token: str | None = None,
                   ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    import cv2
+
     print(f"[yolo] job_id={job_id} image_key={image_key}")
     local_image = local_path or f"/tmp/{job_id}_{frame_index:04d}{Path(image_key).suffix or '.jpg'}"
     if local_path is None:
@@ -332,7 +362,16 @@ def process_frame(job_id: str, image_key: str, frame_index: int,
             print(f"[yolo] apriltag failed: {e}")
             tag_diag = {"error": str(e)}
 
-    image_stem = f"frame_{frame_index:06d}_{Path(image_key).stem[:12]}"
+    # Durable task attempts get an attempt-scoped crop namespace. Legacy jobs
+    # retain their historical IDs so old queue messages remain compatible.
+    if task_id and detection_token:
+        namespace = "".join(
+            c if c.isalnum() or c in "-_" else "_"
+            for c in f"task_{task_id}_{detection_token}"
+        )
+        image_stem = f"{namespace}_frame_{frame_index:06d}_{Path(image_key).stem[:12]}"
+    else:
+        image_stem = f"frame_{frame_index:06d}_{Path(image_key).stem[:12]}"
     crop_records: list[dict[str, Any]] = []
     for i, (xyxy, score) in enumerate(boxes, 1):
         box = clamp_box(tuple(xyxy), (width, height))
@@ -381,11 +420,28 @@ def process_frame(job_id: str, image_key: str, frame_index: int,
             "fingerprint_scope": scope,
             "phash": f"{phash:016x}",
         }
+        if task_id and detection_token:
+            item["task_id"] = task_id
+            item["detection_token"] = detection_token
+            item["requires_ocr"] = status == "ocr_pending"
         if ocr_error:
             item["ocr_error"] = ocr_error
             item["existing_ocr_ref"] = duplicate_ref
             item["titles"] = titles
-        crops_table.put_item(Item=ddb_safe(item))
+        if task_id and detection_token:
+            try:
+                crops_table.put_item(
+                    Item=ddb_safe(item),
+                    ConditionExpression="attribute_not_exists(job_id)",
+                )
+            except ClientError as exc:
+                # A retry of the same leased task may have already persisted
+                # this immutable attempt-scoped crop. It is safe to reuse the
+                # deterministic result; a different token has a different ID.
+                if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                    raise
+        else:
+            crops_table.put_item(Item=ddb_safe(item))
         crop_records.append(item)
         if quality["readable"] and not duplicate_ref:
             seen_hashes.append((phash, crop_id))
@@ -394,6 +450,8 @@ def process_frame(job_id: str, image_key: str, frame_index: int,
 
 def extract_video_frames(video_path: str, job_id: str) -> list[str]:
     """Extract a bounded, time-spaced set of JPEG frames from an uploaded video."""
+    import cv2
+
     interval = max(0.1, float(os.environ.get("VIDEO_FRAME_INTERVAL_SEC", "0.5")))
     max_frames = max(1, int(os.environ.get("VIDEO_MAX_FRAMES", "120")))
     capture = cv2.VideoCapture(video_path)
@@ -426,6 +484,25 @@ def extract_video_frames(video_path: str, job_id: str) -> list[str]:
     return frames
 
 
+def mark_final_lookup_outbox(job_id: str, expected_status: str) -> bool:
+    """Atomically publish the durable final-lookup outbox transition."""
+    try:
+        jobs_table.update_item(
+            Key={"job_id": job_id},
+            UpdateExpression="SET final_lookup_queued = :yes, final_lookup_outbox_version = :version, #s = :pending",
+            ConditionExpression="attribute_not_exists(final_lookup_outbox_version) AND #s = :expected",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={
+                ":yes": True, ":version": 1, ":pending": "lookup_pending", ":expected": expected_status,
+            },
+        )
+        return True
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return False
+        raise
+
+
 def queue_final_lookup_if_ready(job_id: str, item: dict[str, Any]) -> None:
     if not item.get("scan_closed"):
         return
@@ -433,31 +510,7 @@ def queue_final_lookup_if_ready(job_id: str, item: dict[str, Any]) -> None:
         return
     if int(item.get("ocr_done", 0)) < int(item.get("ocr_total", 0)):
         return
-    try:
-        jobs_table.update_item(
-            Key={"job_id": job_id},
-            UpdateExpression="SET final_lookup_queued = :yes, #s = :pending",
-            ConditionExpression="attribute_not_exists(final_lookup_queued)",
-            ExpressionAttributeNames={"#s": "status"},
-            ExpressionAttributeValues={":yes": True, ":pending": "lookup_pending"},
-        )
-    except ClientError as exc:
-        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
-            return
-        raise
-    try:
-        sqs.send_message(
-            QueueUrl=LOOKUP_QUEUE_URL,
-            MessageBody=json.dumps({"job_id": job_id, "incremental": False}),
-        )
-    except Exception:
-        jobs_table.update_item(
-            Key={"job_id": job_id},
-            UpdateExpression="SET #s = :processing REMOVE final_lookup_queued",
-            ExpressionAttributeNames={"#s": "status"},
-            ExpressionAttributeValues={":processing": "processing"},
-        )
-        raise
+    mark_final_lookup_outbox(job_id, "processing")
 
 
 def abandon_live_frame(job_id: str, frame_key: str | None, reason: str) -> None:
@@ -494,6 +547,10 @@ def abandon_live_frame(job_id: str, frame_key: str | None, reason: str) -> None:
 def process_job(job_id: str, image_keys: list[str], incremental: bool = False) -> None:
     if not image_keys:
         raise RuntimeError("image_keys is empty")
+    if not incremental:
+        existing_job = jobs_table.get_item(Key={"job_id": job_id}, ConsistentRead=True).get("Item") or {}
+        if existing_job.get("status") not in {"pending", "ocr_pending"}:
+            return
     if incremental:
         existing_job = jobs_table.get_item(Key={"job_id": job_id}).get("Item") or {}
         if image_keys[0] in (existing_job.get("processed_frame_keys") or set()):
@@ -536,7 +593,6 @@ def process_job(job_id: str, image_keys: list[str], incremental: bool = False) -
         "total_crops": len(crop_records),
     }
     first_frame = frame_diagnostics[0]
-    terminal_without_ocr = "no_detection" if not crop_records else "no_readable_crops"
     if incremental:
         frame_key = image_keys[0]
         try:
@@ -560,23 +616,57 @@ def process_job(job_id: str, image_keys: list[str], incremental: bool = False) -
             raise
         job_item = updated.get("Attributes", {})
     else:
-        jobs_table.update_item(
-            Key={"job_id": job_id},
-            UpdateExpression="SET #s = :s, crop_total = :n, ocr_total = :ot, ocr_done = :z, "
-                             "image_width = :w, image_height = :h, #d = :d",
-            ExpressionAttributeNames={"#s": "status", "#d": "diagnostics"},
-            ExpressionAttributeValues={
-                ":s": "ocr_pending" if ocr_records else terminal_without_ocr,
-                ":n": len(crop_records),
-                ":ot": len(ocr_records),
-                ":z": 0,
-                ":w": first_frame["width"],
-                ":h": first_frame["height"],
-                ":d": ddb_safe(diag),
-            },
-        )
+        if ocr_records:
+            try:
+                jobs_table.update_item(
+                    Key={"job_id": job_id},
+                    UpdateExpression="SET #s = :s, crop_total = :n, ocr_total = :ot, ocr_done = :z, "
+                                     "image_width = :w, image_height = :h, #d = :d",
+                    ConditionExpression="#s = :pending AND attribute_not_exists(final_lookup_outbox_version)",
+                    ExpressionAttributeNames={"#s": "status", "#d": "diagnostics"},
+                    ExpressionAttributeValues={
+                        ":s": "ocr_pending", ":pending": "pending", ":n": len(crop_records),
+                        ":ot": len(ocr_records), ":z": 0, ":w": first_frame["width"],
+                        ":h": first_frame["height"], ":d": ddb_safe(diag),
+                    },
+                )
+            except ClientError as exc:
+                if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                    raise
+                current = jobs_table.get_item(Key={"job_id": job_id}).get("Item") or {}
+                if current.get("status") != "ocr_pending":
+                    print(f"[yolo] duplicate batch already finalized {job_id}")
+                    return
+                # A retry after the state transition must resend OCR messages:
+                # the first invocation may have failed before sending them.
+        else:
+            try:
+                jobs_table.update_item(
+                    Key={"job_id": job_id},
+                    UpdateExpression="SET #s = :s, final_lookup_queued = :yes, "
+                                     "final_lookup_outbox_version = :version, crop_total = :n, "
+                                     "ocr_total = :ot, ocr_done = :z, image_width = :w, "
+                                     "image_height = :h, #d = :d",
+                    ConditionExpression="attribute_not_exists(final_lookup_outbox_version) AND #s = :pending",
+                    ExpressionAttributeNames={"#s": "status", "#d": "diagnostics"},
+                    ExpressionAttributeValues={
+                        ":s": "lookup_pending", ":yes": True, ":version": 1,
+                        ":pending": "pending", ":n": len(crop_records), ":ot": 0, ":z": 0,
+                        ":w": first_frame["width"], ":h": first_frame["height"],
+                        ":d": ddb_safe(diag),
+                    },
+                )
+            except ClientError as exc:
+                if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                    raise
+                print(f"[yolo] final lookup already published {job_id}")
+                return
         job_item = {}
 
+    if incremental:
+        # Persist the final intent before sending the refresh message.  A
+        # failed refresh send must not lose the durable final transition.
+        queue_final_lookup_if_ready(job_id, job_item)
     for rec in ocr_records:
         sqs.send_message(
             QueueUrl=OCR_QUEUE_URL,
@@ -593,9 +683,6 @@ def process_job(job_id: str, image_keys: list[str], incremental: bool = False) -
             QueueUrl=LOOKUP_QUEUE_URL,
             MessageBody=json.dumps({"job_id": job_id, "incremental": True}),
         )
-        queue_final_lookup_if_ready(job_id, job_item)
-    elif not ocr_records:
-        sqs.send_message(QueueUrl=LOOKUP_QUEUE_URL, MessageBody=json.dumps({"job_id": job_id}))
 
 
 def ddb_safe(item):
@@ -612,9 +699,53 @@ def ddb_safe(item):
     return conv(item)
 
 
+def process_task(body: dict[str, Any]) -> None:
+    """Run the durable ScanTasksTable contract for task_id messages."""
+    from durable import process_task as run_durable_task
+
+    run_durable_task(body, worker=sys.modules[__name__])
+
+
 def handler(event, context):
     for rec in event.get("Records", []):
         body = json.loads(rec["body"])
+        if body.get("task_id"):
+            try:
+                process_task(body)
+            except Exception as e:
+                from durable import TaskBusy, TaskExecutionError, abandon_task
+
+                print(f"[yolo] durable task ERROR: {e}", file=sys.stderr)
+                if isinstance(e, TaskBusy):
+                    # An unexpired lease belongs to another invocation. Do
+                    # not convert a visibility retry into a false failure.
+                    raise
+                if not isinstance(e, TaskExecutionError):
+                    raise
+                if not e.abandonable:
+                    # Manifest/transaction/storage failures are retryable.
+                    # Only detector failures at the final receive attempt may
+                    # be converted into a zero-crop task completion.
+                    raise
+                receive_count = int(rec.get("attributes", {}).get("ApproximateReceiveCount", "1"))
+                if receive_count < MAX_RECEIVE_COUNT:
+                    raise
+                abandoned = abandon_task(
+                    body, str(e), e.lease_token, worker=sys.modules[__name__],
+                )
+                if not abandoned:
+                    latest_task = scan_tasks_table.get_item(
+                        Key={"job_id": body["job_id"], "task_id": body["task_id"]},
+                        ConsistentRead=True,
+                    ).get("Item") or {}
+                    latest_job = jobs_table.get_item(
+                        Key={"job_id": body["job_id"]}, ConsistentRead=True,
+                    ).get("Item") or {}
+                    if latest_task.get("state") != "done" and latest_job.get("status") not in {
+                        "canceled", "done", "failed", "no_detection", "no_readable_crops", "lookup_pending",
+                    }:
+                        raise
+            continue
         incremental = bool(body.get("incremental"))
         image_keys = body.get("image_keys") or [body["image_key"]]
         try:
@@ -634,8 +765,11 @@ def handler(event, context):
                 jobs_table.update_item(
                     Key={"job_id": body["job_id"]},
                     UpdateExpression="SET #s = :s, #e = :e",
+                    ConditionExpression="#s IN (:pending, :ocr_pending)",
                     ExpressionAttributeNames={"#s": "status", "#e": "error"},
-                    ExpressionAttributeValues={":s": "failed", ":e": str(e)},
+                    ExpressionAttributeValues={
+                        ":s": "failed", ":e": str(e), ":pending": "pending", ":ocr_pending": "ocr_pending",
+                    },
                 )
             except Exception:
                 pass
