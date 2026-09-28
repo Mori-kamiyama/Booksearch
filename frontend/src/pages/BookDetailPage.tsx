@@ -94,12 +94,12 @@ export default function BookDetailPage() {
                 {sourceQuery && <><span className="mx-2">&gt;</span><span className="line-clamp-1 inline-block max-w-[40vw] align-bottom">{sourceQuery}</span></>}
               </>
             )}
-            <span className="mx-2">&gt;</span>
-            <span className="line-clamp-1 align-bottom text-ink-muted">{book.title}</span>
+            <span className="mx-2 hidden md:inline">&gt;</span>
+            <span className="hidden align-bottom text-ink-muted md:inline">{book.title}</span>
           </nav>
 
           <section className="grid gap-8 md:grid-cols-[minmax(0,300px)_minmax(0,1fr)] md:gap-[44px]">
-            <BookCoverPanel book={book} cover={cover} />
+            <BookCoverPanel cover={cover} />
             <BookInfoPanel book={book} readingHours={readingHours} />
           </section>
         </div>
@@ -129,7 +129,7 @@ export default function BookDetailPage() {
   )
 }
 
-function BookCoverPanel({ book, cover }: { book: Book; cover?: string }) {
+function BookCoverPanel({ cover }: { cover?: string }) {
   return (
     <section className="flex flex-col items-center md:items-start">
       <div className="relative flex h-[350px] w-full max-w-[240px] items-end justify-center md:h-[405px] md:max-w-[300px]">
@@ -140,7 +140,6 @@ function BookCoverPanel({ book, cover }: { book: Book; cover?: string }) {
           fallbackClassName="grid h-full w-full place-items-center bg-[#d9d9d9] text-ink-muted"
         />
       </div>
-      <p className="mt-3 line-clamp-2 max-w-[280px] text-center text-xs text-ink-muted md:hidden">{book.title}</p>
     </section>
   )
 }
@@ -225,12 +224,17 @@ function MapSection({ candidate, onOpenMap, onScanForBook }: { candidate?: Shelf
 
 
 function AiSummarySection({ text }: { text: string }) {
+  // Some catalogue descriptions arrive flattened. Add visual breaks without
+  // rewriting their wording; preserve any paragraph boundaries already present.
+  const readableText = text.replace(/\r\n?/g, '\n')
+    .replace(/([。！？][」』）】]*)(?![\n」』）】])/g, '$1\n')
+    .replace(/[ \t]+(?=・)/g, '\n')
   return (
     <section className="mx-auto mt-12 w-full max-w-[402px] px-7 md:mt-16 md:max-w-[886px] md:px-0">
       <h2 className="text-base font-semibold leading-[19px] text-ink">本の紹介</h2>
       <div className="mt-4 text-sm leading-7 text-ink md:mt-5 md:text-base">
         <p className="font-semibold">登録されている内容紹介</p>
-        <p className="mt-2 text-ink-muted">{text}</p>
+        <p className="mt-2 whitespace-pre-line break-words text-ink-muted">{readableText}</p>
       </div>
     </section>
   )
