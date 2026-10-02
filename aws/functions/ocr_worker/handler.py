@@ -22,6 +22,8 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
+from shared import scan_core
+
 import boto3
 from botocore.exceptions import ClientError
 
@@ -58,26 +60,7 @@ def get_gemini_key() -> str:
     return _gemini_key
 
 
-OCR_PROMPT = """\
-この画像は本が入った箱、または本棚の一区画を切り出したものです。
-背表紙から読み取れる本のタイトルだけをすべて抽出し、JSON object だけを返してください。
-
-形式:
-{
-  "books": [
-    {
-      "title": "書名"
-    }
-  ]
-}
-
-ルール:
-- 1冊につき1エントリ
-- タイトルが読めない本は除外
-- 著者名、出版社、ISBNは抽出しない
-- タイトル以外の文字を無理に混ぜない
-- 説明文や Markdown は不要。JSON object だけ返す
-"""
+OCR_PROMPT = scan_core.TITLE_OCR_PROMPT
 
 
 def strip_json_md(text: str) -> str:
@@ -92,18 +75,7 @@ def strip_json_md(text: str) -> str:
 
 
 def parse_titles(response_text: str) -> list[dict[str, Any]]:
-    try:
-        data = json.loads(strip_json_md(response_text or ""))
-    except json.JSONDecodeError:
-        return []
-    books = data.get("books", data if isinstance(data, list) else [])
-    out = []
-    for b in books:
-        if isinstance(b, dict):
-            t = b.get("title")
-            if t and str(t).strip():
-                out.append({"title": str(t).strip()})
-    return out
+    return scan_core.parse_titles(response_text)
 
 
 def gemini_ocr(image_bytes: bytes, mime: str) -> list[dict[str, Any]]:
@@ -113,6 +85,7 @@ def gemini_ocr(image_bytes: bytes, mime: str) -> list[dict[str, Any]]:
     client = genai.Client(api_key=get_gemini_key())
     response = client.models.generate_content(
         model=GEMINI_MODEL,
+        config=types.GenerateContentConfig(temperature=0),
         contents=[
             types.Part.from_bytes(data=image_bytes, mime_type=mime),
             OCR_PROMPT,

@@ -148,7 +148,7 @@ def test_tagged_repeat_can_locate_untagged_ocr_result(monkeypatch) -> None:
     monkeypatch.setattr(worker, "put_shelf_observation", lambda job, crop, shelf, candidate:
                         observed.append((job, crop, shelf)) or True)
     monkeypatch.setattr(worker, "refresh_shelf_candidate", lambda *_args: None)
-    book = {"book_lookup": {"candidates": [{"library_db_id": 42, "score": 0.9}]}}
+    book = {"book_lookup": {"candidates": [{"library_db_id": 42, "score": 0.9, "match_confidence": "auto"}]}}
     catalog = {"job_id": "job", "entries": [
         {"crop_id": "original", "shelf_id": None, "books": [book]},
         {"crop_id": "repeat", "shelf_id": "shelf-a", "books": [book],
@@ -174,3 +174,46 @@ def test_final_publication_uses_unique_key_and_error_alias(monkeypatch) -> None:
     assert "#e" in publication["UpdateExpression"]
     assert publication["ExpressionAttributeNames"]["#e"] == "error"
     assert publication["ExpressionAttributeValues"][":s"] == "done"
+
+
+def test_title_lookup_excludes_publisher_and_reviews_ambiguous_titles(monkeypatch):
+    import sqlite3
+    worker = load_worker(monkeypatch)
+    con = sqlite3.connect(":memory:")
+    con.row_factory = sqlite3.Row
+    con.executescript("""
+        CREATE TABLE books(id INTEGER, title TEXT, title_norm TEXT, authors TEXT,
+          authors_norm TEXT, publisher TEXT, publisher_norm TEXT, published_date TEXT,
+          class_number TEXT, acquisition_type TEXT, registration_number TEXT, isbn TEXT);
+        CREATE TABLE book_covers(book_id INTEGER, thumbnail TEXT, info_link TEXT, matched_title TEXT);
+        INSERT INTO books(id,title,title_norm,publisher,publisher_norm)
+          VALUES(1,'別の本','別の本','出版社','出版社');
+        INSERT INTO books(id,title,title_norm) VALUES(2,'JavaScript','javascript');
+        INSERT INTO books(id,title,title_norm) VALUES(3,'JavaScript','javascript');
+    """)
+    assert worker.search_library(con, "出版社") == []
+    candidates = worker.search_library(con, "JavaScript")
+    assert len(candidates) == 2
+    assert all(c["match_confidence"] == "review" for c in candidates)
+    assert worker.search_library(con, "別の本")[0]["match_confidence"] == "auto"
+    con.close()
+
+
+def test_review_candidate_does_not_create_shelf_observation(monkeypatch):
+    worker = load_worker(monkeypatch)
+    worker.put_shelf_observation = lambda *_args: pytest.fail("review must not become shelf evidence")
+    catalog = {"job_id": "job", "entries": [{"crop_id": "crop", "shelf_id": "shelf-a",
+        "books": [{"title": "JavaScript", "book_lookup": {"candidates": [
+            {"library_db_id": 42, "score": 0.9, "match_confidence": "review"}]}}]}]}
+    assert worker.update_shelf_confidence(catalog) == 0
+
+
+def test_book_count_deduplicates_frame_readings_but_keeps_distinct_books(monkeypatch):
+    worker = load_worker(monkeypatch)
+    book = {"title": "JavaScript 入門", "book_lookup": {"candidates": [
+        {"library_db_id": 42, "match_confidence": "auto"}]}}
+    variant = {**book, "title": "JavaScript入門"}
+    entries = [{"shelf_id": "shelf-a", "books": [book]},
+               {"shelf_id": "shelf-a", "books": [variant, {"title": "別の本"}]},
+               {"shelf_id": "shelf-b", "books": [book]}]
+    assert worker.detected_book_count(entries) == 3

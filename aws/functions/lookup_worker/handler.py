@@ -27,6 +27,8 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
+from shared import scan_core
+
 import boto3
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
@@ -143,17 +145,12 @@ def incremental_allowed(job_id: str) -> bool:
 
 
 # ---------- normalize / score ----------
-def normalize_text(value: Any) -> str:
-    if value is None:
-        return ""
-    text = unicodedata.normalize("NFKC", str(value)).lower()
-    return re.sub(r"[\s　・:：,，.．。『』「」\"'“”‘’!?！？\-‐‑‒–—―（）()【】\[\]]+", "", text)
+def normalize_text(value: Any):
+    return scan_core.normalize_text(value)
 
 
-def normalize_isbn(value: Any) -> str:
-    if value is None:
-        return ""
-    return re.sub(r"[^0-9xX]", "", str(value)).upper()
+def normalize_isbn(value: Any):
+    return scan_core.normalize_isbn(value)
 
 
 # 1-2文字のOCR断片が長い書名/著者名にたまたま含まれるだけで
@@ -162,66 +159,13 @@ def normalize_isbn(value: Any) -> str:
 MIN_TRUSTED_SUBSTRING_LEN = 4
 
 
-def score_text(qn: str, vn: str) -> float:
-    if not qn or not vn:
-        return 0.0
-    if qn == vn:
-        return 1.0
-    if qn in vn and len(qn) >= MIN_TRUSTED_SUBSTRING_LEN:
-        return min(0.98, 0.7 + len(qn) / len(vn) * 0.25)
-    if vn in qn and len(vn) >= MIN_TRUSTED_SUBSTRING_LEN:
-        if len(vn) >= 6:
-            return min(0.96, 0.82 + len(vn) / len(qn) * 0.15)
-        return min(0.94, 0.65 + len(vn) / len(qn) * 0.25)
-    return SequenceMatcher(None, qn, vn).ratio()
+def score_text(qn: str, vn: str):
+    return scan_core.score_text(qn, vn)
 
 
 # ---------- library search ----------
 def search_library(con, title: str, limit: int = 5) -> list[dict[str, Any]]:
-    qn = normalize_text(title)
-    if not qn:
-        return []
-    like = f"%{qn}%"
-    rows = con.execute(
-        """
-        SELECT b.*, bc.thumbnail, bc.info_link, bc.matched_title AS cover_matched_title
-        FROM books b
-        LEFT JOIN book_covers bc ON bc.book_id = b.id
-        WHERE b.title_norm LIKE ? OR b.authors_norm LIKE ? OR b.publisher_norm LIKE ?
-        LIMIT 200
-        """,
-        [like, like, like],
-    ).fetchall()
-
-    results = []
-    seen = set()
-    for row in rows:
-        if row["id"] in seen:
-            continue
-        seen.add(row["id"])
-        t = score_text(qn, row["title_norm"] or "")
-        a = score_text(qn, row["authors_norm"] or "") * 0.9
-        p = score_text(qn, row["publisher_norm"] or "") * 0.8
-        score = max(t, a, p)
-        if score >= 0.72:
-            results.append({
-                "source": "library_db",
-                "score": round(score, 4),
-                "match_confidence": "auto" if score >= 0.85 else "review",
-                "title": row["title"],
-                "authors": [row["authors"]] if row["authors"] else [],
-                "publisher": row["publisher"],
-                "published_date": row["published_date"],
-                "class_number": row["class_number"],
-                "acquisition_type": row["acquisition_type"],
-                "registration_number": row["registration_number"],
-                "isbns": [row["isbn"]] if row["isbn"] else [],
-                "library_db_id": row["id"],
-                "thumbnail": row["thumbnail"] if "thumbnail" in row.keys() else None,
-                "info_link": row["info_link"] if "info_link" in row.keys() else None,
-            })
-    results.sort(key=lambda x: x["score"], reverse=True)
-    return results[:limit]
+    return scan_core.search_title_candidates(con, title, limit)
 
 
 def known_books_candidates(title: str, records: list[dict[str, Any]], limit: int = 5) -> list[dict[str, Any]]:
@@ -405,7 +349,7 @@ def update_shelf_confidence(catalog: dict[str, Any]) -> int:
                 continue
             candidate = candidates[0]
             book_id = candidate.get("library_db_id")
-            if not book_id:
+            if not book_id or candidate.get("match_confidence") != "auto":
                 continue
             key = (int(book_id), shelf_id)
             previous = best.get(key)
@@ -461,8 +405,10 @@ def build_catalog(job_id: str) -> dict[str, Any]:
                 candidates = search_library(con, title)
             if not candidates and title and known_books:
                 candidates = known_books_candidates(title, known_books)
+            scan_core.apply_legibility(candidates, book)
             enriched.append({
                 "title": title,
+                "legibility": book.get("legibility"),
                 "book_lookup": {"query": title, "source": "library_db",
                                 "candidates": candidates} if title else None,
             })
@@ -498,6 +444,23 @@ def build_catalog(job_id: str) -> dict[str, Any]:
     return jsonify(catalog)
 
 
+def detected_book_count(entries: list[dict[str, Any]]) -> int:
+    """Count distinct recognized books per shelf, not repeated frame readings."""
+    identities = set()
+    for entry in entries:
+        for book in entry.get("books") or []:
+            candidates = (book.get("book_lookup") or {}).get("candidates") or []
+            candidate = candidates[0] if candidates else {}
+            book_id = candidate.get("library_db_id")
+            identity = (
+                ("id", book_id) if book_id and candidate.get("match_confidence") == "auto"
+                else ("title", normalize_text(book.get("title")))
+            )
+            if identity[1]:
+                identities.add((entry.get("shelf_id"), identity))
+    return len(identities)
+
+
 def process_job(job_id: str, incremental: bool = False) -> None:
     if incremental:
         if not incremental_allowed(job_id):
@@ -505,7 +468,7 @@ def process_job(job_id: str, incremental: bool = False) -> None:
         catalog = build_catalog(job_id)
         entries = catalog.get("entries", [])
         shelf_count = len({entry.get("shelf_id") for entry in entries if entry.get("shelf_id")})
-        book_count = sum(len(entry.get("books") or []) for entry in entries)
+        book_count = detected_book_count(entries)
         # Every publication gets its own object.  A late incremental result
         # must never overwrite the object referenced by a final job result.
         key = f"catalogs/{job_id}/incremental/{uuid.uuid4().hex}.json"
@@ -542,7 +505,7 @@ def process_job(job_id: str, incremental: bool = False) -> None:
         shelf_observations_added = update_shelf_confidence(catalog)
         entries = catalog.get("entries", [])
         shelf_count = len({entry.get("shelf_id") for entry in entries if entry.get("shelf_id")})
-        book_count = sum(len(entry.get("books") or []) for entry in entries)
+        book_count = detected_book_count(entries)
         # The claim token makes duplicate final deliveries harmless and gives
         # each attempt an immutable S3 object for late incremental messages.
         key = f"catalogs/{job_id}/final/{token}.json"

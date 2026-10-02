@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import scan_core
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
@@ -53,8 +54,9 @@ class DetectionConfig:
     device: str = "mps"
     crop_pad: float = 0.02
     jpeg_quality: int = 92
-    min_blur_score: float = 150.0
-    min_short_edge: int = 550
+    min_blur_score: float = scan_core.MIN_BLUR_SCORE
+    min_short_edge: int | None = None
+    min_short_edge_ratio: float = scan_core.MIN_SHORT_EDGE_RATIO
     reject_edge_touch: bool = False
     reject_edge_aspect: bool = True
     edge_wide_aspect: float = 1.45
@@ -65,57 +67,27 @@ def assess_crop_quality(
     crop: object,
     box: tuple[int, int, int, int],
     image_size: tuple[int, int],
-    min_blur_score: float = 150.0,
-    min_short_edge: int = 550,
+    min_blur_score: float = scan_core.MIN_BLUR_SCORE,
+    min_short_edge: int | None = None,
+    min_short_edge_ratio: float = scan_core.MIN_SHORT_EDGE_RATIO,
     reject_edge_touch: bool = False,
     reject_edge_aspect: bool = True,
     edge_wide_aspect: float = 1.45,
     edge_tall_aspect: float = 0.45,
 ) -> BoxQuality:
-    """Return conservative readability signals for a crop image."""
-
-    import cv2
-
-    width, height = image_size
-    x1, y1, x2, y2 = box
-    crop_height, crop_width = crop.shape[:2]
-    short_edge = min(crop_width, crop_height)
-    aspect_ratio = crop_width / crop_height if crop_height else 0.0
-    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-    blur_score = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-
-    edge_touch = []
-    margin_x = max(2, int(width * 0.005))
-    margin_y = max(2, int(height * 0.005))
-    if x1 <= margin_x:
-        edge_touch.append("left")
-    if y1 <= margin_y:
-        edge_touch.append("top")
-    if x2 >= width - margin_x:
-        edge_touch.append("right")
-    if y2 >= height - margin_y:
-        edge_touch.append("bottom")
-
-    reasons = []
-    if blur_score < min_blur_score:
-        reasons.append("blurry")
-    if short_edge < min_short_edge:
-        reasons.append("too_small")
-    if reject_edge_touch and edge_touch:
-        reasons.append("edge_touch")
-    if reject_edge_aspect and edge_touch:
-        if aspect_ratio >= edge_wide_aspect:
-            reasons.append("edge_wide")
-        elif aspect_ratio <= edge_tall_aspect:
-            reasons.append("edge_tall")
-
     return BoxQuality(
-        blur_score=blur_score,
-        short_edge=short_edge,
-        aspect_ratio=aspect_ratio,
-        edge_touch=edge_touch,
-        readable=not reasons,
-        reasons=reasons,
+        **scan_core.assess_quality(
+            crop,
+            box,
+            image_size,
+            min_blur_score=min_blur_score,
+            min_short_edge=min_short_edge,
+            min_short_edge_ratio=min_short_edge_ratio,
+            reject_edge_touch=reject_edge_touch,
+            reject_edge_aspect=reject_edge_aspect,
+            edge_wide_aspect=edge_wide_aspect,
+            edge_tall_aspect=edge_tall_aspect,
+        )
     )
 
 
@@ -126,7 +98,8 @@ def list_source_images(source: Path, max_images: int | None = None) -> list[Path
         images = [source] if source.suffix.lower() in IMAGE_EXTENSIONS else []
     else:
         images = sorted(
-            p for p in source.iterdir()
+            p
+            for p in source.iterdir()
             if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
         )
     if max_images is not None:
@@ -201,6 +174,7 @@ def detect_and_crop(
                 (width, height),
                 min_blur_score=config.min_blur_score,
                 min_short_edge=config.min_short_edge,
+                min_short_edge_ratio=config.min_short_edge_ratio,
                 reject_edge_touch=config.reject_edge_touch,
                 reject_edge_aspect=config.reject_edge_aspect,
                 edge_wide_aspect=config.edge_wide_aspect,

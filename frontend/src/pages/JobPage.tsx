@@ -148,15 +148,15 @@ export default function JobPage() {
 
   const entries = currentJob.catalog?.entries ?? []
   const groups = groupResultBooks(entries)
-  // detected_book_count counts every OCR hit, so the same spine seen in ten
-  // frames reads as ten books. The metric follows the deduplicated list.
+  // Keep the displayed count consistent with this list, including older jobs
+  // whose detected_book_count counted repeated OCR hits across frames.
   const bookCount = groups.reduce((n, group) => n + group.books.length, 0)
   const shelfIds = new Set(entries.map(entry => entry.shelf_id).filter(Boolean))
   const shelfCount = Number(currentJob.detected_shelf_count ?? shelfIds.size)
   const processing = isProcessingStatus(currentJob.status)
   const uploading = currentJob.status === 'uploading'
   const targetBooks = groups.flatMap(group => group.books.map(book => ({
-    key: resultBookKey({ title: book.title, library_db_id: book.libraryDbId }, book.title),
+    key: resultBookKey({ title: book.title, library_db_id: book.libraryDbId, match_confidence: book.matchConfidence }, book.title),
     title: book.title,
     definitive: book.matchLabel === '自動照合',
   })))
@@ -165,7 +165,7 @@ export default function JobPage() {
     : null
   const targetShelves = scanNavigation
     ? groups.filter(group => group.shelf !== '棚未判定' && scanTargetMatchState(scanNavigation.targetBook, group.books.map(book => ({
-        key: resultBookKey({ title: book.title, library_db_id: book.libraryDbId }, book.title),
+        key: resultBookKey({ title: book.title, library_db_id: book.libraryDbId, match_confidence: book.matchConfidence }, book.title),
         title: book.title,
         definitive: book.matchLabel === '自動照合',
       }))) !== 'searching').map(group => group.shelf)
@@ -379,15 +379,15 @@ function groupResultBooks(entries: CatalogEntry[]): { shelf: string; books: Resu
     const books = groups.get(shelf) ?? new Map<string, ResultBook>()
     for (const book of entry.books ?? []) {
       const top = book.book_lookup?.candidates?.[0]
-      const title = top?.title || book.title
+      const title = isConfidentLibraryMatch(top) ? top.title || book.title : book.title
       if (!title) continue
       // A live scan sees the same spine across many frames, so each book is
       // shown once per shelf instead of once per crop.
-      const libraryDbId = top?.library_db_id
+      const libraryDbId = isConfidentLibraryMatch(top) ? top.library_db_id : undefined
       const key = resultBookKey(top, title)
       const candidate = {
         title,
-        cover: top?.thumbnail || fallbackCoverForTitle(title),
+        cover: (isConfidentLibraryMatch(top) ? top.thumbnail : undefined) || fallbackCoverForTitle(title),
         libraryDbId,
         matchConfidence: top?.match_confidence,
         matchLabel: resultMatchLabel(top),
@@ -417,7 +417,7 @@ function isConfidentLibraryMatch(candidate: Candidate | undefined): candidate is
 }
 
 function resultBookKey(candidate: Candidate | undefined, title: string): string {
-  return hasPositiveLibraryDbId(candidate)
+  return isConfidentLibraryMatch(candidate)
     ? `id:${candidate.library_db_id}`
     : `title:${normalizeResultTitle(title)}`
 }

@@ -231,3 +231,17 @@ def test_live_frame_is_retried_while_sqs_attempts_remain(monkeypatch) -> None:
     # A retryable frame must not be counted as processed, and the session must
     # not be marked failed.
     assert worker.jobs_table.updates == []
+
+
+def test_partial_shelf_near_frame_border_is_unreadable(monkeypatch):
+    import numpy as np
+    worker = load_worker(monkeypatch)
+    # Latest scan: book tops at y=1617..1843, above an inset camera border.
+    image = np.random.default_rng(7).integers(0, 256, (226, 861, 3), dtype=np.uint8)
+    quality = worker.assess_quality(image, (89, 1617, 950, 1843), (1080, 1920))
+    assert quality["readable"] is False
+    assert "too_small" in quality["reasons"]
+    # A horizontal row fully inside the frame is still allowed.
+    assert worker.assess_quality(image, (89, 800, 950, 1026), (1080, 1920))["readable"] is False
+    # At a proportionate lower image resolution the same absolute crop can pass.
+    assert worker.assess_quality(image, (40, 100, 901, 326), (960, 540))["readable"] is True

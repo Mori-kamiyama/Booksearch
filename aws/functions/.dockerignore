@@ -1,0 +1,4 @@
+**/__pycache__
+**/*.pyc
+go_api
+home_publisher

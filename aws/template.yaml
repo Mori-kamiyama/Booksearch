@@ -624,15 +624,15 @@ Resources:
             ScalingConfig:
               MaximumConcurrency: 4
     Metadata:
-      Dockerfile: Dockerfile
-      DockerContext: ./functions/yolo_worker
+      Dockerfile: yolo_worker/Dockerfile
+      DockerContext: ./functions
       DockerTag: latest
 
   OcrFunction:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub ${ProjectName}-ocr
-      CodeUri: functions/ocr_worker/
+      CodeUri: functions/
       Handler: handler.handler
       Runtime: python3.12
       Architectures: [arm64]
@@ -663,11 +663,14 @@ Resources:
             ScalingConfig:
               MaximumConcurrency: 4
 
+    Metadata:
+      BuildMethod: makefile
+
   OcrPriorityFunction:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub ${ProjectName}-ocr-priority
-      CodeUri: functions/ocr_worker/
+      CodeUri: functions/
       Handler: handler.handler
       Runtime: python3.12
       Architectures: [arm64]
@@ -697,6 +700,9 @@ Resources:
             FunctionResponseTypes: [ReportBatchItemFailures]
             ScalingConfig:
               MaximumConcurrency: 2
+
+    Metadata:
+      BuildMethod: makefile
 
   LookupDispatcherFunction:
     Type: AWS::Serverless::Function
@@ -770,8 +776,8 @@ Resources:
             ScalingConfig:
               MaximumConcurrency: 2
     Metadata:
-      Dockerfile: Dockerfile
-      DockerContext: ./functions/lookup_worker
+      Dockerfile: lookup_worker/Dockerfile
+      DockerContext: ./functions
       DockerTag: latest
 
 Outputs:

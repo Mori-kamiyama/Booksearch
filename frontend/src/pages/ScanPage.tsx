@@ -902,17 +902,17 @@ export default function ScanPage() {
     for (const entry of liveJob?.catalog?.entries ?? []) {
       for (const book of entry.books ?? []) {
         const candidate = book.book_lookup?.candidates?.[0]
-        const title = candidate?.title || book.title
-        if (!title) continue
         const libraryDbId = positiveLibraryDbId(candidate?.library_db_id) ? candidate?.library_db_id : null
         const definitive = candidate?.match_confidence === 'auto' && libraryDbId != null
-        const key = libraryDbId != null
+        const title = definitive ? candidate?.title || book.title : book.title
+        if (!title) continue
+        const key = definitive
           ? `id:${libraryDbId}`
           : `title:${title.trim().toLocaleLowerCase('ja-JP')}`
         const next = {
           key,
           title,
-          cover: candidate?.thumbnail || fallbackCoverForTitle(title),
+          cover: (definitive ? candidate?.thumbnail : undefined) || fallbackCoverForTitle(title),
           shelf: entry.shelf_id,
           matchLabel: definitive ? '自動照合' : candidate ? '照合候補・要確認' : '未照合',
           definitive,
