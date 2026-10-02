@@ -10,13 +10,13 @@ export function buildSearchSuggestions(index: DiscoveryIndex, query: string): Se
   const add = (value: string, kind: SearchSuggestion['kind'], topicId?: string, aliases: string[] = []) => {
     const key = `${kind}:${normalizeSuggestion(value)}`
     if (!value.trim() || seen.has(key)) return
-    seen.add(key)
     const matches = [value, ...aliases].map(normalizeSuggestion).filter(text => terms.every(term => text.includes(term)))
     if (!matches.length) return
+    seen.add(key)
     const score = Math.max(...matches.map(text => text === q ? 3 : text.startsWith(q) ? 2 : 1))
     candidates.push({ value, kind, topicId, score })
   }
-  for (const topic of index.topics) if (topic.count > 0) add(topic.label, 'topic', topic.id, topic.aliases)
-  for (const book of index.books) { add(book.title, 'title'); add(book.authors, 'author') }
+  for (const topic of index.topics) if (topic.count > 0 && topic.kind !== 'legacy') add(topic.label, 'topic', topic.id, topic.aliases)
+  for (const book of index.books) { add(book.title, 'title', undefined, book.title_reading ? [book.title_reading] : []); add(book.authors, 'author', undefined, book.authors_reading ? [book.authors_reading] : []) }
   return candidates.sort((a, b) => b.score - a.score || (a.kind === 'topic' ? 0 : 1) - (b.kind === 'topic' ? 0 : 1) || a.value.localeCompare(b.value, 'ja')).slice(0, 6).map(({ score: _, ...item }) => item)
 }

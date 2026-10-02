@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { ScanLine } from 'lucide-react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { CoverImage, SearchBar } from '../components/book'
 import { fallbackCoverForTitle } from '../data/figmaBooks'
 import { getFeaturedBooks, subscribeFeaturedBooks } from '../lib/api'

@@ -9,6 +9,7 @@ import re
 import sqlite3
 from pathlib import Path
 from discovery_classification import classify_level, theme_evidence
+from discovery_genres import GENRE_RULES, THEME_GENRES, assign_genres, normalize_search_text
 
 GENRES = ['総記・情報', '哲学・心理', '歴史・地理', '社会科学', '自然科学', '技術・工学', '産業', '芸術', '言語', '文学']
 THEMES = [
@@ -31,6 +32,22 @@ THEMES = [
     ('marketing', 'マーケティング', ['マーケティング', 'marketing'], r'マーケティング|(?<![a-z0-9])marketing(?![a-z0-9])'),
     ('accounting', '簿記・会計', ['簿記', '会計', 'accounting'], r'簿記|会計|(?<![a-z0-9])accounting(?![a-z0-9])'),
     ('urban-planning', '都市計画', ['都市計画', 'urban planning'], r'都市計画|urban planning'),
+    ('cpp', 'C++', ['C++', 'シープラスプラス'], r'(?<![a-z0-9])c\+\+(?!\+)|シープラスプラス'),
+    ('csharp', 'C#', ['C#', 'シーシャープ'], r'(?<![a-z0-9])c#|シーシャープ'),
+    ('java', 'Java', ['Java', 'ジャバ'], r'(?<![a-z0-9])java(?![a-z0-9])'),
+    ('nlp', '自然言語処理', ['自然言語処理', 'NLP'], r'自然言語処理|natural language processing'),
+    ('security', '情報セキュリティ', ['情報セキュリティ', 'サイバーセキュリティ'], r'情報セキュリティ|サイバーセキュリティ'),
+    ('networks', 'コンピュータネットワーク', ['TCP/IP', 'ネットワーク技術'], r'tcp/ip|コンピュータ.?ネットワーク|ネットワーク技術'),
+    ('ux-research', 'ユーザー調査', ['UXリサーチ', 'ユーザーインタビュー', 'ユーザー調査'], r'uxリサーチ|ユーザーインタビュー|ユーザー調査'),
+    ('robotics', 'ロボット', ['ロボット', 'robotics'], r'ロボット|robotics'),
+    ('cad', 'CAD・3D設計', ['CAD', 'AutoCAD', 'Fusion 360'], r'(?<![a-z0-9])(?:autocad|cad)(?![a-z0-9])|fusion\s*360'),
+    ('linear-algebra', '線形代数', ['線形代数', 'linear algebra'], r'線形代数|linear algebra'),
+    ('calculus', '微分・積分', ['微分', '積分', '微積分'], r'微分|積分|calculus'),
+    ('quantum', '量子力学', ['量子力学', '量子物理'], r'量子力学|量子物理|quantum mechanics'),
+    ('japan-history', '日本史', ['日本史', '日本の歴史'], r'日本史|日本の歴史'),
+    ('world-history', '世界史', ['世界史', '世界の歴史'], r'世界史|世界の歴史'),
+    ('cognitive-psychology', '認知心理学', ['認知心理学', 'cognitive psychology'], r'認知心理学|cognitive psychology'),
+    ('korean-learning', '韓国語学習', ['韓国語', '韓国語学習'], r'韓国語'),
 ]
 
 def build(source, output_db, output_index):
@@ -44,6 +61,8 @@ def build(source, output_db, output_index):
     db.row_factory = sqlite3.Row
     db.executescript('''DROP TABLE IF EXISTS book_discovery;
       DROP TABLE IF EXISTS book_topics;
+      DROP TABLE IF EXISTS book_search_terms;
+      CREATE TABLE book_search_terms(book_id INTEGER NOT NULL,value_norm TEXT NOT NULL,PRIMARY KEY(book_id,value_norm));
       CREATE TABLE book_discovery(book_id INTEGER PRIMARY KEY, page_count INTEGER, level TEXT, evidence TEXT);
       CREATE TABLE book_topics(book_id INTEGER NOT NULL, topic_id TEXT NOT NULL, evidence TEXT NOT NULL, PRIMARY KEY(book_id,topic_id));
       CREATE INDEX book_topics_topic ON book_topics(topic_id,book_id);''')
@@ -72,6 +91,7 @@ def build(source, output_db, output_index):
         for topic_id, label, aliases, pattern in THEMES:
             evidence = theme_evidence(book['title'], categories, meta.get('description') or '', pattern)
             if evidence: topics.append((topic_id, evidence))
+        topics += assign_genres(book["title"], classification, [t[0] for t in topics])
         for topic_id, evidence in topics:
             db.execute('INSERT INTO book_topics VALUES(?,?,?)', (book['id'], topic_id, evidence))
             counts[topic_id] = counts.get(topic_id, 0) + 1
@@ -79,13 +99,19 @@ def build(source, output_db, output_index):
         for field in ('title_reading', 'authors_reading'):
             value = provenance.get(book['id'], {}).get(field) if meta else None
             if value: entry[field] = value
+        search_values = [entry['title'], entry['authors'], entry.get('title_reading'), entry.get('authors_reading')]
+        for ident, label, aliases, *_ in [*THEMES, *GENRE_RULES]:
+            if ident in {t[0] for t in topics}: search_values.extend([label, *aliases])
+        for value in {normalize_search_text(v) for v in search_values} - {''}:
+            db.execute('INSERT INTO book_search_terms VALUES(?,?)', (book['id'], value))
         entries.append(entry)
-    topics = [{'id': f'ndc-{i}', 'label': label, 'aliases': [label], 'count': counts.get(f'ndc-{i}', 0)} for i, label in enumerate(GENRES)]
-    topics += [{'id': ident, 'label': label, 'aliases': aliases, 'count': counts.get(ident, 0)} for ident, label, aliases, _ in THEMES]
+    topics = [{'id': f'ndc-{i}', 'kind': 'legacy', 'label': label, 'aliases': [label], 'count': counts.get(f'ndc-{i}', 0)} for i, label in enumerate(GENRES)]
+    topics += [{'id': ident, 'kind':'theme', 'label': label, 'aliases': aliases, 'count': counts.get(ident, 0)} for ident, label, aliases, _ in THEMES]
+    topics += [{'id':ident, 'kind':'genre', 'label':label, 'aliases':aliases, 'count':counts.get(ident,0)} for ident,label,aliases,*_ in GENRE_RULES]
     topics = [topic for topic in topics if topic['count']]
     for topic in topics:
-        if not topic['id'].startswith('ndc-'):
-            topic['genres'] = [row[0] for row in db.execute("SELECT DISTINCT g.topic_id FROM book_topics t JOIN book_topics g ON g.book_id=t.book_id WHERE t.topic_id=? AND g.topic_id LIKE 'ndc-%' ORDER BY g.topic_id", (topic['id'],))]
+        if topic['kind'] == 'theme':
+            topic['genres'] = [row[0] for row in db.execute("SELECT DISTINCT g.topic_id FROM book_topics t JOIN book_topics g ON g.book_id=t.book_id WHERE t.topic_id=? AND g.topic_id LIKE 'genre-%' ORDER BY g.topic_id", (topic['id'],)) if row[0] in THEME_GENRES.get(topic['id'], [])]
     payload = {'version': 1, 'books': entries, 'topics': topics, 'coverage': {'books': len(entries), 'page_count': db.execute('SELECT count(*) FROM book_discovery WHERE page_count IS NOT NULL').fetchone()[0], 'level': db.execute('SELECT count(*) FROM book_discovery WHERE level IS NOT NULL').fetchone()[0]}}
     output_index.parent.mkdir(parents=True, exist_ok=True)
     output_index.write_text(json.dumps(payload, ensure_ascii=False, separators=(',', ':')))

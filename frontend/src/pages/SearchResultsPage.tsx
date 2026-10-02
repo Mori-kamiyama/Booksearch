@@ -6,8 +6,8 @@ import { CoverImage, SearchBar } from '../components/book'
 import { SearchFilters } from '../components/SearchFilters'
 import { searchBookResults } from '../lib/api'
 import { loadDiscoveryIndex, type DiscoveryIndex } from '../lib/discoveryIndex'
+import { searchCorrections } from '../lib/searchCorrections'
 import type { Book } from '../lib/types'
-import { formatShelfLabel } from '../lib/shelf'
 import { fallbackCoverForTitle } from '../data/figmaBooks'
 
 const SEARCH_PAGE_SIZE = 30
@@ -17,15 +17,17 @@ function parsePage(value: string | null): number {
   return Number.isSafeInteger(page) && page > 0 ? page : 1
 }
 
-function searchResultsPath(query: string, page: number, filters = ''): string {
+function searchResultsPath(query: string, page: number, filters = '', exact = false): string {
   const params = new URLSearchParams(filters)
+  if (exact) params.set('exact', '1')
   if (query) params.set('q', query)
   if (page > 1) params.set('page', String(page))
   return `/search?${params.toString()}`
 }
 
-function bookDetailPath(id: number, query: string, page: number, filters = ''): string {
+function bookDetailPath(id: number, query: string, page: number, filters = '', exact = false): string {
   const params = new URLSearchParams(filters)
+  if (exact) params.set('exact', '1')
   if (query) params.set('q', query)
   if (page > 1) params.set('page', String(page))
   return `/books/${id}?${params.toString()}`
@@ -55,6 +57,8 @@ export default function SearchResultsPage() {
   const location = useLocation()
   const [params] = useSearchParams()
   const sourceQuery = params.get('q')?.trim() ?? ''
+  const exactOnly = params.get('exact') === '1'
+  const [correctedQuery, setCorrectedQuery] = useState('')
   const filters = new URLSearchParams([...params].filter(([key]) => ['genre', 'topic', 'min_pages', 'max_pages', 'level'].includes(key))).toString()
   const [discovery, setDiscovery] = useState<DiscoveryIndex | null>(null)
   useEffect(() => { loadDiscoveryIndex().then(setDiscovery).catch(() => {}) }, [])
@@ -67,7 +71,7 @@ export default function SearchResultsPage() {
   const page = parsePage(params.get('page'))
   const candidateOffset = (page - 1) * SEARCH_PAGE_SIZE
   const offset = Number.isSafeInteger(candidateOffset) ? candidateOffset : 0
-  const scrollKey = `booksearch:search-scroll:${sourceQuery}:${page}:${filters}`
+  const scrollKey = `booksearch:search-scroll:${sourceQuery}:${page}:${filters}:${exactOnly}`
   const [query, setQuery] = useState(sourceQuery)
   const [total, setTotal] = useState<number | null>(null)
   const [books, setBooks] = useState<Book[]>([])
@@ -82,7 +86,7 @@ export default function SearchResultsPage() {
   const load = useCallback(async () => {
     const requestId = ++requestIdRef.current
     const isCurrentRequest = () => mountedRef.current && requestId === requestIdRef.current
-    if (isCurrentRequest()) loadedScrollKeyRef.current = null
+    if (isCurrentRequest()) { loadedScrollKeyRef.current = null; setCorrectedQuery('') }
 
     if (!sourceQuery && !filters) {
       if (isCurrentRequest()) {
@@ -97,8 +101,18 @@ export default function SearchResultsPage() {
     setLoading(true)
     setError(false)
     try {
-      const results = await searchBookResults(sourceQuery, SEARCH_PAGE_SIZE, offset, filters)
-      if (isCurrentRequest()) { setBooks(results.books); setTotal(results.total) }
+      let results = await searchBookResults(sourceQuery, SEARCH_PAGE_SIZE, offset, filters)
+      let corrected = ''
+      if (isCurrentRequest() && (results.total === 0 || (results.total === null && offset === 0 && results.books.length === 0)) && sourceQuery && !exactOnly) {
+        // Reuse the cached index; try once, preserving every hard filter.
+        const index = await loadDiscoveryIndex().catch(() => null)
+        const candidate = index ? searchCorrections(index, sourceQuery)[0] : undefined
+        if (isCurrentRequest() && candidate) {
+          const replacement = await searchBookResults(candidate, SEARCH_PAGE_SIZE, offset, filters)
+          if ((replacement.total ?? replacement.books.length) > 0) { results = replacement; corrected = candidate }
+        }
+      }
+      if (isCurrentRequest()) { setBooks(results.books); setTotal(results.total); setCorrectedQuery(corrected) }
     } catch {
       if (isCurrentRequest()) {
         setBooks([])
@@ -114,7 +128,7 @@ export default function SearchResultsPage() {
         setLoading(false)
       }
     }
-  }, [offset, scrollKey, sourceQuery, filters])
+  }, [offset, scrollKey, sourceQuery, filters, exactOnly])
 
   useEffect(() => {
     mountedRef.current = true
@@ -167,30 +181,36 @@ export default function SearchResultsPage() {
     const rawPage = params.get('page')
     const numericPage = rawPage === null ? null : Number(rawPage)
     if (rawPage !== null && (numericPage === null || !Number.isSafeInteger(numericPage) || numericPage <= 0)) {
-      navigate(searchResultsPath(sourceQuery, 1), { replace: true })
+      navigate(searchResultsPath(sourceQuery, 1, filters, exactOnly), { replace: true })
     }
-  }, [navigate, params, sourceQuery])
+  }, [navigate, params, sourceQuery, filters, exactOnly])
 
   useEffect(() => {
     if (!loading && !error && total !== null && page > totalPages) {
-      navigate(searchResultsPath(sourceQuery, totalPages, filters), { replace: true })
+      navigate(searchResultsPath(sourceQuery, totalPages, filters, exactOnly), { replace: true })
     }
-  }, [error, loading, navigate, page, sourceQuery, total, totalPages, filters])
+  }, [error, loading, navigate, page, sourceQuery, total, totalPages, filters, exactOnly])
 
   const goToPage = (nextPage: number) => {
     if (nextPage < 1 || nextPage > totalPages || nextPage === page) return
     rememberScroll(scrollKey)
-    navigate(searchResultsPath(sourceQuery, nextPage, filters))
+    navigate(searchResultsPath(sourceQuery, nextPage, filters, exactOnly))
   }
 
+
   return (
-    <div className="mx-auto min-h-[calc(100vh-72px)] w-full max-w-[402px] bg-white px-7 pt-[49px] md:min-h-[calc(100vh-88px)] md:max-w-[886px] md:px-7 md:pt-0 lg:px-0">
+    <div className="mx-auto min-h-[calc(100vh-72px)] w-full max-w-[402px] bg-white px-4 pt-4 md:min-h-[calc(100vh-88px)] md:max-w-[886px] md:px-7 md:pt-0 lg:px-0">
       <div className="mx-auto w-full md:mt-[54px]">
         <h1 className="sr-only">検索結果</h1>
         <SearchBar value={query} onChange={setQuery} onSubmit={runSearch} />
 
-        <SearchFilters filters={filters} discovery={discovery} onApply={next => navigate(sourceQuery || next ? searchResultsPath(sourceQuery, 1, next) : '/')} />
+        <SearchFilters summary={!loading && !error && books.length > 0 ? (total === null ? `${books.length}件表示` : total > books.length ? `全${total}件中 ${books.length}件表示` : `${total}件ヒット`) : undefined} filters={filters} discovery={discovery} onApply={next => navigate(sourceQuery || next ? searchResultsPath(sourceQuery, 1, next, exactOnly) : '/')} />
 
+        {!loading && !error && correctedQuery && <div role="status" className="mt-2 break-words text-xs leading-5 text-ink md:mt-4 md:text-sm">
+          <p>次の検索結果を表示しています：<strong>{correctedQuery}</strong></p>
+          <button type="button" className="min-h-9 text-xs text-primary underline underline-offset-4"
+            onClick={() => navigate(searchResultsPath(sourceQuery, 1, filters, true))}>元の検索語「{sourceQuery}」で検索</button>
+        </div>}
         {loading && <SearchGridSkeleton />}
         {!loading && error && <div className="mt-8"><ErrorState message="検索できませんでした。" onRetry={load} /></div>}
         {!loading && !error && books.length === 0 && (
@@ -209,8 +229,7 @@ export default function SearchResultsPage() {
         )}
         {!loading && !error && books.length > 0 && (
           <>
-            <p className="mt-[32px] text-right text-sm leading-5 text-ink md:text-base md:leading-[19px]">{total === null ? `${books.length}件表示` : total > books.length ? `全${total}件中 ${books.length}件表示` : `${total}件ヒット`}</p>
-            <div className="mt-[32px] grid grid-cols-2 gap-x-2 gap-y-[19px] md:mt-[28px] md:grid-cols-4 md:gap-x-[30px] md:gap-y-[30px] lg:grid-cols-5">
+            <div className="mt-3 grid grid-cols-2 gap-x-2 gap-y-[19px] md:mt-[28px] md:grid-cols-4 md:gap-x-[30px] md:gap-y-[30px] lg:grid-cols-5">
               {books.map(book => (
                 <SearchResultCard
                   key={book.id}
@@ -225,7 +244,7 @@ export default function SearchResultsPage() {
                     leavingRef.current = true
                     if (pointerNavigationScrollKeyRef.current !== scrollKey) rememberScroll(scrollKey)
                     pointerNavigationScrollKeyRef.current = null
-                    navigate(bookDetailPath(book.id, sourceQuery, page, filters))
+                    navigate(bookDetailPath(book.id, sourceQuery, page, filters, exactOnly))
                   }}
                 />
               ))}
@@ -270,8 +289,7 @@ function SearchResultCard({ book, onOpen, onPointerDown }: { book: Book; onOpen:
       <span id={`search-title-${book.id}`} className="line-clamp-2 w-full text-sm leading-normal text-ink md:text-[15px]">{book.title}</span>
       <span id={`search-meta-${book.id}`} className="flex w-full flex-col gap-1 text-xs text-ink-muted">
         {book.authors && <span className="line-clamp-1">{book.authors}</span>}
-        <span>{[book.published_date?.match(/^\d{4}/)?.[0], book.class_number ? `分類 ${book.class_number}` : null].filter(Boolean).join(' / ')}</span>
-        <span>{book.shelf_candidates?.[0]?.shelf_id ? `棚候補: ${formatShelfLabel(book.shelf_candidates[0].shelf_id)}` : '棚の位置情報なし'}</span>
+        {book.published_date?.match(/^\d{4}/)?.[0] && <span>{book.published_date.match(/^\d{4}/)?.[0]}</span>}
       </span>
     </button>
   )
