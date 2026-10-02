@@ -188,6 +188,15 @@ Resources:
         deadLetterTargetArn: !GetAtt OcrDLQ.Arn
         maxReceiveCount: 3
 
+  OcrPriorityQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${ProjectName}-ocr-priority-queue
+      VisibilityTimeout: 180
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt OcrDLQ.Arn
+        maxReceiveCount: 3
+
   LookupDLQ:
     Type: AWS::SQS::Queue
     Properties:
@@ -613,7 +622,7 @@ Resources:
             Queue: !GetAtt YoloQueue.Arn
             BatchSize: 1
             ScalingConfig:
-              MaximumConcurrency: 2
+              MaximumConcurrency: 4
     Metadata:
       Dockerfile: Dockerfile
       DockerContext: ./functions/yolo_worker
@@ -648,7 +657,44 @@ Resources:
           Type: SQS
           Properties:
             Queue: !GetAtt OcrQueue.Arn
+            BatchSize: 2
+            MaximumBatchingWindowInSeconds: 1
+            FunctionResponseTypes: [ReportBatchItemFailures]
+            ScalingConfig:
+              MaximumConcurrency: 4
+
+  OcrPriorityFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ProjectName}-ocr-priority
+      CodeUri: functions/ocr_worker/
+      Handler: handler.handler
+      Runtime: python3.12
+      Architectures: [arm64]
+      MemorySize: 512
+      Timeout: 120
+      ReservedConcurrentExecutions: 2
+      Environment:
+        Variables:
+          GEMINI_MODEL: !Ref GeminiModel
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref ScanTasksTable }
+        - S3CrudPolicy: { BucketName: !Ref AssetsBucket }
+        - DynamoDBCrudPolicy: { TableName: !Ref JobsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref CropsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref CropFingerprintsTable }
+        - SQSSendMessagePolicy: { QueueName: !GetAtt LookupQueue.QueueName }
+        - Statement:
+            Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource: !Ref GeminiSecret
+      Events:
+        FromOcrPriorityQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt OcrPriorityQueue.Arn
             BatchSize: 1
+            FunctionResponseTypes: [ReportBatchItemFailures]
             ScalingConfig:
               MaximumConcurrency: 2
 
@@ -662,12 +708,16 @@ Resources:
       Architectures: [arm64]
       MemorySize: 256
       Timeout: 30
+      Environment:
+        Variables:
+          OCR_PRIORITY_QUEUE_URL: !Ref OcrPriorityQueue
       Policies:
         - S3ReadPolicy: { BucketName: !Ref AssetsBucket }
         - DynamoDBReadPolicy: { TableName: !Ref ScanTasksTable }
         - DynamoDBReadPolicy: { TableName: !Ref CropsTable }
         - SQSSendMessagePolicy: { QueueName: !GetAtt YoloQueue.QueueName }
         - SQSSendMessagePolicy: { QueueName: !GetAtt OcrQueue.QueueName }
+        - SQSSendMessagePolicy: { QueueName: !GetAtt OcrPriorityQueue.QueueName }
         - DynamoDBReadPolicy: { TableName: !Ref JobsTable }
         - Statement:
             Effect: Allow

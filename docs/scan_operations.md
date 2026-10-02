@@ -1,5 +1,11 @@
 # Scan運用診断
 
+## 検索対象棚の優先OCR（2026-10-01）
+
+検索セッションの `priority_shelf_id` と一致するcropは `booksearch-ocr-priority-queue` に送り、専用の `booksearch-ocr-priority` Lambdaで処理する。予約同時実行は2、SQS mappingの最大同時実行も2、バッチは1。対象外のcropは従来のOCRキューで処理を続ける。両方のワーカーは同じOCRコードとDynamoDBの条件付きclaimを使うので、再配送による二重OCRはclaimで吸収する。対象棚が判別できないcropは通常キューへ送る。
+
+今回は稼働中スタックへの影響を抑えるため、優先キューとLambda、IAM権限、dispatcherの設定とコードをAWS APIで直接反映した。`aws/template.yaml` に同じ構成を記録したが、**優先キューとLambdaは現時点でCloudFormation管理外**。次回のフル `sam deploy` 前に、これらをスタックへimportするか、運用中のメッセージがないことを確認して一旦削除しCloudFormationに再作成させる必要がある。同名リソースを残したままフルデプロイすると作成競合になる。
+
 `aws/scripts/diagnose_scan.py` は、滞留しているスキャンを調べるためのread-only CLIです。JobsTableと、導入済みならScanTasksTableを全ページscanし、件数、状態別件数、最古更新からの経過秒数、leaseのactive/expired件数、scanの経過秒数、読み取りConsumedCapacity合計をJSONで出力します。DynamoDBには`status`、`state`、作成・更新日時、各leaseだけをProjectionして取得します。SQSはメッセージ本文を読まず、visible/in-flight/delayed件数とCloudWatchの`ApproximateAgeOfOldestMessage`だけを読みます。
 
 ```sh
@@ -8,6 +14,7 @@ uv run --no-project --with boto3 python aws/scripts/diagnose_scan.py \
   --tasks-table booksearch-scan-tasks \
   --queue yolo="$YOLO_QUEUE_URL" \
   --queue ocr="$OCR_QUEUE_URL" \
+  --queue ocr-priority="$OCR_PRIORITY_QUEUE_URL" \
   --queue lookup="$LOOKUP_QUEUE_URL" \
   --dlq yolo="$YOLO_DLQ_URL" \
   --dlq ocr="$OCR_DLQ_URL" \

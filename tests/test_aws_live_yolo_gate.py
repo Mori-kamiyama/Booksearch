@@ -76,6 +76,19 @@ def load_worker(monkeypatch):
     return module
 
 
+def test_warmup_loads_detector_and_ignores_expired_messages(monkeypatch) -> None:
+    worker = load_worker(monkeypatch)
+    calls = []
+    monkeypatch.setattr(worker.time, "time", lambda: 100)
+    monkeypatch.setattr(worker, "get_model", lambda: types.SimpleNamespace(predict=lambda **kwargs: calls.append(kwargs)))
+    worker.handler({"Records": [
+        {"body": json.dumps({"warmup": True, "expires_at": 130})},
+        {"body": json.dumps({"warmup": True, "expires_at": 99})},
+    ]}, None)
+    assert len(calls) == 1
+    assert calls[0]["source"].shape == (640, 640, 3)
+
+
 def test_batch_queues_only_new_readable_crops(monkeypatch) -> None:
     worker = load_worker(monkeypatch)
     worker.jobs_table = FakeTable()

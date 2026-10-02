@@ -120,6 +120,45 @@ def test_late_incremental_does_not_publish_after_final_pending(monkeypatch) -> N
     assert worker.jobs_table.calls == []
 
 
+def test_shelf_confidence_counts_sessions_even_for_old_crop_observations(monkeypatch) -> None:
+    worker = load_worker(monkeypatch)
+    class Observations:
+        def scan(self, **_kwargs):
+            return {"Items": [
+                {"job_id": "old-job", "score": 0.7},
+                {"job_id": "old-job", "score": 0.9},
+                {"job_id": "new-job", "score": 0.8},
+            ]}
+    class Candidates:
+        def __init__(self):
+            self.item = None
+        def put_item(self, **kwargs):
+            self.item = kwargs["Item"]
+    worker.shelf_observations_table = Observations()
+    worker.shelf_candidates_table = Candidates()
+    worker.refresh_shelf_candidate(42, "shelf-a", {"title": "Book"})
+    result = worker.shelf_candidates_table.item
+    assert result["observations"] == 2
+    assert float(result["avg_score"]) == 0.85
+
+
+def test_tagged_repeat_can_locate_untagged_ocr_result(monkeypatch) -> None:
+    worker = load_worker(monkeypatch)
+    observed = []
+    monkeypatch.setattr(worker, "put_shelf_observation", lambda job, crop, shelf, candidate:
+                        observed.append((job, crop, shelf)) or True)
+    monkeypatch.setattr(worker, "refresh_shelf_candidate", lambda *_args: None)
+    book = {"book_lookup": {"candidates": [{"library_db_id": 42, "score": 0.9}]}}
+    catalog = {"job_id": "job", "entries": [
+        {"crop_id": "original", "shelf_id": None, "books": [book]},
+        {"crop_id": "repeat", "shelf_id": "shelf-a", "books": [book],
+         "ocr_error": "skipped_duplicate_crop",
+         "existing_ocr_ref": {"source": "session", "crop_id": "original"}},
+    ]}
+    assert worker.update_shelf_confidence(catalog) == 1
+    assert observed == [("job", "repeat", "shelf-a")]
+
+
 def test_final_publication_uses_unique_key_and_error_alias(monkeypatch) -> None:
     worker = load_worker(monkeypatch)
     worker.jobs_table = FakeTable({"status": "lookup_pending"})

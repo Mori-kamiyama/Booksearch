@@ -10,12 +10,76 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 )
+
+func TestLiveSessionStartStoresSearchPriority(t *testing.T) {
+	var stored map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.Header.Get("X-Amz-Target"), ".PutItem") {
+			t.Fatalf("unexpected AWS target %q", r.Header.Get("X-Amz-Target"))
+		}
+		if err := json.NewDecoder(r.Body).Decode(&stored); err != nil {
+			t.Fatal(err)
+		}
+		writeDynamoJSON(w, http.StatusOK, `{}`)
+	}))
+	defer server.Close()
+	oldClient, oldTable := ddbClient, jobsTable
+	t.Cleanup(func() { ddbClient, jobsTable = oldClient, oldTable })
+	ddbClient, _ = testAWSClients(server.URL)
+	jobsTable = "jobs"
+	response, err := liveSessionStart(context.Background(), events.APIGatewayV2HTTPRequest{Body: `{"target_book_id":42,"priority_shelf_id":"shelf-a"}`})
+	if err != nil || response.StatusCode != http.StatusCreated {
+		t.Fatalf("response = %+v, err = %v", response, err)
+	}
+	item := stored["Item"].(map[string]any)
+	if item["target_book_id"].(map[string]any)["N"] != "42" || item["priority_shelf_id"].(map[string]any)["S"] != "shelf-a" {
+		t.Fatalf("target metadata missing: %#v", item)
+	}
+}
+
+func TestScanWarmupQueuesTwoExpiringDetectorInvocations(t *testing.T) {
+	var bodies []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.Header.Get("X-Amz-Target"), ".SendMessage") {
+			t.Fatalf("unexpected AWS target %q", r.Header.Get("X-Amz-Target"))
+		}
+		var request struct{ MessageBody string }
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		var body map[string]any
+		if err := json.Unmarshal([]byte(request.MessageBody), &body); err != nil {
+			t.Fatal(err)
+		}
+		bodies = append(bodies, body)
+		writeDynamoJSON(w, http.StatusOK, `{"MessageId":"test"}`)
+	}))
+	defer server.Close()
+	oldClient, oldQueue := sqsClient, yoloQueueURL
+	t.Cleanup(func() { sqsClient, yoloQueueURL = oldClient, oldQueue })
+	_, sqsClient = testAWSClients(server.URL)
+	yoloQueueURL = "https://example.test/yolo"
+	response, err := scanWarmup(context.Background())
+	if err != nil || response.StatusCode != http.StatusAccepted {
+		t.Fatalf("response = %+v, err = %v", response, err)
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("warmup messages = %d, want 2", len(bodies))
+	}
+	for _, body := range bodies {
+		if body["warmup"] != true || body["expires_at"].(float64) <= float64(time.Now().Unix()) {
+			t.Fatalf("invalid warmup message: %#v", body)
+		}
+	}
+}
 
 func testAWSClients(endpoint string) (*dynamodb.Client, *sqs.Client) {
 	cfg := aws.Config{

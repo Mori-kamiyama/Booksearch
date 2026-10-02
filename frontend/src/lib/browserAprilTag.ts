@@ -1,6 +1,7 @@
 export interface BrowserAprilTag {
   tagId: number
   center?: [number, number]
+  corners?: [[number, number], [number, number], [number, number], [number, number]]
 }
 
 type OpenCV = any
@@ -73,13 +74,18 @@ export async function detectBrowserAprilTags(canvas: HTMLCanvasElement): Promise
       const marker = corners.get(index)
       const points = marker.data32F ?? marker.data64F ?? []
       let center: [number, number] | undefined
+      let tagCorners: BrowserAprilTag['corners']
       if (points.length >= 8) {
+        tagCorners = [
+          [points[0], points[1]], [points[2], points[3]],
+          [points[4], points[5]], [points[6], points[7]],
+        ]
         center = [
           (points[0] + points[2] + points[4] + points[6]) / 4,
           (points[1] + points[3] + points[5] + points[7]) / 4,
         ]
       }
-      tags.push({ tagId: Number(values[index]), center })
+      tags.push({ tagId: Number(values[index]), center, corners: tagCorners })
       safeDelete(marker)
     }
     return tags

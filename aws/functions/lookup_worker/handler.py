@@ -318,7 +318,9 @@ def put_shelf_observation(
     if not book_id:
         return False
     score = float(candidate.get("score") or 0)
-    observation_id = f"{job_id}:{crop_id}:{book_id}:{shelf_id}"
+    # Several crops from one visit are evidence for one observation, not
+    # independent visits that should inflate confidence.
+    observation_id = f"{job_id}:{book_id}:{shelf_id}"
     try:
         shelf_observations_table.put_item(
             Item={
@@ -355,6 +357,14 @@ def refresh_shelf_candidate(book_id: int, shelf_id: str, candidate: dict[str, An
             ExclusiveStartKey=scan["LastEvaluatedKey"],
         )
         items.extend(scan.get("Items", []))
+    # Older jobs used one observation per crop. Treat every scan session as a
+    # single visit even when those historical rows already exist.
+    best_by_job: dict[str, dict[str, Any]] = {}
+    for item in items:
+        visit = str(item.get("job_id") or item.get("observation_id"))
+        if visit not in best_by_job or float(item.get("score", 0)) > float(best_by_job[visit].get("score", 0)):
+            best_by_job[visit] = item
+    items = list(best_by_job.values())
     observations = len(items)
     if observations == 0:
         return
@@ -374,11 +384,17 @@ def refresh_shelf_candidate(book_id: int, shelf_id: str, candidate: dict[str, An
 
 def update_shelf_confidence(catalog: dict[str, Any]) -> int:
     added = 0
-    touched: set[tuple[int, str, str]] = set()
+    best: dict[tuple[int, str], tuple[str, dict[str, Any]]] = {}
     job_id = catalog["job_id"]
+    entries_by_crop = {entry["crop_id"]: entry for entry in catalog.get("entries", [])}
     for entry in catalog.get("entries", []):
         if entry.get("ocr_error") == "skipped_duplicate_crop":
-            continue
+            ref = entry.get("existing_ocr_ref") or {}
+            source = entries_by_crop.get(ref.get("crop_id")) if ref.get("source") == "session" else None
+            # A tagged repeat can provide the shelf assignment missing from
+            # the original OCR crop. Otherwise one observation is enough.
+            if not source or source.get("shelf_id"):
+                continue
         shelf_id = entry.get("shelf_id")
         if not shelf_id:
             continue
@@ -391,11 +407,14 @@ def update_shelf_confidence(catalog: dict[str, Any]) -> int:
             book_id = candidate.get("library_db_id")
             if not book_id:
                 continue
-            if put_shelf_observation(job_id, entry["crop_id"], shelf_id, candidate):
-                added += 1
-            touched.add((int(book_id), shelf_id, json.dumps(candidate, ensure_ascii=False, sort_keys=True)))
-    for book_id, shelf_id, candidate_json in touched:
-        refresh_shelf_candidate(book_id, shelf_id, json.loads(candidate_json))
+            key = (int(book_id), shelf_id)
+            previous = best.get(key)
+            if previous is None or float(candidate.get("score") or 0) > float(previous[1].get("score") or 0):
+                best[key] = (entry["crop_id"], candidate)
+    for (book_id, shelf_id), (crop_id, candidate) in best.items():
+        if put_shelf_observation(job_id, crop_id, shelf_id, candidate):
+            added += 1
+        refresh_shelf_candidate(book_id, shelf_id, candidate)
     return added
 
 
@@ -484,7 +503,6 @@ def process_job(job_id: str, incremental: bool = False) -> None:
         if not incremental_allowed(job_id):
             return
         catalog = build_catalog(job_id)
-        update_shelf_confidence(catalog)
         entries = catalog.get("entries", [])
         shelf_count = len({entry.get("shelf_id") for entry in entries if entry.get("shelf_id")})
         book_count = sum(len(entry.get("books") or []) for entry in entries)

@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import sys
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 import boto3
@@ -224,8 +226,8 @@ def advance_after_crop(job_id: str, item: dict[str, Any], incremental: bool) -> 
         # Persist the final intent before sending the refresh message.  A
         # failed refresh send must not lose the durable final transition.
         queue_final_lookup_if_ready(job_id, item)
-        # Each completed crop refreshes the partial catalog. SQS coalesces the
-        # work naturally, while the catalog write remains idempotent.
+        # Each completed crop refreshes the partial catalog so a target match
+        # can appear while the camera is still recording.
         sqs.send_message(
             QueueUrl=LOOKUP_QUEUE_URL,
             MessageBody=json.dumps({"job_id": job_id, "incremental": True}),
@@ -269,23 +271,88 @@ def abandon_crop(job_id: str, crop_id: str, reason: str, incremental: bool) -> N
 
 
 def handler(event, context):
-    for rec in event.get("Records", []):
-        body = json.loads(rec["body"])
-        incremental = bool(body.get("incremental"))
-        try:
-            process_one(
-                body["job_id"], body["crop_id"], body["crop_key"],
-                body.get("fingerprint_scope"), body.get("phash"), incremental,
-            )
-        except OCRLeaseBusy:
-            raise
-        except Exception as e:
-            print(f"[ocr] ERROR: {e}", file=sys.stderr)
+    records = event.get("Records", [])
+    print(f"[ocr] batch records={len(records)}")
+    failures = []
+    outcomes = process_batch(records) if len(records) > 1 and tasks_table else [process_record(rec) for rec in records]
+    for rec, body, error in outcomes:
+        if error is None:
+            continue
+        if isinstance(error, OCRLeaseBusy):
+            print(f"[ocr] lease busy: {error}", file=sys.stderr)
+        else:
+            print(f"[ocr] ERROR: {error}", file=sys.stderr)
             receive_count = int(rec.get("attributes", {}).get("ApproximateReceiveCount", "1"))
-            if receive_count < MAX_RECEIVE_COUNT:
-                raise
-            abandon_crop(body["job_id"], body["crop_id"], str(e), incremental)
-    return {"ok": True}
+            if receive_count >= MAX_RECEIVE_COUNT and isinstance(body, dict):
+                try:
+                    abandon_crop(body["job_id"], body["crop_id"], str(error), bool(body.get("incremental")))
+                    continue
+                except Exception as abandon_error:
+                    print(f"[ocr] abandon failed: {abandon_error}", file=sys.stderr)
+        if not rec.get("messageId"):
+            raise error
+        failures.append({"itemIdentifier": rec["messageId"]})
+    return {"batchItemFailures": failures}
+
+
+def process_record(rec):
+    body = None
+    try:
+        body = json.loads(rec["body"])
+        process_one(
+            body["job_id"], body["crop_id"], body["crop_key"],
+            body.get("fingerprint_scope"), body.get("phash"), bool(body.get("incremental")),
+        )
+        return rec, body, None
+    except Exception as error:
+        return rec, body, error
+
+
+def process_batch(records):
+    """Overlap Gemini calls while all DynamoDB resource access stays on this thread."""
+    outcomes = []
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = {}
+        for rec in records:
+            body = None
+            crop = None
+            claim = None
+            try:
+                body = json.loads(rec["body"])
+                crop = crops_table.get_item(
+                    Key={"job_id": body["job_id"], "crop_id": body["crop_id"]},
+                    ConsistentRead=True,
+                ).get("Item") or {}
+                if not crop.get("task_id"):
+                    outcomes.append(process_record(rec))
+                    continue
+                claim = claim_durable_crop(crop, bool(body.get("incremental")))
+                if claim is None:
+                    outcomes.append((rec, body, None))
+                    continue
+                raw = s3.get_object(Bucket=BUCKET, Key=crop["crop_key"])["Body"].read()
+                mime = "image/jpeg" if crop["crop_key"].endswith((".jpg", ".jpeg")) else "image/png"
+                future = executor.submit(gemini_ocr, raw, mime)
+                futures[future] = (rec, body, crop, claim)
+            except Exception as error:
+                if claim and crop:
+                    _release_ocr(crop, claim)
+                outcomes.append((rec, body, error))
+        for future in as_completed(futures):
+            rec, body, crop, claim = futures[future]
+            try:
+                titles = future.result()
+                error = None
+            except Exception as gemini_error:
+                titles = []
+                error = str(gemini_error)
+            try:
+                finish_durable_crop(crop, claim, titles, error, bool(body.get("incremental")))
+                outcomes.append((rec, body, None))
+            except Exception as failure:
+                _release_ocr(crop, claim)
+                outcomes.append((rec, body, failure))
+    return outcomes
 
 
 class OCRLeaseBusy(RuntimeError):
@@ -345,29 +412,36 @@ def _finish_ocr(crop, claim, titles, error):
         content = next(iter(operation.values()))
         for key in ("Key", "ExpressionAttributeValues"):
             content[key] = {name: serializer.serialize(value) for name, value in content[key].items()}
-    try:
-        transaction_client.transact_write_items(TransactItems=operations)
-        return True
-    except ClientError as failure:
-        if failure.response.get("Error", {}).get("Code") != "TransactionCanceledException":
-            raise
-        current = crops_table.get_item(Key={"job_id": crop["job_id"], "crop_id": crop["crop_id"]}, ConsistentRead=True).get("Item") or {}
-        if current.get("status") == "ocr_done" or not _active_job(_get_job(crop["job_id"])):
-            return False
-        raise
+    for attempt in range(4):
+        try:
+            transaction_client.transact_write_items(TransactItems=operations)
+            return True
+        except ClientError as failure:
+            if failure.response.get("Error", {}).get("Code") != "TransactionCanceledException":
+                raise
+            current = crops_table.get_item(Key={"job_id": crop["job_id"], "crop_id": crop["crop_id"]}, ConsistentRead=True).get("Item") or {}
+            if current.get("status") == "ocr_done" or not _active_job(_get_job(crop["job_id"])):
+                return False
+            reasons = failure.response.get("CancellationReasons") or []
+            conflict = any(reason.get("Code") == "TransactionConflict" for reason in reasons)
+            if not conflict or attempt == 3:
+                raise
+            # Keep the OCR result and claim; retry only the contended DDB write.
+            time.sleep(random.uniform(0.05, 0.15) * (2 ** attempt))
+    return False
 
 
-def process_durable_crop(crop, incremental, abandoned=None):
+def claim_durable_crop(crop, incremental):
     job_id = crop["job_id"]
     job = _get_job(job_id)
     task = tasks_table.get_item(Key={"job_id": job_id, "task_id": crop["task_id"]}, ConsistentRead=True).get("Item") or {}
     if not _active_job(job) or task.get("state") != "done" or task.get("detection_token") != crop.get("detection_token"):
-        return
+        return None
     if crop.get("status") == "ocr_done":
         advance_after_crop(job_id, job, incremental)
-        return
+        return None
     if crop.get("status") != "ocr_pending":
-        return
+        return None
     claim = uuid.uuid4().hex
     try:
         crops_table.update_item(
@@ -381,6 +455,28 @@ def process_durable_crop(crop, incremental, abandoned=None):
         if failure.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
             raise OCRLeaseBusy("crop is already claimed") from failure
         raise
+    return claim
+
+
+def finish_durable_crop(crop, claim, titles, error, incremental):
+    job_id = crop["job_id"]
+    committed = _finish_ocr(crop, claim, titles, error)
+    if committed and not error and titles and crop.get("fingerprint_scope") and crop.get("phash") and fingerprints_table:
+        try:
+            fingerprints_table.put_item(Item={
+                "fingerprint_scope": crop["fingerprint_scope"], "phash": crop["phash"], "job_id": job_id,
+                "crop_id": crop["crop_id"], "crop_key": crop["crop_key"], "titles": titles,
+            })
+        except Exception as failure:
+            print(f"[ocr] optional fingerprint cache failed: {failure}", file=sys.stderr)
+    if committed:
+        advance_after_crop(job_id, _get_job(job_id), incremental)
+
+
+def process_durable_crop(crop, incremental, abandoned=None):
+    claim = claim_durable_crop(crop, incremental)
+    if claim is None:
+        return
     try:
         titles = []
         error = abandoned
@@ -390,17 +486,7 @@ def process_durable_crop(crop, incremental, abandoned=None):
                 titles = gemini_ocr(raw, "image/jpeg" if crop["crop_key"].endswith((".jpg", ".jpeg")) else "image/png")
             except Exception as failure:
                 error = str(failure)
-        committed = _finish_ocr(crop, claim, titles, error)
-        if committed and not error and titles and crop.get("fingerprint_scope") and crop.get("phash") and fingerprints_table:
-            try:
-                fingerprints_table.put_item(Item={
-                    "fingerprint_scope": crop["fingerprint_scope"], "phash": crop["phash"], "job_id": job_id,
-                    "crop_id": crop["crop_id"], "crop_key": crop["crop_key"], "titles": titles,
-                })
-            except Exception as failure:
-                print(f"[ocr] optional fingerprint cache failed: {failure}", file=sys.stderr)
-        if committed:
-            advance_after_crop(job_id, _get_job(job_id), incremental)
+        finish_durable_crop(crop, claim, titles, error, incremental)
     except Exception:
         _release_ocr(crop, claim)
         raise
