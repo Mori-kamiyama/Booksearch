@@ -21,7 +21,7 @@ uv run --no-project python scripts/build_semantic_index.py \
 
 SQLite backupでWALの内容を含む整合したスナップショットを `outputs/semantic-serving/library.db` に作り、元DBは変更しない。`prepared.json` に送信項目・文字数・3冊の入力例を保存する。今回の準備では4,202冊、紹介文3,380冊、合計1,252,896文字、1冊最大2,000文字。送信項目は書名、著者、テーマのラベル、確認済み紹介文。ISBNや棚位置・画像は送信しない。
 
-生成は明示的な `--generate` が必要。以前の全蔵書送信の承認レビュー拒否を踏まえ、今回は準備まで実行。AWS送信・従量課金の確認後に以下を実行する。新規キャッシュならプローブ1回＋書籍4,202回。中断後は書籍テキスト・モデル・用途ごとの既存キャッシュを使う。生成失敗時は索引を公開せず、完了したベクトルキャッシュは残す。
+生成は明示的な `--generate` が必要。2026-10-03にユーザーから索引生成と本番有効化の指示を受け、全4,202冊の生成を完了した。今回の実行はモデル呼び出し4,014回、既存キャッシュ利用189回（プローブを含む）。新規キャッシュならプローブ1回＋書籍4,202回。中断後は書籍テキスト・モデル・用途ごとの既存キャッシュを使う。生成失敗時は索引を公開せず、完了したベクトルキャッシュは残す。
 
 ```sh
 uv run scripts/build_semantic_index.py \
@@ -31,7 +31,7 @@ SEMANTIC_INDEX_PATH="$PWD/outputs/semantic-serving/index.json" \
   go -C backend run . --library-db "$PWD/outputs/semantic-serving/library.db"
 ```
 
-AWS用は `prepare_assets.sh` で通常のカタログ生成を終えてからベクトルを生成し、生成したDBと索引を必ず組で配置する。Makefileは索引があるときだけ同梱する。SAMの `SemanticSearchEnabled` は既定false。true時のみ索引パスと対象モデル1つのInvokeModel権限を付ける。2026-10-03にAPIとUIのコードを本番へ反映したが、索引・環境変数・InvokeModel権限は追加せず、意味検索は無効。SAMテンプレート自体は未反映で、既存の手動管理リソースとの整合が必要。詳細は[リリース記録](search_release_20261003.md)を参照。
+AWS用は `prepare_assets.sh` で通常のカタログ生成を終えてからベクトルを生成し、生成したDBと索引を必ず組で配置する。Makefileは索引があるときだけ同梱する。SAMの `SemanticSearchEnabled` は既定false。true時のみ索引パスと対象モデル1つのInvokeModel権限を付け、APIメモリを768MBにする。2026-10-03に索引と対応DBを本番APIへ同梱し、索引パス・埋め込みモデルへのInvokeModel権限を追加して有効化した。SAMテンプレート自体は未反映で、既存の手動管理リソースとの整合が必要。後続デプロイでも本番のDBと索引の組を必ず維持する。詳細は[有効化の記録](semantic_search_release_20261003.md)を参照。
 
 ```sh
 cp outputs/semantic-serving/library.db aws/functions/go_api/library.db
@@ -43,6 +43,8 @@ cp outputs/semantic-serving/index.json aws/functions/go_api/semantic-index.json
 短い関連語の0件を救う可能性は[30冊の実験](semantic_search_experiment.md)で確認済み。ただし全蔵書での目的適合性は未評価。該当本がない語にも最近傍は返るので、通常ヒットや所蔵確認とは分けて表示する。既存実験で正例・負例の類似度が逆転していたため、一律の類似度閾値を根拠なく追加しない。
 
 次の評価は同じ4,202冊で、既知の書名、短い関連語、誤字、該当なしを含める。上位5冊の目的適合性と無関係候補の混入、待ち時間を確認して自動補完の公開を判断する。内容紹介がない本の検索品質と、入力が既知の書名かテーマかを区別しない0件補完は未解決。
+
+全蔵書のベクトル取得と本番補完は公開済み。ただし無関係候補の除外は未実装。Cohere Rerankによる除外の試作は実測まで行ったが、適用上限が3回/分であり、本番へ追加していない。ユーザーから軽い代替案の検討を求められている。後述の品質課題は引き続き残る。
 
 ## 検証
 

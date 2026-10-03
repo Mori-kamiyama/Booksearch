@@ -32,10 +32,10 @@ test('short Japanese typo offers a selectable suggestion', async ({ page }) => {
   expect(new URL(page.url()).searchParams.get('q')).toBe('デザイン')
 })
 
-test('unapproved semantic search stays disabled in production', async ({ request }) => {
+test('semantic search capability matches the release setting', async ({ request }) => {
   const api = process.env.API_BASE
   test.skip(!api, 'Set API_BASE for the semantic capability check')
   const response = await request.get(`${api}/api/books/semantic/status`)
   expect(response.ok()).toBeTruthy()
-  expect(await response.json()).toEqual({ available: false })
+  expect(await response.json()).toEqual({ available: process.env.SEMANTIC_ENABLED === '1' })
 })
