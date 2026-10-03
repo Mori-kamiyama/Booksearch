@@ -315,7 +315,11 @@ test('scan results link only accepted catalog matches and offer next actions', a
   await expect(page.getByRole('heading', { name: '終了', exact: true })).toBeVisible()
   await expect(page.locator('main a[href="/books/42"]')).toBeVisible()
   await expect(page.locator('main a[href^="/books/"]')).toHaveCount(1)
-  await expect(page.getByText('候補の本', { exact: true })).toBeVisible()
+  // Unconfirmed catalog suggestions retain the OCR text; they must not adopt
+  // another book's title or link just because a candidate exists.
+  await expect(page.getByText('OCR 候補の本', { exact: true })).toBeVisible()
+  await expect(page.getByText('候補の本', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('OCR 確度なしの本', { exact: true })).toBeVisible()
   await expect(page.locator('main a[href="/"]')).toBeVisible()
   await expect(page.locator('main a[href="/scan"]')).toBeVisible()
   await page.locator('main a[href="/books/42"]').click()
