@@ -3,6 +3,11 @@ Transform: AWS::Serverless-2016-10-31
 Description: Booksearch (ホンノキ) backend on AWS — Lambdas + S3 + DynamoDB + SQS
 
 Parameters:
+  SemanticSearchEnabled:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Enable semantic suggestions after packaging a matching semantic-index.json.
   ProjectName:
     Type: String
     Default: booksearch
@@ -20,6 +25,7 @@ Parameters:
     Description: Optional email address for CloudWatch alarm and recovery notifications.
 
 Conditions:
+  UseSemanticSearch: !Equals [!Ref SemanticSearchEnabled, 'true']
   HasAlarmEmail: !Not [!Equals [!Ref AlarmEmail, '']]
 
 Globals:
@@ -183,6 +189,15 @@ Resources:
     Type: AWS::SQS::Queue
     Properties:
       QueueName: !Sub ${ProjectName}-ocr-queue
+      VisibilityTimeout: 180
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt OcrDLQ.Arn
+        maxReceiveCount: 3
+
+  OcrPriorityQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${ProjectName}-ocr-priority-queue
       VisibilityTimeout: 180
       RedrivePolicy:
         deadLetterTargetArn: !GetAtt OcrDLQ.Arn
@@ -558,7 +573,15 @@ Resources:
       Environment:
         Variables:
           YOLO_QUEUE_URL: !Ref YoloQueue
+          SEMANTIC_INDEX_PATH: !If [UseSemanticSearch, '/var/task/semantic-index.json', '']
       Policies:
+        - !If
+          - UseSemanticSearch
+          - Statement:
+              - Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/cohere.embed-multilingual-v3
+          - !Ref AWS::NoValue
         - DynamoDBCrudPolicy: { TableName: !Ref ScanTasksTable }
         - S3CrudPolicy: { BucketName: !Ref AssetsBucket }
         - DynamoDBCrudPolicy: { TableName: !Ref JobsTable }
@@ -613,17 +636,17 @@ Resources:
             Queue: !GetAtt YoloQueue.Arn
             BatchSize: 1
             ScalingConfig:
-              MaximumConcurrency: 2
+              MaximumConcurrency: 4
     Metadata:
-      Dockerfile: Dockerfile
-      DockerContext: ./functions/yolo_worker
+      Dockerfile: yolo_worker/Dockerfile
+      DockerContext: ./functions
       DockerTag: latest
 
   OcrFunction:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub ${ProjectName}-ocr
-      CodeUri: functions/ocr_worker/
+      CodeUri: functions/
       Handler: handler.handler
       Runtime: python3.12
       Architectures: [arm64]
@@ -648,9 +671,52 @@ Resources:
           Type: SQS
           Properties:
             Queue: !GetAtt OcrQueue.Arn
+            BatchSize: 2
+            MaximumBatchingWindowInSeconds: 1
+            FunctionResponseTypes: [ReportBatchItemFailures]
+            ScalingConfig:
+              MaximumConcurrency: 4
+
+    Metadata:
+      BuildMethod: makefile
+
+  OcrPriorityFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ProjectName}-ocr-priority
+      CodeUri: functions/
+      Handler: handler.handler
+      Runtime: python3.12
+      Architectures: [arm64]
+      MemorySize: 512
+      Timeout: 120
+      ReservedConcurrentExecutions: 2
+      Environment:
+        Variables:
+          GEMINI_MODEL: !Ref GeminiModel
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref ScanTasksTable }
+        - S3CrudPolicy: { BucketName: !Ref AssetsBucket }
+        - DynamoDBCrudPolicy: { TableName: !Ref JobsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref CropsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref CropFingerprintsTable }
+        - SQSSendMessagePolicy: { QueueName: !GetAtt LookupQueue.QueueName }
+        - Statement:
+            Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource: !Ref GeminiSecret
+      Events:
+        FromOcrPriorityQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt OcrPriorityQueue.Arn
             BatchSize: 1
+            FunctionResponseTypes: [ReportBatchItemFailures]
             ScalingConfig:
               MaximumConcurrency: 2
+
+    Metadata:
+      BuildMethod: makefile
 
   LookupDispatcherFunction:
     Type: AWS::Serverless::Function
@@ -662,12 +728,16 @@ Resources:
       Architectures: [arm64]
       MemorySize: 256
       Timeout: 30
+      Environment:
+        Variables:
+          OCR_PRIORITY_QUEUE_URL: !Ref OcrPriorityQueue
       Policies:
         - S3ReadPolicy: { BucketName: !Ref AssetsBucket }
         - DynamoDBReadPolicy: { TableName: !Ref ScanTasksTable }
         - DynamoDBReadPolicy: { TableName: !Ref CropsTable }
         - SQSSendMessagePolicy: { QueueName: !GetAtt YoloQueue.QueueName }
         - SQSSendMessagePolicy: { QueueName: !GetAtt OcrQueue.QueueName }
+        - SQSSendMessagePolicy: { QueueName: !GetAtt OcrPriorityQueue.QueueName }
         - DynamoDBReadPolicy: { TableName: !Ref JobsTable }
         - Statement:
             Effect: Allow
@@ -720,8 +790,8 @@ Resources:
             ScalingConfig:
               MaximumConcurrency: 2
     Metadata:
-      Dockerfile: Dockerfile
-      DockerContext: ./functions/lookup_worker
+      Dockerfile: lookup_worker/Dockerfile
+      DockerContext: ./functions
       DockerTag: latest
 
 Outputs:

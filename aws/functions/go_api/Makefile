@@ -4,3 +4,4 @@
 build-ApiFunction:
 	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -tags lambda.norpc -o $(ARTIFACTS_DIR)/bootstrap .
 	if [ -f ./library.db ]; then cp ./library.db $(ARTIFACTS_DIR)/library.db; else cp ../../../outputs/library/library.db $(ARTIFACTS_DIR)/library.db; fi
+	if [ -f ./semantic-index.json ]; then cp ./semantic-index.json $(ARTIFACTS_DIR)/semantic-index.json; fi

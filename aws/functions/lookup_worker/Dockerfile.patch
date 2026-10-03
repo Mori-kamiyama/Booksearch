@@ -1,0 +1,5 @@
+# Keep production dependencies while updating recognition code and assets.
+FROM 277707097118.dkr.ecr.ap-northeast-1.amazonaws.com/booksearch475a0c1a/lookupfunction9a029982repo@sha256:8e9c1d65284b3eac563dac5c5e1a3c77eea124ed7d692a728a710a01f08457d4
+COPY lookup_worker/handler.py ${LAMBDA_TASK_ROOT}/
+COPY lookup_worker/assets/ ${LAMBDA_TASK_ROOT}/assets/
+COPY shared/ ${LAMBDA_TASK_ROOT}/shared/

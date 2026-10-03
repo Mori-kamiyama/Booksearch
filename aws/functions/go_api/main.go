@@ -23,6 +23,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
+	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -40,6 +41,7 @@ var (
 	ddbClient            *dynamodb.Client
 	sqsClient            *sqs.Client
 	bookStore            *BookStore
+	semanticIndex        *SemanticIndex
 	staticAssets         string
 	googleBooksClient    = &http.Client{Timeout: 4 * time.Second}
 )
@@ -61,6 +63,17 @@ func init() {
 	sqsClient = sqs.NewFromConfig(cfg)
 
 	dbPath := filepath.Join(staticAssets, "library.db")
+	if indexPath := os.Getenv("SEMANTIC_INDEX_PATH"); indexPath != "" {
+		semanticIndex, err = LoadSemanticIndex(indexPath, dbPath)
+		if err != nil {
+			log.Printf("semantic search disabled: %v", err)
+			semanticIndex = nil
+		} else {
+			semanticCfg := cfg
+			semanticCfg.RetryMaxAttempts = 1
+			semanticIndex.Embedder = &BedrockEmbedder{Client: bedrockruntime.NewFromConfig(semanticCfg)}
+		}
+	}
 	if _, statErr := os.Stat(dbPath); statErr != nil {
 		log.Printf("warn: library.db stat failed at %s: %v", dbPath, statErr)
 	}
@@ -99,6 +112,10 @@ func handler(ctx context.Context, raw json.RawMessage) (events.APIGatewayV2HTTPR
 		return okJSON(200, map[string]any{"status": "ok", "time": time.Now().Unix()}), nil
 	case method == "GET" && path == "/api/books/search":
 		return searchBooks(ctx, req)
+	case method == "GET" && path == "/api/books/semantic/status":
+		return okJSON(200, map[string]any{"available": semanticIndex != nil && semanticIndex.Embedder != nil && bookStore != nil}), nil
+	case method == "GET" && path == "/api/books/semantic":
+		return semanticBooks(ctx, req)
 	case method == "GET" && path == "/api/books/featured":
 		return featuredBooks(ctx, req)
 	case method == "GET" && path == "/api/books/index":
@@ -117,8 +134,10 @@ func handler(ctx context.Context, raw json.RawMessage) (events.APIGatewayV2HTTPR
 		return scanInit(ctx, req)
 	case method == "POST" && path == "/api/scan/start":
 		return scanStart(ctx, req)
+	case method == "POST" && path == "/api/scan/warmup":
+		return scanWarmup(ctx)
 	case method == "POST" && path == "/api/scan/sessions":
-		return liveSessionStart(ctx)
+		return liveSessionStart(ctx, req)
 	case method == "POST" && strings.HasPrefix(path, "/api/scan/sessions/") && strings.HasSuffix(path, "/frames"):
 		return liveSessionFrame(ctx, req, path)
 	case method == "POST" && strings.HasPrefix(path, "/api/scan/sessions/") && strings.HasSuffix(path, "/commit-frame"):
@@ -136,6 +155,25 @@ func handler(ctx context.Context, raw json.RawMessage) (events.APIGatewayV2HTTPR
 	}
 }
 
+// Start detector environments while the operator is preparing the camera.
+// Expired messages are ignored so queued warmups cannot delay later scans.
+func scanWarmup(ctx context.Context) (events.APIGatewayV2HTTPResponse, error) {
+	payload, err := json.Marshal(map[string]any{
+		"warmup": true, "expires_at": time.Now().Add(30 * time.Second).Unix(),
+	})
+	if err != nil {
+		return errJSON(500, "warmup payload: "+err.Error()), nil
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := sqsClient.SendMessage(ctx, &sqs.SendMessageInput{
+			QueueUrl: aws.String(yoloQueueURL), MessageBody: aws.String(string(payload)),
+		}); err != nil {
+			return errJSON(503, "warmup queue: "+err.Error()), nil
+		}
+	}
+	return okJSON(202, map[string]any{"status": "warming"}), nil
+}
+
 func indexBooks() (events.APIGatewayV2HTTPResponse, error) {
 	if bookStore == nil {
 		return errJSON(503, "library database unavailable"), nil
@@ -149,16 +187,35 @@ func indexBooks() (events.APIGatewayV2HTTPResponse, error) {
 
 // Live sessions process each committed frame while the camera is still running.
 // Completion only closes the session and waits for the already queued work.
-func liveSessionStart(ctx context.Context) (events.APIGatewayV2HTTPResponse, error) {
+func liveSessionStart(ctx context.Context, req events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {
+	var payload struct {
+		TargetBookID    int64  `json:"target_book_id"`
+		PriorityShelfID string `json:"priority_shelf_id"`
+	}
+	if body := decodeBody(req); body != "" {
+		if err := json.Unmarshal([]byte(body), &payload); err != nil {
+			return errJSON(400, "invalid session JSON"), nil
+		}
+	}
+	if payload.TargetBookID < 0 || len(payload.PriorityShelfID) > 128 {
+		return errJSON(400, "invalid search target"), nil
+	}
 	id := uuid.New().String()
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := ddbClient.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String(jobsTable), Item: map[string]ddbtypes.AttributeValue{
+	item := map[string]ddbtypes.AttributeValue{
 		"job_id": &ddbtypes.AttributeValueMemberS{Value: id}, "status": &ddbtypes.AttributeValueMemberS{Value: "collecting"},
 		"session_type": &ddbtypes.AttributeValueMemberS{Value: "live"}, "frame_keys": &ddbtypes.AttributeValueMemberL{Value: []ddbtypes.AttributeValue{}},
 		"accepted_frames": &ddbtypes.AttributeValueMemberN{Value: "0"}, "processed_frames": &ddbtypes.AttributeValueMemberN{Value: "0"},
 		"crop_total": &ddbtypes.AttributeValueMemberN{Value: "0"}, "ocr_total": &ddbtypes.AttributeValueMemberN{Value: "0"}, "ocr_done": &ddbtypes.AttributeValueMemberN{Value: "0"},
 		"created_at": &ddbtypes.AttributeValueMemberS{Value: now}, "updated_at": &ddbtypes.AttributeValueMemberS{Value: now},
-	}})
+	}
+	if payload.TargetBookID > 0 {
+		item["target_book_id"] = &ddbtypes.AttributeValueMemberN{Value: strconv.FormatInt(payload.TargetBookID, 10)}
+		if payload.PriorityShelfID != "" {
+			item["priority_shelf_id"] = &ddbtypes.AttributeValueMemberS{Value: payload.PriorityShelfID}
+		}
+	}
+	_, err := ddbClient.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String(jobsTable), Item: item})
 	if err != nil {
 		return errJSON(500, "ddb session: "+err.Error()), nil
 	}

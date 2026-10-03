@@ -118,6 +118,42 @@ for (const id of ['%25', 'not-a-shelf']) {
   })
 }
 
+test('book map action opens the index at its shelf and preserves it across views', async ({ page }) => {
+  const targetShelf = 'base-04-c08-r04'
+  await mockApi(page, async (route, url) => {
+    if (url.pathname === '/api/books/1') {
+      await route.fulfill({ json: { ...book, shelf_candidates: [{ ...candidate, shelf_id: targetShelf }] } })
+      return true
+    }
+    if (url.pathname === '/api/shelf-candidates') {
+      await route.fulfill({ json: { candidates: [candidate, { ...candidate, book_id: 2, title: '選択した区画の本', shelf_id: targetShelf }] } })
+      return true
+    }
+    return false
+  })
+  await page.goto('/books/1')
+  await page.getByRole('button', { name: 'マップで見る', exact: true }).click()
+  await expect(page).toHaveURL(`/index?shelf=${targetShelf}`)
+  await expect(page.getByRole('heading', { name: '索引', exact: true })).toBeVisible()
+  const selectedCell = page.locator('main button[aria-pressed="true"][aria-label$="冊"]')
+  await expect(selectedCell).toHaveCount(1)
+  await expect(page.getByRole('button', { name: '選択した区画の本', exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: book.title, exact: true })).toHaveCount(0)
+  await page.getByRole('button', { name: 'リスト', exact: true }).click()
+  await expect(page).toHaveURL(`/index?shelf=${targetShelf}&view=list`)
+  await page.getByRole('button', { name: 'Map', exact: true }).click()
+  await expect(page.getByRole('button', { name: '選択した区画の本', exact: true })).toBeVisible()
+  await page.reload()
+  await expect(page.getByRole('button', { name: '選択した区画の本', exact: true })).toBeVisible()
+})
+
+test('legacy map opens the index map view', async ({ page }) => {
+  await mockApi(page)
+  await page.goto('/map')
+  await expect(page).toHaveURL('/index')
+  await expect(page.getByRole('button', { name: 'Map', exact: true })).toHaveAttribute('aria-pressed', 'true')
+})
+
 test('valid shelf keeps its location and scan action', async ({ page }) => {
   await mockApi(page)
   await page.goto('/map/base-01-c02-r04')
@@ -279,7 +315,11 @@ test('scan results link only accepted catalog matches and offer next actions', a
   await expect(page.getByRole('heading', { name: '終了', exact: true })).toBeVisible()
   await expect(page.locator('main a[href="/books/42"]')).toBeVisible()
   await expect(page.locator('main a[href^="/books/"]')).toHaveCount(1)
-  await expect(page.getByText('候補の本', { exact: true })).toBeVisible()
+  // Unconfirmed catalog suggestions retain the OCR text; they must not adopt
+  // another book's title or link just because a candidate exists.
+  await expect(page.getByText('OCR 候補の本', { exact: true })).toBeVisible()
+  await expect(page.getByText('候補の本', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('OCR 確度なしの本', { exact: true })).toBeVisible()
   await expect(page.locator('main a[href="/"]')).toBeVisible()
   await expect(page.locator('main a[href="/scan"]')).toBeVisible()
   await page.locator('main a[href="/books/42"]').click()
@@ -384,14 +424,22 @@ test('home recommendation failure retries without fabricated books', async ({ pa
   await expect(page.getByRole('button', { name: book.title, exact: true })).toBeVisible()
 })
 
-test('short home viewport can reach scan', async ({ page }) => {
+test('short home viewport keeps search primary and batch registration in the menu', async ({ page }) => {
   await page.setViewportSize({ width: 375, height: 480 })
   await mockApi(page)
   await page.goto('/')
-  const scan = page.getByRole('button', { name: '本棚をスキャン', exact: true })
-  await scan.scrollIntoViewIfNeeded()
-  await expect(scan).toBeInViewport()
+  const search = page.getByRole('button', { name: '検索', exact: true })
+  await search.scrollIntoViewIfNeeded()
+  await expect(search).toBeInViewport()
+  await expect(page.getByRole('button', { name: '本棚をスキャン', exact: true })).toHaveCount(0)
+  await expect(page.getByText('本棚をスキャンして検索', { exact: true })).toHaveCount(0)
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(375)
+  await page.getByRole('button', { name: 'メニューを開く' }).click()
+  const register = page.getByRole('link', { name: '本棚を一括登録', exact: true })
+  await expect(register).toBeVisible()
+  await register.click()
+  await expect(page).toHaveURL(/\/scan$/)
+  await expect(page.getByTestId('scan-target-status')).toHaveCount(0)
 })
 
 test('detail ignores old responses and unknown reading time', async ({ page }) => {

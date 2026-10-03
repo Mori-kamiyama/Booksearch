@@ -26,6 +26,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
+from shared import scan_core
+
 import boto3
 from botocore.exceptions import ClientError
 
@@ -80,55 +82,12 @@ def get_model() -> "YOLO":
 
 
 # ---------- crop quality ----------
-def assess_quality(crop: np.ndarray, box: tuple[int, int, int, int],
-                   image_size: tuple[int, int]) -> dict[str, Any]:
-    import cv2
-
-    width, height = image_size
-    x1, y1, x2, y2 = box
-    h, w = crop.shape[:2]
-    short_edge = min(w, h)
-    aspect_ratio = w / h if h else 0.0
-    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-    blur_score = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-
-    edge_touch = []
-    margin_x = max(2, int(width * 0.005))
-    margin_y = max(2, int(height * 0.005))
-    if x1 <= margin_x:
-        edge_touch.append("left")
-    if y1 <= margin_y:
-        edge_touch.append("top")
-    if x2 >= width - margin_x:
-        edge_touch.append("right")
-    if y2 >= height - margin_y:
-        edge_touch.append("bottom")
-
-    # 画像サイズ相対の閾値。スマホ等の小さい入力でも crop が落ちないように。
-    # MIN_SHORT_EDGE_PX, MIN_SHORT_EDGE_RATIO, MIN_BLUR_SCORE は環境変数で上書き可。
-    min_edge_abs = int(os.environ.get("MIN_SHORT_EDGE_PX", "80"))
-    min_edge_ratio = float(os.environ.get("MIN_SHORT_EDGE_RATIO", "0.06"))
-    min_short_edge = max(min_edge_abs, int(min(width, height) * min_edge_ratio))
-    min_blur = float(os.environ.get("MIN_BLUR_SCORE", "50"))
-
-    reasons = []
-    if blur_score < min_blur:
-        reasons.append("blurry")
-    if short_edge < min_short_edge:
-        reasons.append("too_small")
-    if edge_touch and aspect_ratio >= 1.45:
-        reasons.append("edge_wide")
-    elif edge_touch and aspect_ratio <= 0.45:
-        reasons.append("edge_tall")
-
-    return {
-        "blur_score": round(blur_score, 2),
-        "short_edge": short_edge,
-        "aspect_ratio": round(aspect_ratio, 3),
-        "edge_touch": edge_touch,
-        "readable": not reasons,
-        "reasons": reasons,
-    }
+def assess_quality(crop, box, image_size) -> dict[str, Any]:
+    return scan_core.assess_quality(
+        crop, box, image_size,
+        min_short_edge=max(int(os.environ.get("MIN_SHORT_EDGE_PX", "80")),
+            int(min(image_size) * float(os.environ.get("MIN_SHORT_EDGE_RATIO", str(scan_core.MIN_SHORT_EDGE_RATIO))))),
+        min_blur_score=float(os.environ.get("MIN_BLUR_SCORE", str(scan_core.MIN_BLUR_SCORE))))
 
 
 # ---------- AprilTag ----------
@@ -150,17 +109,11 @@ class DetectedTag:
     center: np.ndarray
     angle_deg: float
     orientation_status: str
+    x_axis: tuple[float, float] = (1.0, 0.0)
+    y_axis: tuple[float, float] = (0.0, 1.0)
 
     def quadrant_for_point(self, point) -> str:
-        cx, cy = float(self.center[0]), float(self.center[1])
-        px, py = point
-        if px < cx and py < cy:
-            return "top_left"
-        if px >= cx and py < cy:
-            return "top_right"
-        if px >= cx and py >= cy:
-            return "bottom_right"
-        return "bottom_left"
+        return scan_core.tag_quadrant(self.center, point, self.x_axis, self.y_axis)
 
     def distance_to_point(self, point) -> float:
         import numpy as np
@@ -175,7 +128,7 @@ def detect_tags(image: np.ndarray, mapping: dict[str, Any]) -> tuple[list[Detect
     import numpy as np
 
     primary = mapping.get("dictionary", "DICT_APRILTAG_36h11")
-    candidates = [primary] + [name for name in ARUCO_DICTIONARIES if name != primary]
+    candidates = [primary]
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     best: tuple[list[Any], Any, str] = ([], None, primary)
     diagnostics: dict[str, Any] = {"tried": [], "selected": None, "raw_ids": []}
@@ -222,6 +175,8 @@ def detect_tags(image: np.ndarray, mapping: dict[str, Any]) -> tuple[list[Detect
         out.append(DetectedTag(
             tag_id=int(raw_id), center=pts.mean(axis=0),
             angle_deg=angle, orientation_status=status,
+            x_axis=tuple(x_axis),
+            y_axis=tuple((pts[3] - pts[0]) / float(np.linalg.norm(pts[3] - pts[0]))),
         ))
     return out, diagnostics
 
@@ -232,8 +187,7 @@ def assign_shelf(box_xyxy, tags, mapping, max_distance=None):
     tag_cfg = mapping.get("tags", {})
 
     if max_distance is None:
-        diag = math.hypot(box_xyxy[2]-box_xyxy[0], box_xyxy[3]-box_xyxy[1])
-        max_distance = diag * float(mapping.get("auto_distance_scale", 1.25))
+        max_distance = scan_core.tag_distance_limit(box_xyxy, float(mapping.get("auto_distance_scale", 1.25)))
 
     votes = []
     for tag in tags:
@@ -311,7 +265,7 @@ def fingerprint_scope(shelf: dict[str, Any] | None, box, image_size) -> str | No
         round((x2 - x1) / width * 10),
         round((y2 - y1) / height * 10),
     )
-    return f"{shelf['shelf_id']}:{':'.join(str(v) for v in normalized)}"
+    return f"{scan_core.POLICY_VERSION}:{shelf['shelf_id']}:{':'.join(str(v) for v in normalized)}"
 
 
 def persistent_duplicate(scope: str | None, phash: int) -> dict[str, Any] | None:
@@ -326,8 +280,75 @@ def persistent_duplicate(scope: str | None, phash: int) -> dict[str, Any] | None
     return None
 
 
+def session_crop_refs(job_id: str) -> list[dict[str, Any]]:
+    """Only reuse crops from committed frame tasks in this live session."""
+    from boto3.dynamodb.conditions import Key
+
+    rows: list[dict[str, Any]] = []
+    task_cache: dict[str, dict[str, Any]] = {}
+    cursor = None
+    while True:
+        kwargs: dict[str, Any] = {"KeyConditionExpression": Key("job_id").eq(job_id), "ConsistentRead": True}
+        if cursor:
+            kwargs["ExclusiveStartKey"] = cursor
+        page = crops_table.query(**kwargs)
+        for row in page.get("Items", []):
+            if not row.get("phash") or row.get("status") not in {"ocr_done", "ocr_pending"}:
+                continue
+            if row["status"] == "ocr_done" and not row.get("titles"):
+                continue
+            if row["status"] == "ocr_pending" and not row.get("requires_ocr"):
+                continue
+            task_id = row.get("task_id")
+            if task_id:
+                if not scan_tasks_table:
+                    continue
+                if task_id not in task_cache:
+                    task_cache[task_id] = scan_tasks_table.get_item(
+                        Key={"job_id": job_id, "task_id": task_id}, ConsistentRead=True,
+                    ).get("Item") or {}
+                task = task_cache[task_id]
+                if task.get("state") != "done" or task.get("detection_token") != row.get("detection_token"):
+                    continue
+            rows.append(row)
+        cursor = page.get("LastEvaluatedKey")
+        if not cursor:
+            return rows
+
+
+def box_overlap(left: list[int] | tuple[int, ...], right: list[int] | tuple[int, ...]) -> float:
+    """Intersection over union in the camera frame, for conservative untagged reuse."""
+    x1, y1 = max(left[0], right[0]), max(left[1], right[1])
+    x2, y2 = min(left[2], right[2]), min(left[3], right[3])
+    intersection = max(0, x2 - x1) * max(0, y2 - y1)
+    left_area = max(0, left[2] - left[0]) * max(0, left[3] - left[1])
+    right_area = max(0, right[2] - right[0]) * max(0, right[3] - right[1])
+    union = left_area + right_area - intersection
+    return intersection / union if union else 0.0
+
+
+def session_duplicate(job_id: str, shelf_id: str | None, phash: int,
+                      refs: list[dict[str, Any]], box: tuple[int, ...] | None = None,
+                      ) -> dict[str, Any] | None:
+    threshold = int(os.environ.get("CROP_HASH_DISTANCE", "6"))
+    # A completed OCR result is safer to reuse than one still in flight.
+    for row in sorted(refs, key=lambda ref: ref.get("status") != "ocr_done"):
+        prior_shelf = (row.get("shelf") or {}).get("shelf_id")
+        if shelf_id and prior_shelf and shelf_id != prior_shelf:
+            continue
+        tagged = bool(shelf_id and prior_shelf)
+        if not tagged:
+            prior_box = row.get("bbox_xyxy")
+            if not box or not prior_box or box_overlap(box, prior_box) < 0.55:
+                continue
+        allowed_distance = threshold if tagged else min(threshold, 3)
+        if hash_distance(phash, int(str(row["phash"]), 16)) <= allowed_distance:
+            return {"job_id": job_id, "crop_id": row["crop_id"], "source": "session"}
+    return None
+
+
 def process_frame(job_id: str, image_key: str, frame_index: int,
-                  seen_hashes: list[tuple[int, str]], local_path: str | None = None,
+                  seen_hashes: list[dict[str, Any]], local_path: str | None = None,
                   *, task_id: str | None = None, detection_token: str | None = None,
                   ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     import cv2
@@ -373,6 +394,7 @@ def process_frame(job_id: str, image_key: str, frame_index: int,
     else:
         image_stem = f"frame_{frame_index:06d}_{Path(image_key).stem[:12]}"
     crop_records: list[dict[str, Any]] = []
+    prior_crops = session_crop_refs(job_id) if task_id else []
     for i, (xyxy, score) in enumerate(boxes, 1):
         box = clamp_box(tuple(xyxy), (width, height))
         x1, y1, x2, y2 = box
@@ -389,10 +411,10 @@ def process_frame(job_id: str, image_key: str, frame_index: int,
         phash = crop_phash(crop)
         scope = fingerprint_scope(shelf, box, (width, height))
         duplicate_ref = None
-        for previous_hash, previous_crop_id in seen_hashes:
-            if hash_distance(phash, previous_hash) <= int(os.environ.get("CROP_HASH_DISTANCE", "6")):
-                duplicate_ref = {"job_id": job_id, "crop_id": previous_crop_id, "source": "session"}
-                break
+        shelf_id = (shelf or {}).get("shelf_id")
+        duplicate_ref = session_duplicate(job_id, shelf_id, phash, seen_hashes, box)
+        if not duplicate_ref:
+            duplicate_ref = session_duplicate(job_id, shelf_id, phash, prior_crops, box)
         persisted = None if duplicate_ref else persistent_duplicate(scope, phash)
         if persisted:
             duplicate_ref = {
@@ -444,7 +466,7 @@ def process_frame(job_id: str, image_key: str, frame_index: int,
             crops_table.put_item(Item=ddb_safe(item))
         crop_records.append(item)
         if quality["readable"] and not duplicate_ref:
-            seen_hashes.append((phash, crop_id))
+            seen_hashes.append(item)
     return crop_records, {"image_key": image_key, "width": width, "height": height, "apriltag": tag_diag}
 
 
@@ -558,7 +580,7 @@ def process_job(job_id: str, image_keys: list[str], incremental: bool = False) -
             return
     crop_records: list[dict[str, Any]] = []
     frame_diagnostics = []
-    seen_hashes: list[tuple[int, str]] = []
+    seen_hashes: list[dict[str, Any]] = []
     for index, image_key in enumerate(image_keys, 1):
         suffix = Path(image_key).suffix.lower()
         if suffix in VIDEO_EXTENSIONS:
@@ -709,6 +731,15 @@ def process_task(body: dict[str, Any]) -> None:
 def handler(event, context):
     for rec in event.get("Records", []):
         body = json.loads(rec["body"])
+        if body.get("warmup"):
+            if int(body.get("expires_at", 0)) >= int(time.time()):
+                import numpy as np
+
+                model = get_model()
+                model.predict(source=np.zeros((640, 640, 3), dtype=np.uint8),
+                              imgsz=640, conf=0.25, device="cpu", verbose=False)
+                print("[yolo] warmup complete")
+            continue
         if body.get("task_id"):
             try:
                 process_task(body)

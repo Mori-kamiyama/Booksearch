@@ -148,22 +148,28 @@ export default function JobPage() {
 
   const entries = currentJob.catalog?.entries ?? []
   const groups = groupResultBooks(entries)
-  // detected_book_count counts every OCR hit, so the same spine seen in ten
-  // frames reads as ten books. The metric follows the deduplicated list.
+  // Keep the displayed count consistent with this list, including older jobs
+  // whose detected_book_count counted repeated OCR hits across frames.
   const bookCount = groups.reduce((n, group) => n + group.books.length, 0)
   const shelfIds = new Set(entries.map(entry => entry.shelf_id).filter(Boolean))
   const shelfCount = Number(currentJob.detected_shelf_count ?? shelfIds.size)
   const processing = isProcessingStatus(currentJob.status)
   const uploading = currentJob.status === 'uploading'
+  const targetBooks = groups.flatMap(group => group.books.map(book => ({
+    key: resultBookKey({ title: book.title, library_db_id: book.libraryDbId, match_confidence: book.matchConfidence }, book.title),
+    title: book.title,
+    definitive: book.matchLabel === '自動照合',
+  })))
   const targetMatchState = scanNavigation
-    ? processing
-      ? 'searching'
-      : scanTargetMatchState(scanNavigation.targetBook, groups.flatMap(group => group.books.map(book => ({
-        key: resultBookKey({ title: book.title, library_db_id: book.libraryDbId }, book.title),
+    ? scanTargetMatchState(scanNavigation.targetBook, targetBooks)
+    : null
+  const targetShelves = scanNavigation
+    ? groups.filter(group => group.shelf !== '棚未判定' && scanTargetMatchState(scanNavigation.targetBook, group.books.map(book => ({
+        key: resultBookKey({ title: book.title, library_db_id: book.libraryDbId, match_confidence: book.matchConfidence }, book.title),
         title: book.title,
         definitive: book.matchLabel === '自動照合',
-      }))))
-    : null
+      }))) !== 'searching').map(group => group.shelf)
+    : []
 
   return (
     <div className="min-h-screen bg-white">
@@ -181,29 +187,29 @@ export default function JobPage() {
         )}
 
         {scanNavigation && targetMatchState && (
-          <TargetBookResultStatus target={scanNavigation.targetBook} matchState={targetMatchState} processing={processing} completed={currentJob.status === 'done'} returnTo={scanNavigation.returnTo} />
+          <TargetBookResultStatus target={scanNavigation.targetBook} matchState={targetMatchState} shelves={targetShelves} processing={processing} completed={currentJob.status === 'done'} returnTo={scanNavigation.returnTo} />
         )}
 
         {processing ? (
           <div className="flex min-h-[674px] flex-col items-center justify-center gap-6 px-7 text-center">
             <div className="size-12 animate-spin rounded-full border-4 border-[#d9d9d9] border-t-[#087f5b]" />
-            <h1 className="text-4xl font-semibold leading-[44px] text-[#087f5b]">{uploading ? 'アップロード中' : '解析中'}</h1>
-            <p className="text-base leading-[19px] text-ink">{uploading ? <>画像をアップロードしています…<br />このままお待ちください</> : <>棚と本を確認しています…<br />このままお待ちください</>}</p>
+            <h1 className="text-4xl font-semibold leading-[44px] text-[#087f5b]">{uploading ? 'アップロード中' : scanNavigation ? targetMatchState === 'confirmed' ? '探している本を認識しました' : targetMatchState === 'candidate' ? '探している本の候補があります' : '探している本を確認中' : '解析中'}</h1>
+            <p className="text-base leading-[19px] text-ink">{uploading ? <>画像をアップロードしています…<br />このままお待ちください</> : scanNavigation ? targetMatchState === 'searching' ? <>撮影した画像を確認しています…<br />見つかったらここに表示します</> : <>撮影した棚の解析を続けています…<br />結果の確定をお待ちください</> : <>棚と本を確認しています…<br />このままお待ちください</>}</p>
             <StatusBadge status={currentJob.status} />
           </div>
         ) : currentJob.status === 'failed' ? (
           <div className="flex min-h-[674px] flex-col items-center justify-center gap-6 px-7 text-center">
             <h1 className="text-4xl font-semibold leading-[44px] text-red-600">エラー</h1>
             <p className="text-base leading-normal text-ink">解析に失敗しました。<br />{currentJob.error || 'もう一度スキャンしてください。'}</p>
-            <button type="button" onClick={() => navigate('/scan')} className="tap-card rounded-full bg-[#087f5b] px-6 py-3 text-white">スキャンへ戻る</button>
+            <button type="button" onClick={() => navigate('/scan', { state: scanNavigation })} className="tap-card rounded-full bg-[#087f5b] px-6 py-3 text-white">スキャンへ戻る</button>
           </div>
         ) : currentJob.status === 'no_detection' ? (
           <NoResultState
             status={currentJob.status}
-            title="本を検出できませんでした"
-            message="撮影画像から本の候補が見つかりませんでした。撮影距離や向きを変えてもう一度お試しください。"
+            title={scanNavigation ? '探している本を確認できませんでした' : '本を検出できませんでした'}
+            message={scanNavigation ? '撮影画像から読み取れる本がありませんでした。撮影距離や向きを変えてもう一度お試しください。' : '撮影画像から本の候補が見つかりませんでした。撮影距離や向きを変えてもう一度お試しください。'}
             diagnostics={currentJob.diagnostics ?? currentJob.latest_diagnostics}
-            onScan={() => navigate('/scan')}
+            onScan={() => navigate('/scan', { state: scanNavigation })}
           />
         ) : currentJob.status === 'no_readable_crops' ? (
           <NoResultState
@@ -211,8 +217,14 @@ export default function JobPage() {
             title="読み取れる画像がありませんでした"
             message="本の候補は見つかりましたが、読み取りに使える画像がありませんでした。明るさや撮影距離を変えてもう一度お試しください。"
             diagnostics={currentJob.diagnostics ?? currentJob.latest_diagnostics}
-            onScan={() => navigate('/scan')}
+            onScan={() => navigate('/scan', { state: scanNavigation })}
           />
+        ) : currentJob.status === 'done' && scanNavigation ? (
+          <div className="px-7 pt-10 text-center">
+            <h1 className="text-3xl font-semibold text-[#087f5b]">探索が完了しました</h1>
+            <p className="mt-4 text-sm text-ink-muted">撮影した棚の解析が完了しました。</p>
+            <Link to="/scan" state={scanNavigation} className="tap-card mt-8 inline-flex rounded-full bg-[#087f5b] px-6 py-3 text-sm font-semibold text-white">もう一度探す</Link>
+          </div>
         ) : currentJob.status === 'done' ? (
           <div className="pt-[104px]">
             <section className="flex flex-col items-center gap-7 px-7 text-center">
@@ -259,28 +271,32 @@ export default function JobPage() {
 function TargetBookResultStatus({
   target,
   matchState,
+  shelves,
   processing,
   completed,
   returnTo,
 }: {
   target: { id: number; title: string }
   matchState: ScanTargetMatchState
+  shelves: string[]
   processing: boolean
   completed: boolean
   returnTo: string
 }) {
-  const label = processing
-    ? '対象本を探索中'
-    : !completed ? '探索結果を確定できませんでした'
+  const label = !processing && !completed
+    ? '探索結果を確定できませんでした'
     : matchState === 'confirmed'
       ? '対象本を自動照合しました'
       : matchState === 'candidate'
         ? '対象本の候補があります（要確認）'
-        : '対象本は未発見でした'
+        : processing
+          ? '対象本を探索中'
+          : '対象本は未発見でした'
   return (
     <section data-testid="target-result-status" className="mx-7 mt-[82px] rounded-xl border border-primary-soft bg-primary-soft p-4">
       <p className="text-sm text-ink">対象本: {target.title}</p>
       <p className="mt-1 font-semibold text-[#087f5b]">{label}</p>
+      {shelves.length > 0 && <p className="mt-2 text-sm text-ink">見つかった棚候補: {shelves.join('、')}</p>}
       <Link to={returnTo} className="mt-3 inline-flex text-sm font-semibold text-[#087f5b] underline underline-offset-2">
         対象本の詳細へ戻る
       </Link>
@@ -363,15 +379,15 @@ function groupResultBooks(entries: CatalogEntry[]): { shelf: string; books: Resu
     const books = groups.get(shelf) ?? new Map<string, ResultBook>()
     for (const book of entry.books ?? []) {
       const top = book.book_lookup?.candidates?.[0]
-      const title = top?.title || book.title
+      const title = isConfidentLibraryMatch(top) ? top.title || book.title : book.title
       if (!title) continue
       // A live scan sees the same spine across many frames, so each book is
       // shown once per shelf instead of once per crop.
-      const libraryDbId = top?.library_db_id
+      const libraryDbId = isConfidentLibraryMatch(top) ? top.library_db_id : undefined
       const key = resultBookKey(top, title)
       const candidate = {
         title,
-        cover: top?.thumbnail || fallbackCoverForTitle(title),
+        cover: (isConfidentLibraryMatch(top) ? top.thumbnail : undefined) || fallbackCoverForTitle(title),
         libraryDbId,
         matchConfidence: top?.match_confidence,
         matchLabel: resultMatchLabel(top),
@@ -401,7 +417,7 @@ function isConfidentLibraryMatch(candidate: Candidate | undefined): candidate is
 }
 
 function resultBookKey(candidate: Candidate | undefined, title: string): string {
-  return hasPositiveLibraryDbId(candidate)
+  return isConfidentLibraryMatch(candidate)
     ? `id:${candidate.library_db_id}`
     : `title:${normalizeResultTitle(title)}`
 }

@@ -84,9 +84,9 @@ export default function BookDetailPage() {
           <nav aria-label="パンくず" className="mb-7 text-sm text-ink-muted md:mb-[39px]">
             {sourceShelfId ? (
               <>
-                <Link to="/map" className="text-primary hover:underline">MAP</Link>
+                <Link to="/index" className="text-primary hover:underline">索引</Link>
                 <span className="mx-2">&gt;</span>
-                <Link to={`/map/${encodeURIComponent(sourceShelfId)}`} className="text-primary hover:underline">棚{sourceShelfId}</Link>
+                <Link to={`/index?shelf=${encodeURIComponent(sourceShelfId)}`} className="text-primary hover:underline">棚{sourceShelfId}</Link>
               </>
             ) : (
               <>
@@ -107,7 +107,7 @@ export default function BookDetailPage() {
 
       <MapSection
         candidate={topCandidate}
-        onOpenMap={() => topCandidate && navigate(`/map/${encodeURIComponent(topCandidate.shelf_id)}`)}
+        onOpenMap={() => topCandidate && navigate(`/index?shelf=${encodeURIComponent(topCandidate.shelf_id)}`)}
         onScanForBook={() => navigate('/scan', {
           state: {
             targetBook: {

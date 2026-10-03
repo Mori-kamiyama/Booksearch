@@ -13,6 +13,7 @@ for (const scenario of ['normal', 'finalize-retry', 'frame-retry', 'outage-recov
     const committed: string[] = []
     let outage = scenario === 'outage-recovery'
     let completes = 0
+    let warmups = 0
     const failures = new Set<string>()
     page.on('pageerror', error => errors.push(error.message))
     if (!live) await page.route('**/*', async route => {
@@ -29,7 +30,8 @@ for (const scenario of ['normal', 'finalize-retry', 'frame-retry', 'outage-recov
         return route.fulfill({ status: 503, body: 'Transient frame failure' })
       }
       let data: unknown = {}
-      if (path === '/api/scan/sessions') data = { session_id: 'camera-test', frame_upload_url_endpoint: '/api/camera-frame-init' }
+      if (path === '/api/scan/warmup') { warmups++; data = { status: 'warming' } }
+      else if (path === '/api/scan/sessions') data = { session_id: 'camera-test', frame_upload_url_endpoint: '/api/camera-frame-init' }
       else if (path === '/api/camera-frame-init') {
         const { filename } = request.postDataJSON()
         data = { upload_url: '/api/camera-frame-put', frame_key: filename }
@@ -98,6 +100,7 @@ for (const scenario of ['normal', 'finalize-retry', 'frame-retry', 'outage-recov
       expect(titles.length, 'The real scan must recognize at least one book, not just finish an empty job').toBeGreaterThan(0)
     }
     if (!live) {
+      expect(warmups).toBe(1)
       if (retryFrames) expect(failures.size).toBe(3)
       expect(completes).toBe(retryFinalize ? 2 : 1)
       expect(new Set(committed).size).toBe(committed.length)

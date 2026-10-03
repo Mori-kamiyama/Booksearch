@@ -2,13 +2,15 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { BookOpen } from 'lucide-react'
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import { EmptyState, ErrorState } from '../components/common'
-import { CoverImage, SearchBar } from '../components/book'
+import { SearchBar } from '../components/book'
+import { SearchResultCard } from '../components/SearchResultCard'
+import { SemanticSuggestions } from '../components/SemanticSuggestions'
 import { SearchFilters } from '../components/SearchFilters'
 import { searchBookResults } from '../lib/api'
 import { loadDiscoveryIndex, type DiscoveryIndex } from '../lib/discoveryIndex'
-import { searchCorrections } from '../lib/searchCorrections'
+import { searchCorrectionCandidates } from '../lib/searchCorrections'
+import { semanticQueryAllowed } from '../lib/semanticSearch'
 import type { Book } from '../lib/types'
-import { fallbackCoverForTitle } from '../data/figmaBooks'
 
 const SEARCH_PAGE_SIZE = 30
 
@@ -59,6 +61,7 @@ export default function SearchResultsPage() {
   const sourceQuery = params.get('q')?.trim() ?? ''
   const exactOnly = params.get('exact') === '1'
   const [correctedQuery, setCorrectedQuery] = useState('')
+  const [correctionSuggestions, setCorrectionSuggestions] = useState<string[]>([])
   const filters = new URLSearchParams([...params].filter(([key]) => ['genre', 'topic', 'min_pages', 'max_pages', 'level'].includes(key))).toString()
   const [discovery, setDiscovery] = useState<DiscoveryIndex | null>(null)
   useEffect(() => { loadDiscoveryIndex().then(setDiscovery).catch(() => {}) }, [])
@@ -86,7 +89,7 @@ export default function SearchResultsPage() {
   const load = useCallback(async () => {
     const requestId = ++requestIdRef.current
     const isCurrentRequest = () => mountedRef.current && requestId === requestIdRef.current
-    if (isCurrentRequest()) { loadedScrollKeyRef.current = null; setCorrectedQuery('') }
+    if (isCurrentRequest()) { loadedScrollKeyRef.current = null; setCorrectedQuery(''); setCorrectionSuggestions([]) }
 
     if (!sourceQuery && !filters) {
       if (isCurrentRequest()) {
@@ -103,16 +106,19 @@ export default function SearchResultsPage() {
     try {
       let results = await searchBookResults(sourceQuery, SEARCH_PAGE_SIZE, offset, filters)
       let corrected = ''
+      let suggestions: string[] = []
       if (isCurrentRequest() && (results.total === 0 || (results.total === null && offset === 0 && results.books.length === 0)) && sourceQuery && !exactOnly) {
         // Reuse the cached index; try once, preserving every hard filter.
         const index = await loadDiscoveryIndex().catch(() => null)
-        const candidate = index ? searchCorrections(index, sourceQuery)[0] : undefined
+        const candidates = index ? searchCorrectionCandidates(index, sourceQuery) : []
+        suggestions = candidates.map(candidate => candidate.query)
+        const candidate = candidates.find(candidate => candidate.automatic)?.query
         if (isCurrentRequest() && candidate) {
           const replacement = await searchBookResults(candidate, SEARCH_PAGE_SIZE, offset, filters)
           if ((replacement.total ?? replacement.books.length) > 0) { results = replacement; corrected = candidate }
         }
       }
-      if (isCurrentRequest()) { setBooks(results.books); setTotal(results.total); setCorrectedQuery(corrected) }
+      if (isCurrentRequest()) { setBooks(results.books); setTotal(results.total); setCorrectedQuery(corrected); setCorrectionSuggestions(corrected ? [] : suggestions) }
     } catch {
       if (isCurrentRequest()) {
         setBooks([])
@@ -211,6 +217,13 @@ export default function SearchResultsPage() {
           <button type="button" className="min-h-9 text-xs text-primary underline underline-offset-4"
             onClick={() => navigate(searchResultsPath(sourceQuery, 1, filters, true))}>元の検索語「{sourceQuery}」で検索</button>
         </div>}
+        {!loading && !error && correctionSuggestions.length > 0 && <div className="mt-4 break-words text-sm text-ink" aria-label="検索語の補正候補">
+          <p>もしかして…</p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {correctionSuggestions.map(candidate => <button key={candidate} type="button" className="min-h-11 rounded-lg border border-line px-4 text-sm text-primary"
+              onClick={() => navigate(searchResultsPath(candidate, 1, filters))}>{candidate}</button>)}
+          </div>
+        </div>}
         {loading && <SearchGridSkeleton />}
         {!loading && error && <div className="mt-8"><ErrorState message="検索できませんでした。" onRetry={load} /></div>}
         {!loading && !error && books.length === 0 && (
@@ -274,24 +287,25 @@ export default function SearchResultsPage() {
             )}
           </>
         )}
+        {!loading && !error && semanticQueryAllowed(sourceQuery, exactOnly) && <SemanticSuggestions
+          key={`${scrollKey}:${location.key}`}
+          query={sourceQuery}
+          filters={filters}
+          exclude={books.map(book => book.id)}
+          automatic={books.length === 0 && (total === 0 || total === null && offset === 0)}
+          onPointerDown={() => {
+            rememberScroll(scrollKey)
+            pointerNavigationScrollKeyRef.current = scrollKey
+          }}
+          onOpen={book => {
+            leavingRef.current = true
+            if (pointerNavigationScrollKeyRef.current !== scrollKey) rememberScroll(scrollKey)
+            pointerNavigationScrollKeyRef.current = null
+            navigate(bookDetailPath(book.id, sourceQuery, page, filters, exactOnly))
+          }}
+        />}
       </div>
     </div>
-  )
-}
-
-function SearchResultCard({ book, onOpen, onPointerDown }: { book: Book; onOpen: () => void; onPointerDown: () => void }) {
-  const cover = book.thumbnail || fallbackCoverForTitle(book.title)
-  return (
-    <button type="button" aria-labelledby={`search-title-${book.id}`} aria-describedby={`search-meta-${book.id}`} onPointerDown={onPointerDown} onClick={onOpen} className="tap-card flex min-w-0 flex-col items-center gap-2 rounded-lg text-center">
-      <div className="flex h-[199px] w-[141px] max-w-full items-end justify-center md:h-[208px] md:w-[153px]">
-        {cover ? <CoverImage src={cover} className="max-h-full max-w-full bg-[#d9d9d9] object-contain" fallbackClassName="grid h-full w-full place-items-center bg-[#d9d9d9]" /> : <div className="h-full w-full bg-[#d9d9d9]" />}
-      </div>
-      <span id={`search-title-${book.id}`} className="line-clamp-2 w-full text-sm leading-normal text-ink md:text-[15px]">{book.title}</span>
-      <span id={`search-meta-${book.id}`} className="flex w-full flex-col gap-1 text-xs text-ink-muted">
-        {book.authors && <span className="line-clamp-1">{book.authors}</span>}
-        {book.published_date?.match(/^\d{4}/)?.[0] && <span>{book.published_date.match(/^\d{4}/)?.[0]}</span>}
-      </span>
-    </button>
   )
 }
 

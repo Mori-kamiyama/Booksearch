@@ -17,6 +17,8 @@ func buildRouter(h *handler.Handler) *gin.Engine {
 	{
 		api.GET("/health", h.Health)
 		api.GET("/books/search", h.SearchBooks)
+		api.GET("/books/semantic/status", h.SemanticStatus)
+		api.GET("/books/semantic", h.SemanticBooks)
 		api.GET("/books/featured", h.FeaturedBooks)
 		api.GET("/books/:id", h.GetBook)
 		api.GET("/books/:id/related", h.RelatedBooks)

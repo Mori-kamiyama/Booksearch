@@ -9,14 +9,16 @@ RUN yum install -y mesa-libGL libglvnd-glx gcc gcc-c++ make && yum clean all
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
 # Python deps
-COPY requirements.txt /tmp/
+COPY yolo_worker/requirements.txt /tmp/
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 # YOLO モデルと AprilTag mapping、known_books をイメージに同梱（cold start 高速化）
-COPY assets/ ${LAMBDA_TASK_ROOT}/assets/
+COPY yolo_worker/assets/ ${LAMBDA_TASK_ROOT}/assets/
 
 # Handler
-COPY handler.py ${LAMBDA_TASK_ROOT}/
-COPY durable.py ${LAMBDA_TASK_ROOT}/
+COPY yolo_worker/handler.py ${LAMBDA_TASK_ROOT}/
+COPY yolo_worker/durable.py ${LAMBDA_TASK_ROOT}/
+
+COPY shared/ ${LAMBDA_TASK_ROOT}/shared/
 
 CMD ["handler.handler"]

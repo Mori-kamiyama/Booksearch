@@ -66,8 +66,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--conf", type=float, default=0.25)
     parser.add_argument("--device", default="mps", help="mps/cpu/cuda など")
     parser.add_argument("--crop-pad", type=float, default=0.02, help="検出boxの余白率")
-    parser.add_argument("--min-blur-score", type=float, default=150.0, help="これ未満のcropはぼやけとしてOCRをスキップ")
-    parser.add_argument("--min-crop-short-edge", type=int, default=550, help="短辺がこれ未満のcropは小さすぎとしてOCRをスキップ")
+    parser.add_argument("--min-blur-score", type=float, default=book_detection.DetectionConfig.min_blur_score, help="これ未満のcropはぼやけとしてOCRをスキップ")
+    parser.add_argument("--min-crop-short-edge", type=int, default=None, help="短辺がこれ未満のcropは小さすぎとしてOCRをスキップ")
+    parser.add_argument("--min-crop-short-edge-ratio", type=float, default=0.28, help="画像短辺に対するcrop短辺の下限")
     parser.add_argument("--reject-edge-touch", action="store_true", help="画像端に接するcropを見切れ疑いとしてOCRをスキップ")
     parser.add_argument(
         "--reject-edge-aspect",
@@ -241,6 +242,8 @@ def make_catalog_entry(
                 db_path=library_db_path,
                 google_fallback=google_fallback,
             )
+        if lookup:
+            book_lookup.apply_legibility(lookup.get("candidates") or [], enriched)
         enriched["book_lookup"] = lookup
         enriched_books.append(enriched)
 
@@ -272,7 +275,7 @@ def fingerprint_scope(box: Any, shelf_id: str | None) -> str | None:
         round(((x1 + x2) / 2) / width * 10), round(((y1 + y2) / 2) / height * 10),
         round((x2 - x1) / width * 10), round((y2 - y1) / height * 10),
     )
-    return f"{shelf_id}:{':'.join(str(v) for v in normalized)}"
+    return f"{book_detection.scan_core.POLICY_VERSION}:{shelf_id}:{':'.join(str(v) for v in normalized)}"
 
 
 def open_fingerprint_db(path: Path | None) -> sqlite3.Connection | None:
@@ -358,6 +361,7 @@ def main() -> int:
             crop_pad=args.crop_pad,
             min_blur_score=args.min_blur_score,
             min_short_edge=args.min_crop_short_edge,
+            min_short_edge_ratio=args.min_crop_short_edge_ratio,
             reject_edge_touch=args.reject_edge_touch,
             reject_edge_aspect=args.reject_edge_aspect,
             edge_wide_aspect=args.edge_wide_aspect,

@@ -8,6 +8,7 @@ import { detectBrowserAprilTags, isBrowserAprilTagReady } from '../lib/browserAp
 import { StableTagTracker } from '../lib/stableTagTracker'
 import { cameraAccessErrorMessage } from '../lib/cameraAccess'
 import { parseScanNavigationState, scanTargetMatchState, type ScanTargetMatchState } from '../lib/scanTarget'
+import { shelfBoxGuide, shelfDirectionGuide, type ShelfBoxGuide, type ShelfDirectionGuide } from '../lib/videoOverlay'
 import embeddedShelfMap from '../../../data/apriltag_library_map.json'
 import { fallbackCoverForTitle } from '../data/figmaBooks'
 
@@ -25,7 +26,7 @@ interface LiveDetectResponse {
 
 interface ShelfTagMap {
   map_id?: string
-  tags?: Record<string, { unit?: string; quadrants?: Record<string, string> }>
+  tags?: Record<string, { unit?: string; quadrants?: Record<string, string>; expected_angle_deg?: number; angle_tolerance_deg?: number }>
 }
 
 interface ShelfEvent {
@@ -99,6 +100,25 @@ export default function ScanPage() {
   const scanNavigation = useMemo(() => parseScanNavigationState(location.state), [location.state])
   const targetBook = scanNavigation?.targetBook ?? null
   const [mode, setMode] = useState<'upload' | 'camera'>('camera')
+
+  useEffect(() => {
+    if (mode !== 'camera') return
+    try {
+      const last = Number(sessionStorage.getItem('scan-yolo-warmup-at') || 0)
+      if (Date.now() - last < 90_000) return
+    } catch {
+      // Private browsing can disable session storage; warming still works.
+    }
+    const controller = new AbortController()
+    void apiFetch('/api/scan/warmup', { method: 'POST', signal: controller.signal })
+      .then(response => {
+        if (response.ok) {
+          try { sessionStorage.setItem('scan-yolo-warmup-at', String(Date.now())) } catch { /* optional */ }
+        }
+      })
+      .catch(() => undefined)
+    return () => controller.abort()
+  }, [mode])
   const [file, setFile] = useState<File | null>(null)
   const [filePreview, setFilePreview] = useState('')
   const [uploading, setUploading] = useState(false)
@@ -115,6 +135,9 @@ export default function ScanPage() {
   const [liveJobId, setLiveJobId] = useState('')
   const [completedJobId, setCompletedJobId] = useState('')
   const [liveJob, setLiveJob] = useState<LiveJobState | null>(null)
+  const [targetShelfGuide, setTargetShelfGuide] = useState<
+    (ShelfDirectionGuide & { mode: 'direction'; quadrant: string }) | (ShelfBoxGuide & { mode: 'box' }) | null
+  >(null)
   const [lastQualityIssue, setLastQualityIssue] = useState<{ reason: 'blurred' | 'glare'; at: number } | null>(null)
   const [shelfAnnouncement, setShelfAnnouncement] = useState<ShelfAnnouncement | null>(null)
   const [bookPops, setBookPops] = useState<BookPop[]>([])
@@ -160,6 +183,17 @@ export default function ScanPage() {
   const pendingFrameEncodesRef = useRef<Set<Promise<void>>>(new Set())
   const pendingUploadsRef = useRef<Set<Promise<void>>>(new Set())
   const [scanStats, setScanStats] = useState({ evaluated: 0, sent: 0, skipped: {} as Partial<Record<FrameSkipReason, number>> })
+  const observedTargetShelfId = useMemo(() => {
+    if (!targetBook) return null
+    for (const entry of liveJob?.catalog?.entries ?? []) {
+      for (const book of entry.books ?? []) {
+        if (book.book_lookup?.candidates?.some(candidate => candidate.library_db_id === targetBook.id && candidate.match_confidence === 'auto')) {
+          return entry.shelf_id ?? null
+        }
+      }
+    }
+    return null
+  }, [liveJob, targetBook])
   const navigate = useNavigate()
   const navigateToJob = (jobId: string) => {
     const path = `/jobs/${jobId}`
@@ -274,15 +308,17 @@ export default function ScanPage() {
       const time = new Date().toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
       setShelfEvents(events => [{ id: event.key, label, time }, ...events].slice(0, 6))
       setLiveStatus(`新しい棚のタグを確認しました。${label}の本を読み取っています。`)
-      setShelfAnnouncement({
-        id: now,
-        title: '新しい棚を検知しました！',
-        detail: `${label}のタグを確認しました。本の読み取り結果を処理しています。`,
-      })
+      if (!targetBook) {
+        setShelfAnnouncement({
+          id: now,
+          title: '新しい棚を検知しました！',
+          detail: `${label}のタグを確認しました。本の読み取り結果を処理しています。`,
+        })
+      }
     } else {
       setLiveStatus(`認識済みの棚を追跡中です。${label}`)
     }
-  }, [])
+  }, [targetBook])
 
   const detectFrame = useCallback(async () => {
     const sessionId = sessionRef.current?.id
@@ -370,6 +406,31 @@ export default function ScanPage() {
         setLiveStatus('次の棚を探しています。カメラをゆっくり動かしてください。')
       }
       trackDetectedTags(tags.map(tag => tag.tagId))
+      const shelfId = observedTargetShelfId ?? targetBook?.shelfId
+      const matchingTags = shelfId ? tags.flatMap(tag => {
+        const config = shelfTagMapRef.current.tags?.[String(tag.tagId)]
+        if (!tag.center || !tag.corners) return []
+        const quadrant = Object.entries(config?.quadrants ?? {}).find(([, id]) => id === shelfId)?.[0]
+        if (!quadrant) return []
+        const [first, second] = tag.corners
+        const angle = Math.atan2(second[1] - first[1], second[0] - first[0]) * 180 / Math.PI
+        const difference = config?.expected_angle_deg == null ? 0
+          : Math.abs((angle - config.expected_angle_deg + 540) % 360 - 180)
+        if (difference > (config?.angle_tolerance_deg ?? 35)) return []
+        return [{ center: tag.center, corners: tag.corners, quadrant }]
+      }) : []
+      const source: [number, number] = [canvas.width, canvas.height]
+      const viewport: [number, number] = [video.clientWidth, video.clientHeight]
+      const box = shelfBoxGuide(matchingTags, source, viewport)
+      if (box) {
+        setTargetShelfGuide({ mode: 'box', ...box })
+      } else if (matchingTags.length > 0) {
+        const first = matchingTags[0]
+        const guide = shelfDirectionGuide(first.center, first.corners, first.quadrant, source, viewport)
+        setTargetShelfGuide(guide ? { mode: 'direction', ...guide, quadrant: first.quadrant } : null)
+      } else {
+        setTargetShelfGuide(null)
+      }
 
       // Browser detection is usable on its own. The backend remains an
       // optional authoritative orientation/quadrant/shelf assignment pass.
@@ -377,6 +438,7 @@ export default function ScanPage() {
       if (!trackingEnabledRef.current || sessionRef.current?.id !== sessionId) return
       setOpencvState('fallback')
       browserDetectionActiveRef.current = false
+      setTargetShelfGuide(null)
       const detail = browserError instanceof Error ? browserError.message : String(browserError)
       setLiveStatus(serverDetectionUnavailableRef.current
         ? `棚のライブ検知を利用できません。送信画像の解析結果で確認してください。${detail}`
@@ -386,7 +448,7 @@ export default function ScanPage() {
       browserDetectingRef.current = false
       setBrowserDetecting(false)
     }
-  }, [detectFrame, trackDetectedTags])
+  }, [detectFrame, observedTargetShelfId, targetBook, trackDetectedTags])
 
   const stopTagDetection = useCallback(() => {
     trackingEnabledRef.current = false
@@ -399,6 +461,7 @@ export default function ScanPage() {
       browserDetectTimerRef.current = null
     }
     setActiveTagIds([])
+    setTargetShelfGuide(null)
     browserDetectionActiveRef.current = false
   }, [])
 
@@ -504,7 +567,11 @@ export default function ScanPage() {
     recordingStartInFlightRef.current = true
     setStartingRecording(true)
     try {
-      const res = await apiFetch('/api/scan/sessions', { method: 'POST', signal: requestAbort.signal })
+      const res = await apiFetch('/api/scan/sessions', {
+        method: 'POST', signal: requestAbort.signal,
+        ...(targetBook ? { headers: { 'Content-Type': 'application/json' } } : {}),
+        ...(targetBook ? { body: JSON.stringify({ target_book_id: targetBook.id, priority_shelf_id: targetBook.shelfId }) } : {}),
+      })
       if (!res.ok) throw new Error(await res.text())
       const session = await res.json() as { session_id: string; frame_upload_url_template?: string; frame_upload_url_endpoint?: string }
       if (generation !== sessionGenerationRef.current || requestAbort.signal.aborted || !videoRef.current?.srcObject) {
@@ -723,6 +790,7 @@ export default function ScanPage() {
     announcedTagSetsRef.current.clear()
     announcedBookKeysRef.current.clear()
     setBookPops([])
+    setTargetShelfGuide(null)
     setTrackedTags([])
     setShelfEvents([])
     setCurrentShelfLabel('スキャン待機中')
@@ -834,17 +902,17 @@ export default function ScanPage() {
     for (const entry of liveJob?.catalog?.entries ?? []) {
       for (const book of entry.books ?? []) {
         const candidate = book.book_lookup?.candidates?.[0]
-        const title = candidate?.title || book.title
-        if (!title) continue
         const libraryDbId = positiveLibraryDbId(candidate?.library_db_id) ? candidate?.library_db_id : null
         const definitive = candidate?.match_confidence === 'auto' && libraryDbId != null
-        const key = libraryDbId != null
+        const title = definitive ? candidate?.title || book.title : book.title
+        if (!title) continue
+        const key = definitive
           ? `id:${libraryDbId}`
           : `title:${title.trim().toLocaleLowerCase('ja-JP')}`
         const next = {
           key,
           title,
-          cover: candidate?.thumbnail || fallbackCoverForTitle(title),
+          cover: (definitive ? candidate?.thumbnail : undefined) || fallbackCoverForTitle(title),
           shelf: entry.shelf_id,
           matchLabel: definitive ? '自動照合' : candidate ? '照合候補・要確認' : '未照合',
           definitive,
@@ -867,6 +935,7 @@ export default function ScanPage() {
   // Each newly identified book pops up once with its cover and title, so the
   // operator can see what the scan actually recognized while still filming.
   useEffect(() => {
+    if (targetBook) return
     const fresh = liveBooks.filter(book => !announcedBookKeysRef.current.has(book.key))
     if (fresh.length === 0) return
     for (const book of fresh) announcedBookKeysRef.current.add(book.key)
@@ -878,7 +947,7 @@ export default function ScanPage() {
       const expired = new Set(pops.map(pop => pop.popId))
       setBookPops(current => current.filter(pop => !expired.has(pop.popId)))
     }, 3400)
-  }, [liveBooks])
+  }, [liveBooks, targetBook])
 
   const processedFrames = Number(liveJob?.processed_frames ?? 0)
   const cropTotal = Number(liveJob?.crop_total ?? 0)
@@ -887,6 +956,22 @@ export default function ScanPage() {
   const recentQualityIssue = lastQualityIssue && Date.now() - lastQualityIssue.at < 1800 ? lastQualityIssue.reason : null
   const statusLines = mode === 'upload'
     ? [file?.name ?? '画像または動画を選択', file ? 'このファイルを解析します' : '右下のボタンから選択できます']
+    : targetBook
+      ? completedJobId
+        ? ['スキャンを終了しました', '探している本の結果を確認できます。']
+        : targetMatchState === 'confirmed'
+          ? ['探している本を認識しました', '結果から棚の位置を確認してください。']
+          : targetMatchState === 'candidate'
+            ? ['探している本の候補があります', '照合結果を確認してください。']
+            : recentQualityIssue === 'blurred'
+              ? ['画像がぶれています', '1秒止めてください。']
+              : recentQualityIssue === 'glare'
+                ? ['光が反射しています', '角度を変えてください。']
+                : recording
+                  ? ['探している本を探しています', '棚の背表紙をゆっくり写してください。']
+                  : stopping
+                    ? ['スキャンを確定しています', '撮影した画像を送信中です。']
+                    : ['本を探すスキャン', 'カメラを開始してください。']
     : shelfAnnouncement
       ? [shelfAnnouncement.title, shelfAnnouncement.detail]
       : completedJobId
@@ -956,14 +1041,14 @@ export default function ScanPage() {
             </button>
           )}
 
-          <div
+          {!(mode === 'camera' && recording && targetBook && targetShelfGuide) && <div
             key={shelfAnnouncement?.id ?? `guide-${statusLines[0]}`}
             className={`absolute bottom-[204px] left-1/2 z-20 flex min-h-[63px] w-[calc(100%-56px)] max-w-[560px] -translate-x-1/2 flex-col justify-center rounded-xl bg-[#1e1e1e] px-4 py-3 text-base leading-[19px] text-white shadow-[20px_8px_0_rgba(30,30,30,0.83)] ${shelfAnnouncement ? 'scan-status-popup' : ''}`}
             aria-live={shelfAnnouncement ? 'polite' : 'off'}
           >
             <p>{statusLines[0]}</p>
             <p className="text-white/90">{statusLines[1]}</p>
-          </div>
+          </div>}
 
           {error && (
             <div className="absolute left-1/2 top-[104px] z-10 w-[300px] -translate-x-1/2 rounded-xl bg-red-700/90 px-4 py-3 text-sm text-white">
@@ -977,7 +1062,7 @@ export default function ScanPage() {
             </div>
           )}
 
-          {mode === 'camera' && liveBooks.length > 0 && (
+          {mode === 'camera' && !targetBook && liveBooks.length > 0 && (
             <p className="absolute right-7 top-6 z-10 rounded-full bg-black/60 px-3 py-2 text-xs font-semibold text-white backdrop-blur-md">
               {definitiveLiveBookCount > 0
                 ? `自動照合 ${definitiveLiveBookCount}冊`
@@ -1001,7 +1086,13 @@ export default function ScanPage() {
             </div>
           )}
 
-          {mode === 'camera' && bookPops.length > 0 && (
+          {mode === 'camera' && recording && targetBook && targetShelfGuide && (targetMatchState === 'searching' || observedTargetShelfId) && (
+            targetShelfGuide.mode === 'box'
+              ? <TargetShelfBoxOverlay guide={targetShelfGuide} recognized={Boolean(observedTargetShelfId)} />
+              : <TargetShelfDirectionOverlay guide={targetShelfGuide} recognized={Boolean(observedTargetShelfId)} />
+          )}
+
+          {mode === 'camera' && !targetBook && bookPops.length > 0 && (
             <div className="pointer-events-none absolute inset-x-7 bottom-[286px] z-20 mx-auto flex max-w-[560px] flex-col items-end gap-2" aria-label="認識した本">
               {bookPops.map(pop => (
                 <article key={pop.popId} className="scan-book-pop flex w-[196px] items-center gap-3 rounded-2xl bg-white/95 p-2 shadow-xl">
@@ -1019,7 +1110,7 @@ export default function ScanPage() {
             </div>
           )}
 
-          {mode === 'camera' && trackedTags.length > 0 && bookPops.length === 0 && (
+          {mode === 'camera' && !targetBook && trackedTags.length > 0 && bookPops.length === 0 && (
             <div className="absolute inset-x-7 bottom-[286px] z-10 mx-auto max-w-[560px]" aria-live="off">
               <div className="mb-2 flex items-center justify-between text-xs font-medium text-white drop-shadow">
                 <span>認識済みタグ</span>
@@ -1115,6 +1206,62 @@ export default function ScanPage() {
 
 function positiveLibraryDbId(value: unknown): value is number {
   return typeof value === 'number' && Number.isInteger(value) && value > 0
+}
+
+function TargetShelfBoxOverlay({ guide, recognized }: { guide: ShelfBoxGuide; recognized: boolean }) {
+  return (
+    <div data-testid="target-shelf-overlay" data-guide-mode="box" aria-label="探している本の棚を囲んでいます"
+      className="pointer-events-none absolute inset-0 z-20">
+      <div aria-hidden="true" data-testid="target-shelf-plate"
+        className="scan-target-plate absolute rounded-md border-[3px] border-[#7ee2bd] bg-[#7ee2bd]/45 shadow-[0_0_0_7px_rgba(126,226,189,0.16)]"
+        style={{ left: guide.left, top: guide.top, width: guide.width, height: guide.height }} />
+      <p className="absolute -translate-x-1/2 rounded-full border border-[#7ee2bd] bg-[#1e1e1e]/85 px-3 py-2 text-center text-xs font-semibold text-white shadow-lg backdrop-blur-md"
+        style={{ left: guide.left + guide.width / 2, top: guide.top + 12 }}>
+        {recognized ? '見つかった棚' : '探している棚'}
+      </p>
+    </div>
+  )
+}
+
+function TargetShelfDirectionOverlay({
+  guide, recognized,
+}: { guide: ShelfDirectionGuide & { quadrant: string }; recognized: boolean }) {
+  const dx = guide.tip.x - guide.origin.x
+  const dy = guide.tip.y - guide.origin.y
+  const length = Math.hypot(dx, dy)
+  const ux = dx / length
+  const uy = dy / length
+  const baseX = guide.tip.x - ux * 18
+  const baseY = guide.tip.y - uy * 18
+  const arrow = `${guide.tip.x},${guide.tip.y} ${baseX - uy * 9},${baseY + ux * 9} ${baseX + uy * 9},${baseY - ux * 9}`
+  const labelBelow = guide.tip.y + guide.plateSize / 2 + 10
+  const labelTop = labelBelow > guide.viewport.height - 42
+    ? guide.tip.y - guide.plateSize / 2 - 42 : labelBelow
+  const labelLeft = Math.max(90, Math.min(guide.viewport.width - 90, guide.tip.x))
+
+  return (
+    <div data-testid="target-shelf-overlay" aria-label={`探している本の棚はタグの${quadrantLabel(guide.quadrant)}方向`} className="pointer-events-none absolute inset-0 z-20">
+      <svg aria-hidden="true" className="absolute inset-0 size-full" viewBox={`0 0 ${guide.viewport.width} ${guide.viewport.height}`}>
+        <line x1={guide.origin.x} y1={guide.origin.y} x2={baseX} y2={baseY}
+          stroke="rgba(0,0,0,.6)" strokeWidth="10" strokeLinecap="round" />
+        <line x1={guide.origin.x} y1={guide.origin.y} x2={baseX} y2={baseY}
+          stroke="#7ee2bd" strokeWidth="5" strokeLinecap="round" />
+        <circle cx={guide.origin.x} cy={guide.origin.y} r="8" fill="#087f5b" stroke="#7ee2bd" strokeWidth="3" />
+        <polygon points={arrow} fill="#7ee2bd" stroke="#087f5b" strokeWidth="2" />
+      </svg>
+      <div aria-hidden="true" data-testid="target-shelf-plate"
+        className="scan-target-plate absolute -translate-x-1/2 -translate-y-1/2 rounded-md border-[3px] border-[#7ee2bd] bg-[#7ee2bd]/45 shadow-[0_0_0_7px_rgba(126,226,189,0.16)]"
+        style={{ left: guide.tip.x, top: guide.tip.y, width: guide.plateSize, height: guide.plateSize }} />
+      <p className="absolute w-[180px] -translate-x-1/2 rounded-full border border-[#7ee2bd] bg-[#1e1e1e]/85 px-3 py-2 text-center text-xs font-semibold text-white shadow-lg backdrop-blur-md"
+        style={{ left: labelLeft, top: labelTop }}>
+        {recognized ? '見つかった棚付近' : '探している棚付近'}
+      </p>
+    </div>
+  )
+}
+
+function quadrantLabel(quadrant: string): string {
+  return ({ top_left: '左上', top_right: '右上', bottom_left: '左下', bottom_right: '右下' } as Record<string, string>)[quadrant] ?? '近く'
 }
 
 function validateScanFile(file: File): string | null {

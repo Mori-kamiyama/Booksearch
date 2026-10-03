@@ -8,26 +8,7 @@ from pathlib import Path
 from typing import Any
 
 
-TITLE_OCR_PROMPT = """\
-この画像は本が入った箱、または本棚の一区画を切り出したものです。
-背表紙から読み取れる本のタイトルだけをすべて抽出し、JSON object だけを返してください。
-
-形式:
-{
-  "books": [
-    {
-      "title": "書名"
-    }
-  ]
-}
-
-ルール:
-- 1冊につき1エントリ
-- タイトルが読めない本は除外
-- 著者名、出版社、ISBNは抽出しない
-- タイトル以外の文字を無理に混ぜない
-- 説明文や Markdown は不要。JSON object だけ返す
-"""
+from scan_core import TITLE_OCR_PROMPT, parse_titles
 
 
 def strip_json_markdown(text: str) -> str:
@@ -59,13 +40,7 @@ def normalize_book(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def parse_title_ocr_response(text: str) -> list[dict[str, Any]]:
-    """Parse Gemini JSON into a list of title records."""
-
-    raw = strip_json_markdown(text or "")
-    data = json.loads(raw)
-    books = data.get("books", data if isinstance(data, list) else [])
-    normalized = [normalize_book(item) for item in books if isinstance(item, dict)]
-    return [book for book in normalized if book.get("title")]
+    return parse_titles(text)
 
 
 def gemini_title_ocr(
@@ -87,6 +62,7 @@ def gemini_title_ocr(
     client = genai.Client(api_key=api_key)
     response = client.models.generate_content(
         model=model,
+        config=types.GenerateContentConfig(temperature=0),
         contents=[
             types.Part.from_bytes(data=image_path.read_bytes(), mime_type=mime),
             prompt,

@@ -6,7 +6,10 @@ const cases = [
   {
     name: 'confirmed',
     status: 'done',
-    entries: [{ box_id: 'a', shelf_id: 'base-01-c02-r04', books: [{ title: targetBook.title, book_lookup: { candidates: [{ title: targetBook.title, library_db_id: 7, match_confidence: 'auto' }] } }] }],
+    entries: [{ box_id: 'a', shelf_id: 'base-01-c02-r04', books: [
+      { title: targetBook.title, book_lookup: { candidates: [{ title: targetBook.title, library_db_id: 7, match_confidence: 'auto' }] } },
+      { title: '周囲の別の本', book_lookup: { candidates: [{ title: '周囲の別の本', library_db_id: 9, match_confidence: 'auto' }] } },
+    ] }],
     label: '対象本を自動照合しました',
   },
   {
@@ -26,6 +29,15 @@ const cases = [
     status: 'processing',
     entries: [],
     label: '対象本を探索中',
+  },
+  {
+    name: 'processing-candidate',
+    status: 'processing',
+    entries: [{ box_id: 'a', shelf_id: 'base-01-c02-r04', books: [
+      { title: targetBook.title, book_lookup: { candidates: [{ title: targetBook.title, library_db_id: 7, match_confidence: 'auto' }] } },
+      { title: '周囲の別の本' },
+    ] }],
+    label: '対象本を自動照合しました',
   },
 ] as const
 
@@ -54,5 +66,7 @@ for (const fixture of cases) {
     await expect(status).toContainText(targetBook.title)
     await expect(status).toContainText(fixture.label)
     await expect(status.getByRole('link', { name: '対象本の詳細へ戻る', exact: true })).toHaveAttribute('href', `/books/${targetBook.id}?q=target&page=2`)
+    await expect(page.getByText('周囲の別の本')).toHaveCount(0)
+    await expect(page.getByText('件の認識候補')).toHaveCount(0)
   })
 }

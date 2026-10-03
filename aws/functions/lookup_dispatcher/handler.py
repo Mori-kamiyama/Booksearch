@@ -229,7 +229,14 @@ def dispatch_scan_task(job_id: str, task_id: str) -> None:
             dispatch(job_id)
             return
         manifest = json.loads(s3.get_object(Bucket=os.environ["BUCKET"], Key=task["manifest_key"])["Body"].read())
-        for entry in manifest.get("crops", []):
+        priority_shelf_id = job.get("priority_shelf_id")
+        crops = manifest.get("crops", [])
+        # Send the requested shelf first within a task and to its own worker
+        # pool, so unrelated OCR cannot occupy all of its capacity.
+        if priority_shelf_id:
+            crops = sorted(crops, key=lambda entry: (entry.get("shelf") or {}).get("shelf_id") != priority_shelf_id)
+        has_ocr = any(entry.get("requires_ocr", entry.get("status") == "ocr_pending") for entry in crops)
+        for entry in crops:
             if not entry.get("requires_ocr", entry.get("status") == "ocr_pending"):
                 continue
             crop = crops_table.get_item(Key={"job_id": job_id, "crop_id": entry["crop_id"]}, ConsistentRead=True).get("Item") or {}
@@ -237,13 +244,16 @@ def dispatch_scan_task(job_id: str, task_id: str) -> None:
                 continue
             if int(crop.get("ocr_lease_until", 0)) > int(time.time()):
                 continue
-            sqs.send_message(QueueUrl=os.environ["OCR_QUEUE_URL"], MessageBody=json.dumps({
+            is_priority = (priority_shelf_id and
+                           (crop.get("shelf") or {}).get("shelf_id") == priority_shelf_id)
+            queue_url = (os.environ.get("OCR_PRIORITY_QUEUE_URL") if is_priority else None) or os.environ["OCR_QUEUE_URL"]
+            sqs.send_message(QueueUrl=queue_url, MessageBody=json.dumps({
                 "job_id": job_id, "crop_id": crop["crop_id"], "crop_key": crop["crop_key"],
                 "task_id": task_id, "detection_token": task["detection_token"],
                 "fingerprint_scope": crop.get("fingerprint_scope"), "phash": crop.get("phash"),
                 "incremental": bool(task.get("incremental")),
             }))
-        if task.get("incremental"):
+        if task.get("incremental") and not has_ocr:
             sqs.send_message(QueueUrl=LOOKUP_QUEUE_URL, MessageBody=json.dumps({"job_id": job_id, "incremental": True}))
 
 

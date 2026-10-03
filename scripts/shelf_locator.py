@@ -16,6 +16,10 @@ from typing import Any
 
 import cv2
 import numpy as np
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from scan_core import tag_quadrant, tag_distance_limit
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -105,7 +109,11 @@ def _orientation_status(tag_id: int, angle_deg: float, mapping: dict[str, Any]) 
     tolerance = cfg.get("angle_tolerance_deg", 35)
     if expected is None:
         return "unknown"
-    return "ok" if _angle_delta(angle_deg, float(expected)) <= float(tolerance) else "mismatch"
+    return (
+        "ok"
+        if _angle_delta(angle_deg, float(expected)) <= float(tolerance)
+        else "mismatch"
+    )
 
 
 def detect_tags(image: np.ndarray, mapping: dict[str, Any]) -> list[DetectedTag]:
@@ -156,22 +164,13 @@ def _box_entry(box: Any) -> dict[str, Any]:
 
 
 def _quadrant(tag: DetectedTag, point: np.ndarray) -> str:
-    rel = point - tag.center
-    local_x = float(np.dot(rel, tag.x_axis))
-    local_y = float(np.dot(rel, tag.y_axis))
-    if local_x < 0 and local_y < 0:
-        return "top_left"
-    if local_x >= 0 and local_y < 0:
-        return "top_right"
-    if local_x >= 0 and local_y >= 0:
-        return "bottom_right"
-    return "bottom_left"
+    return tag_quadrant(tag.center, point, tag.x_axis, tag.y_axis)
 
 
 def _auto_max_distance(entry: dict[str, Any], mapping: dict[str, Any]) -> float:
-    x1, y1, x2, y2 = _entry_box(entry)
-    scale = float(mapping.get("auto_distance_scale", 1.25))
-    return max(x2 - x1, y2 - y1) * scale
+    return tag_distance_limit(
+        _entry_box(entry), float(mapping.get("auto_distance_scale", 1.25))
+    )
 
 
 def assign_boxes_to_shelves(
@@ -231,7 +230,9 @@ def assign_boxes_to_shelves(
                 votes=votes[:5],
             )
         else:
-            reason = "orientation_mismatch" if skipped_mismatch and tags else "no_mapped_tag"
+            reason = (
+                "orientation_mismatch" if skipped_mismatch and tags else "no_mapped_tag"
+            )
             assignments[box_id] = ShelfAssignment(
                 box_id=box_id,
                 shelf_id=None,
@@ -279,7 +280,10 @@ def annotate_catalog(
         tag_summaries[source_image] = [
             {
                 "tag_id": tag.tag_id,
-                "center": [round(float(tag.center[0]), 2), round(float(tag.center[1]), 2)],
+                "center": [
+                    round(float(tag.center[0]), 2),
+                    round(float(tag.center[1]), 2),
+                ],
                 "angle_deg": round(tag.angle_deg, 2),
                 "orientation_status": tag.orientation_status,
             }
@@ -302,10 +306,18 @@ def annotate_catalog(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="AprilTag mappingでcatalogのYOLO boxへ棚IDを付与します。")
-    parser.add_argument("--catalog", required=True, help="build_book_catalog.py の catalog.json")
-    parser.add_argument("--mapping", required=True, help="AprilTagと棚IDのマッピングJSON")
-    parser.add_argument("--output", default=None, help="出力JSON。省略時は入力catalogを上書き")
+    parser = argparse.ArgumentParser(
+        description="AprilTag mappingでcatalogのYOLO boxへ棚IDを付与します。"
+    )
+    parser.add_argument(
+        "--catalog", required=True, help="build_book_catalog.py の catalog.json"
+    )
+    parser.add_argument(
+        "--mapping", required=True, help="AprilTagと棚IDのマッピングJSON"
+    )
+    parser.add_argument(
+        "--output", default=None, help="出力JSON。省略時は入力catalogを上書き"
+    )
     parser.add_argument(
         "--max-tag-distance",
         type=float,
@@ -328,7 +340,9 @@ def main() -> int:
 
     catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
     annotated = annotate_catalog(catalog, mapping_path, args.max_tag_distance)
-    output_path.write_text(json.dumps(annotated, ensure_ascii=False, indent=2), encoding="utf-8")
+    output_path.write_text(
+        json.dumps(annotated, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
     assigned = sum(1 for entry in annotated.get("entries", []) if entry.get("shelf_id"))
     skipped = sum(

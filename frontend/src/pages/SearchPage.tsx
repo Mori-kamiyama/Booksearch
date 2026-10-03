@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react'
-import { ScanLine } from 'lucide-react'
-import { Link, useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
 import { CoverImage, SearchBar } from '../components/book'
 import { fallbackCoverForTitle } from '../data/figmaBooks'
 import { getFeaturedBooks, subscribeFeaturedBooks } from '../lib/api'
@@ -84,13 +83,6 @@ export default function SearchPage({ initialFeatured }: { initialFeatured?: Feat
           </div>
         )}
 
-        <div className="relative z-20 flex flex-col items-center gap-3 self-center md:fixed md:bottom-[67px] md:right-8 md:z-10">
-          <button type="button" onClick={() => navigate('/scan')} className="tap-card flex h-14 w-44 items-center justify-center gap-3 rounded-full bg-[#087f5b] px-6 text-lg text-white shadow-[0_10px_24px_rgba(8,127,91,0.22)] transition hover:bg-[#076b4d] md:size-[90px] md:bg-[#363636] md:p-0 md:hover:bg-[#222]" aria-label="本棚をスキャン">
-            <ScanLine className="size-7 text-white md:size-12" strokeWidth={1.8} />
-            <span className="md:hidden">スキャン</span>
-          </button>
-          <p className="text-center text-xs leading-[15px] text-ink md:hidden">本棚をスキャンして検索</p>
-        </div>
       </div>
       <RakutenCredit className="absolute bottom-1 left-2 z-20 text-[9px] text-ink-muted/60 underline-offset-2 hover:underline md:bottom-3 md:left-1/2 md:-translate-x-1/2 md:text-[10px]" />
     </div>

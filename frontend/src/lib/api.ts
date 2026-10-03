@@ -62,6 +62,19 @@ export async function searchBooks(query: string, limit = 30, offset = 0): Promis
   return (await searchBookResults(query, limit, offset)).books
 }
 
+export async function getSemanticAvailability(signal: AbortSignal): Promise<boolean> {
+  const data = await jsonFetch<{ available?: boolean }>('/api/books/semantic/status', { signal })
+  return data.available === true
+}
+
+export async function searchSemanticBooks(query: string, filters: string, exclude: number[], signal: AbortSignal): Promise<Book[]> {
+  const params = new URLSearchParams(filters)
+  params.set('q', query)
+  if (exclude.length) params.set('exclude', exclude.join(','))
+  const data = await jsonFetch<{ books?: Book[] }>(`/api/books/semantic?${params}`, { signal })
+  return data.books ?? []
+}
+
 export async function getBook(id: string | number): Promise<Book> {
   return jsonFetch<Book>(`/api/books/${id}`)
 }
