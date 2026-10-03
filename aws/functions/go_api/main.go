@@ -23,6 +23,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
+	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -40,6 +41,7 @@ var (
 	ddbClient            *dynamodb.Client
 	sqsClient            *sqs.Client
 	bookStore            *BookStore
+	semanticIndex        *SemanticIndex
 	staticAssets         string
 	googleBooksClient    = &http.Client{Timeout: 4 * time.Second}
 )
@@ -61,6 +63,17 @@ func init() {
 	sqsClient = sqs.NewFromConfig(cfg)
 
 	dbPath := filepath.Join(staticAssets, "library.db")
+	if indexPath := os.Getenv("SEMANTIC_INDEX_PATH"); indexPath != "" {
+		semanticIndex, err = LoadSemanticIndex(indexPath, dbPath)
+		if err != nil {
+			log.Printf("semantic search disabled: %v", err)
+			semanticIndex = nil
+		} else {
+			semanticCfg := cfg
+			semanticCfg.RetryMaxAttempts = 1
+			semanticIndex.Embedder = &BedrockEmbedder{Client: bedrockruntime.NewFromConfig(semanticCfg)}
+		}
+	}
 	if _, statErr := os.Stat(dbPath); statErr != nil {
 		log.Printf("warn: library.db stat failed at %s: %v", dbPath, statErr)
 	}
@@ -99,6 +112,10 @@ func handler(ctx context.Context, raw json.RawMessage) (events.APIGatewayV2HTTPR
 		return okJSON(200, map[string]any{"status": "ok", "time": time.Now().Unix()}), nil
 	case method == "GET" && path == "/api/books/search":
 		return searchBooks(ctx, req)
+	case method == "GET" && path == "/api/books/semantic/status":
+		return okJSON(200, map[string]any{"available": semanticIndex != nil && semanticIndex.Embedder != nil && bookStore != nil}), nil
+	case method == "GET" && path == "/api/books/semantic":
+		return semanticBooks(ctx, req)
 	case method == "GET" && path == "/api/books/featured":
 		return featuredBooks(ctx, req)
 	case method == "GET" && path == "/api/books/index":

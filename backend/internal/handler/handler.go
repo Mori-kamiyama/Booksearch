@@ -23,11 +23,12 @@ import (
 )
 
 type Handler struct {
-	Store   *db.Store
-	Jobs    *job.Manager
-	JobsDir string
-	TagMap  string
-	liveMu  sync.Mutex
+	Semantic *db.SemanticIndex
+	Store    *db.Store
+	Jobs     *job.Manager
+	JobsDir  string
+	TagMap   string
+	liveMu   sync.Mutex
 }
 
 func (h *Handler) SearchBooks(c *gin.Context) {

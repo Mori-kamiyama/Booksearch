@@ -206,6 +206,25 @@ func Open(path string) (*Store, error) {
 	return &Store{db: d, featuredCachePath: path + ".featured.json"}, nil
 }
 
+// Semantic indexes bind to a closed snapshot. Keep its bytes unchanged across
+// local restarts, just as the packaged Lambda catalog is read-only.
+func OpenSnapshot(path string) (*Store, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	uri := (&url.URL{Scheme: "file", Path: abs}).String() + "?mode=ro&immutable=1"
+	d, err := sql.Open("sqlite", uri)
+	if err != nil {
+		return nil, err
+	}
+	if err = d.Ping(); err != nil {
+		d.Close()
+		return nil, err
+	}
+	return &Store{db: d, featuredCachePath: path + ".featured.json"}, nil
+}
+
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) Search(query string, limit int) ([]Book, error) {

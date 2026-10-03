@@ -3,6 +3,11 @@ Transform: AWS::Serverless-2016-10-31
 Description: Booksearch (ホンノキ) backend on AWS — Lambdas + S3 + DynamoDB + SQS
 
 Parameters:
+  SemanticSearchEnabled:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Enable semantic suggestions after packaging a matching semantic-index.json.
   ProjectName:
     Type: String
     Default: booksearch
@@ -20,6 +25,7 @@ Parameters:
     Description: Optional email address for CloudWatch alarm and recovery notifications.
 
 Conditions:
+  UseSemanticSearch: !Equals [!Ref SemanticSearchEnabled, 'true']
   HasAlarmEmail: !Not [!Equals [!Ref AlarmEmail, '']]
 
 Globals:
@@ -567,7 +573,15 @@ Resources:
       Environment:
         Variables:
           YOLO_QUEUE_URL: !Ref YoloQueue
+          SEMANTIC_INDEX_PATH: !If [UseSemanticSearch, '/var/task/semantic-index.json', '']
       Policies:
+        - !If
+          - UseSemanticSearch
+          - Statement:
+              - Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/cohere.embed-multilingual-v3
+          - !Ref AWS::NoValue
         - DynamoDBCrudPolicy: { TableName: !Ref ScanTasksTable }
         - S3CrudPolicy: { BucketName: !Ref AssetsBucket }
         - DynamoDBCrudPolicy: { TableName: !Ref JobsTable }

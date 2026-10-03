@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -10,6 +11,8 @@ import (
 	"booksearch/backend/internal/handler"
 	"booksearch/backend/internal/job"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
 	"github.com/gin-gonic/gin"
 )
 
@@ -33,7 +36,27 @@ func main() {
 		log.Println("  uv run python scripts/build_library_db.py を先に実行してください")
 	}
 
-	store, err := db.Open(cfg.LibraryDB)
+	var semantic *db.SemanticIndex
+	if indexPath := os.Getenv("SEMANTIC_INDEX_PATH"); indexPath != "" {
+		var err error
+		semantic, err = db.LoadSemanticIndex(indexPath, cfg.LibraryDB)
+		if err == nil {
+			awsCfg, configErr := awsconfig.LoadDefaultConfig(context.Background(), awsconfig.WithRegion("ap-northeast-1"), awsconfig.WithRetryMaxAttempts(1))
+			err = configErr
+			if err == nil {
+				semantic.Embedder = &db.BedrockEmbedder{Client: bedrockruntime.NewFromConfig(awsCfg)}
+			}
+		}
+		if err != nil {
+			log.Printf("semantic search disabled: %v", err)
+			semantic = nil
+		}
+	}
+	openStore := db.Open
+	if semantic != nil {
+		openStore = db.OpenSnapshot
+	}
+	store, err := openStore(cfg.LibraryDB)
 	if err != nil {
 		log.Fatalf("DB を開けません: %v", err)
 	}
@@ -53,10 +76,11 @@ func main() {
 	}
 
 	h := &handler.Handler{
-		Store:   store,
-		Jobs:    jobs,
-		JobsDir: cfg.JobsDir,
-		TagMap:  cfg.AprilTagMap,
+		Semantic: semantic,
+		Store:    store,
+		Jobs:     jobs,
+		JobsDir:  cfg.JobsDir,
+		TagMap:   cfg.AprilTagMap,
 	}
 
 	gin.SetMode(gin.ReleaseMode)

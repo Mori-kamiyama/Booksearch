@@ -27,6 +27,7 @@ tests/test-results/
 
 # Data / outputs (大きいファイル)
 outputs/
+aws/functions/go_api/semantic-index.json
 runs/
 dataset/
 *.pt
