@@ -27,3 +27,11 @@
 ローカル版・AWS版のGo全テストと、本番のChromium/mobile Safariによる意味検索E2E 8件が成功。自動補完・詳細遷移、手動補完、除外ID・空条件・完全一致除外、該当なし4検索の空配列を確認した。
 
 更新前ZIPと設定は `outputs/deploy-20261003-semantic-rules/api-before.zip`、`configuration-before.json` に保存した。ルールを戻す場合は更新前ZIPをAPIに再配信する。索引を作り直す必要はない。
+
+## PR統合後の最終配信
+
+ユーザーの全PR統合・本番更新の指示で、PR #17をmasterへマージした。PR #15・#16は取り込み済みで、未マージPRは0件。統合コミット `340f8650fd7cdcbbbf6c02d74f9f4da37f6fb643` のAPIコードを `-buildvcs=false` で再ビルドし、本番へ配信した。フロントエンドとホーム生成のソースは配信済みの `95905e80` から変更がなく、更新は不要と確認した。
+
+最終APIのコードSHA256は `mjqfqx8BXj5oskhgV8l/WBO8yYGj6ysXMLYPTjJHmwE=`、ZIPは `s3://booksearch-277707097118-ap-northeast-1/releases/2026-10-03-final/api.zip`。AWSのActive/更新成功と、配信ZIPのハッシュ一致を確認。DB・索引・環境変数・768MB設定を維持した。配信後に本番Chromium/mobile Safariの28件がすべて成功し、ホーム・通常検索・日本語補正・意味検索・該当なし候補の除外を確認した。
+
+最終配信の更新前ZIP・設定、配信ZIP、統合元コミットと検証結果のmanifestは `outputs/deploy-20261003-final/` に保存した。復旧はこのディレクトリの `api-before.zip` をAPIへ再配信する。Git管理外の別作業や、未コミットのChatGPT連携変更はこの配信に含めていない。
