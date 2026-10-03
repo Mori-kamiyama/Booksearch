@@ -197,8 +197,11 @@ func (s *BookStore) SearchSemantic(ctx context.Context, index *SemanticIndex, qu
 		}
 		return scores[i].similarity > scores[j].similarity
 	})
-	books := []Book{}
-	for _, score := range scores[:min(5, len(scores))] {
+	ranked := []semanticRankedBook{}
+	for _, score := range scores[:min(semanticCandidateLimit, len(scores))] {
+		if score.similarity < semanticMinimumCosine {
+			break
+		}
 		if err = ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -207,8 +210,12 @@ func (s *BookStore) SearchSemantic(ctx context.Context, index *SemanticIndex, qu
 			return nil, err
 		}
 		if book != nil {
-			books = append(books, *book)
+			ranked = append(ranked, semanticRankedBook{Book: *book, Cosine: score.similarity})
 		}
+	}
+	books := []Book{}
+	for _, candidate := range rankSemanticBooks(query, ranked) {
+		books = append(books, candidate.Book)
 	}
 	return books, nil
 }

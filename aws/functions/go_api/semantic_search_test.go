@@ -62,18 +62,18 @@ func TestSemanticKeepsFiltersAndExcludesBeforeEmbedding(t *testing.T) {
 		{1, []float64{0.8, 0.6}}, {2, []float64{1, 0}}, {3, []float64{1, 0}}, {4, []float64{1, 0}},
 	}}
 	filters := SearchFilters{Author: "著者", Topic: "topic", MinPages: 100, MaxPages: 200, Level: "beginner"}
-	books, err := store.SearchSemantic(context.Background(), index, "関連語", filters, nil)
+	books, err := store.SearchSemantic(context.Background(), index, "著者", filters, nil)
 	if err != nil || len(books) != 1 || books[0].ID != 1 {
 		t.Fatalf("filter leakage: %+v %v", books, err)
 	}
-	books, err = store.SearchSemantic(context.Background(), index, "関連語", filters, map[int]bool{1: true})
+	books, err = store.SearchSemantic(context.Background(), index, "著者", filters, map[int]bool{1: true})
 	if err != nil || len(books) != 0 || provider.calls != 1 {
 		t.Fatalf("empty candidates called model: %+v %v calls=%d", books, err, provider.calls)
 	}
 	if _, err = raw.Exec("DROP TABLE book_topics"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = store.SearchSemantic(context.Background(), index, "関連語", filters, nil); err == nil {
+	if _, err = store.SearchSemantic(context.Background(), index, "著者", filters, nil); err == nil {
 		t.Fatal("silently dropped filters")
 	}
 }
