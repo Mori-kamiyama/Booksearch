@@ -568,7 +568,7 @@ Resources:
       Handler: bootstrap
       Runtime: provided.al2023
       Architectures: [arm64]
-      MemorySize: 512
+      MemorySize: !If [UseSemanticSearch, 768, 512]
       Timeout: 30
       Environment:
         Variables:
