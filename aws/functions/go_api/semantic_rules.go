@@ -13,7 +13,10 @@ import (
 
 // These are conservative starting points for this model/catalog, not probabilities.
 const semanticMinimumCosine = 0.50
-const semanticMinimumCoverage = 0.60
+
+// Weak vector matches need some textual evidence; stronger matches may use
+// different wording. Neither threshold is a calibrated relevance probability.
+const semanticUnanchoredMinimumCosine = 0.60
 const semanticCandidateLimit = 50
 
 var semanticTokenizer = func() *tokenizer.Tokenizer {
@@ -99,13 +102,17 @@ func semanticQueryTerms(query string) []semanticTerm {
 	// must never be accepted just because a nutrition book contains 食).
 	for _, variants := range semanticAliases {
 		matched := false
+		required := false
 		for _, variant := range variants {
 			if semanticLiteralContains(text, variant) {
 				matched = true
+				// Explicit Latin identifiers (LLM/UI/etc.) remain constraints;
+				// natural-language concepts are allowed to match semantically.
+				required = required || semanticLatinWord.FindString(variant) == variant
 			}
 		}
 		if matched {
-			add(variants, true)
+			add(variants, required)
 			for _, variant := range variants {
 				// Latin words are removed separately with token boundaries below.
 				if variant != "ui" {
@@ -145,7 +152,6 @@ type semanticRankedBook struct {
 	Cosine     float64 `json:"cosine"`
 	Score      float64 `json:"score"`
 	Coverage   float64 `json:"coverage"`
-	TitleMatch float64 `json:"title_match"`
 }
 
 func semanticCoverage(terms []semanticTerm, text string) (float64, bool) {
@@ -171,11 +177,14 @@ func semanticCoverage(terms []semanticTerm, text string) (float64, bool) {
 	return float64(matches) / float64(len(terms)), anchorsOK
 }
 
-// Eligibility and order are separate: boosts cannot rescue unsupported books.
+// Rules only triage candidates; surviving books keep their vector order.
 // Only verified metadata returned by GetByID is used, never generated guesses.
 func rankSemanticBooks(query string, candidates []semanticRankedBook) []semanticRankedBook {
 	terms := semanticQueryTerms(query)
 	result := []semanticRankedBook{}
+	if len(terms) == 0 {
+		return result
+	}
 	for _, candidate := range candidates {
 		if math.IsNaN(candidate.Cosine) || math.IsInf(candidate.Cosine, 0) || candidate.Cosine < semanticMinimumCosine {
 			continue
@@ -186,16 +195,11 @@ func rankSemanticBooks(query string, candidates []semanticRankedBook) []semantic
 			text += "\n" + semanticText(*candidate.Book.Description)
 		}
 		coverage, anchorsOK := semanticCoverage(terms, text)
-		if !anchorsOK || coverage < semanticMinimumCoverage {
+		if !anchorsOK || (coverage == 0 && candidate.Cosine < semanticUnanchoredMinimumCosine) {
 			continue
 		}
 		candidate.Coverage = coverage
-		candidate.TitleMatch, _ = semanticCoverage(terms, title)
-		candidate.Score = candidate.Cosine + 0.12*candidate.TitleMatch + 0.06*coverage
-		if candidate.Book.Level != nil && *candidate.Book.Level == "beginner" &&
-			(strings.Contains(query, "初心者") || strings.Contains(query, "入門")) {
-			candidate.Score += 0.03
-		}
+		candidate.Score = candidate.Cosine
 		result = append(result, candidate)
 	}
 	sort.Slice(result, func(i, j int) bool {

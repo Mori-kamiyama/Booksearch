@@ -15,7 +15,7 @@ func TestSemanticRulesRejectUnsupportedCandidates(t *testing.T) {
 		cos   float64
 		keep  bool
 	}{
-		{"離乳食", Book{Title: "食と栄養", Description: semanticString("食品と食事の科学")}, 0.9, false},
+		{"離乳食", Book{Title: "食と栄養", Description: semanticString("食品と食事の科学")}, 0.56, false},
 		{"zxqv987qqq", Book{Title: "囲碁AI入門"}, 0.9, false},
 		{"C++", Book{Title: "C#プログラミング"}, 0.9, false},
 		{"C++", Book{Title: "Cプログラミング"}, 0.9, false},
@@ -26,10 +26,12 @@ func TestSemanticRulesRejectUnsupportedCandidates(t *testing.T) {
 		{"LLM", Book{Title: "はじめてのLinux"}, 0.9, false},
 		{"UI", Book{Title: "Building tools"}, 0.9, false},
 		{"UI", Book{Title: "インタフェースデザイン"}, 0.6, true},
-		{"使いやすいアプリの画面を設計したい", Book{Title: "アプリ入門", Description: semanticString("アプリの画面を設計する方法")}, 0.9, false},
+		{"使いやすいアプリの画面を設計したい", Book{Title: "アプリ入門", Description: semanticString("アプリの画面を設計する方法")}, 0.9, true},
 		{"Pythonでデータを分析したい", Book{Title: "Javaによるデータ分析"}, 0.9, false},
 		{"データクレンジング", Book{Title: "pandas前処理", Description: &description}, 0.55, true},
 		{"データクレンジング", Book{Title: "pandas前処理", Description: &description}, 0.49, false},
+		{"持ち運びしやすい計算機", Book{Title: "ノートパソコンの選び方"}, 0.65, true},
+		{"持ち運びしやすい計算機", Book{Title: "ノートパソコンの選び方"}, 0.55, false},
 		{"本のおすすめ", Book{Title: "おすすめの本"}, 0.9, false},
 	}
 	for _, tt := range tests {
@@ -58,14 +60,14 @@ func TestSemanticEmbeddingQueryResolvesKanaAndAcronyms(t *testing.T) {
 	}
 }
 
-func TestSemanticRulesPreferTitleEvidenceWithoutRescuingLowSimilarity(t *testing.T) {
+func TestSemanticTriagePreservesVectorOrderAndMinimumSimilarity(t *testing.T) {
 	books := []semanticRankedBook{
 		{Book: Book{ID: 1, Title: "技術の概説", Description: semanticString("データクレンジングを扱う")}, Cosine: 0.59},
 		{Book: Book{ID: 2, Title: "データクレンジングの実践"}, Cosine: 0.55},
 		{Book: Book{ID: 3, Title: "データクレンジングの教科書"}, Cosine: 0.49},
 	}
 	got := rankSemanticBooks("データクレンジング", books)
-	if len(got) != 2 || got[0].Book.ID != 2 || got[1].Book.ID != 1 {
+	if len(got) != 2 || got[0].Book.ID != 1 || got[1].Book.ID != 2 {
 		t.Fatalf("unexpected ranking: %+v", got)
 	}
 }
