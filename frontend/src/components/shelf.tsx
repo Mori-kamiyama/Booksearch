@@ -277,7 +277,7 @@ export function ShelfMiniMap({ shelfId }: { shelfId: string }) {
 
 export function useGoToShelf() {
   const navigate = useNavigate()
-  return (shelfId: string) => navigate(`/map/${encodeURIComponent(shelfId)}`)
+  return (shelfId: string) => navigate(`/index?shelf=${encodeURIComponent(shelfId)}`)
 }
 
 function unitName(unitId: string): string {

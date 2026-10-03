@@ -140,7 +140,7 @@ export function SiteFooter() {
           <div className="flex flex-wrap justify-center gap-x-6 gap-y-2 text-sm font-medium">
             <Link to="/" className="hover:text-primary transition-colors">さがす</Link>
             <Link to="/index" className="hover:text-primary transition-colors">索引</Link>
-            <Link to="/scan" className="hover:text-primary transition-colors">スキャン</Link>
+            <Link to="/scan" className="hover:text-primary transition-colors">本棚を一括登録</Link>
           </div>
         </div>
         <div className="mt-8 border-t border-line/20 pt-6 text-center text-xs text-ink-muted/50">
@@ -228,10 +228,9 @@ function MenuDrawer({ onClose }: { onClose: () => void }) {
   const items = [
     { to: '/', label: 'さがす' },
     { to: '/index', label: '索引' },
-    { to: '/scan', label: 'スキャン' },
   ]
   const adminItems = [
-    { to: '/map', label: '図書室マップ' },
+    { to: '/scan', label: '本棚を一括登録' },
     { to: '/admin/shelves', label: '棚の管理' },
     { to: '/admin/tags', label: 'タグ配置' },
   ]

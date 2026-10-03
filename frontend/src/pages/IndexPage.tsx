@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { ErrorState } from '../components/common'
 import { CoverImage } from '../components/book'
-import { LibraryMap } from '../components/shelf'
+import { LibraryMap, ShelfLocationLabel } from '../components/shelf'
 import { apiUrl, getIndexBooks, getShelfCandidates } from '../lib/api'
 import type { ShelfCandidate } from '../lib/types'
 import { formatShelfLabel, getSlot, getUnit, isDisplayCellEmpty, shelfDensityLevel, shelfIdForDisplayCell } from '../lib/shelf'
@@ -89,7 +89,17 @@ export default function IndexPage() {
 
   const changeView = (next: ViewMode) => {
     setView(next)
-    setParams(next === 'map' ? {} : { view: next }, { replace: true })
+    const nextParams = new URLSearchParams(params)
+    if (next === 'map') nextParams.delete('view')
+    else nextParams.set('view', next)
+    setParams(nextParams, { replace: true })
+  }
+
+  const changeShelf = (shelfId: string | null) => {
+    const nextParams = new URLSearchParams(params)
+    if (shelfId) nextParams.set('shelf', shelfId)
+    else nextParams.delete('shelf')
+    setParams(nextParams, { replace: true })
   }
 
   return (
@@ -106,7 +116,7 @@ export default function IndexPage() {
         {view === 'map' ? (
           candidatesLoading && candidates.length === 0 ? <IndexSkeleton />
             : candidatesError && candidates.length === 0 ? <div className="w-full"><ErrorState message="棚の索引を読み込めませんでした。" onRetry={loadCandidates} /></div>
-              : <MapView candidates={candidates} />
+              : <MapView candidates={candidates} requestedShelf={getSlot(params.get('shelf') ?? undefined)?.shelf_id ?? null} onShelfChange={changeShelf} />
         ) : (
           indexBooksLoading && indexBooks.length === 0 ? <IndexSkeleton />
             : indexBooksError && indexBooks.length === 0 ? <div className="w-full"><ErrorState message="蔵書の索引を読み込めませんでした。" onRetry={loadIndexBooks} /></div>
@@ -134,10 +144,23 @@ function ViewToggle({ value, onChange }: { value: ViewMode; onChange: (view: Vie
   )
 }
 
-function MapView({ candidates }: { candidates: ShelfCandidate[] }) {
-  const [selectedUnit, setSelectedUnit] = useState('base-01')
-  const [selectedShelf, setSelectedShelf] = useState<string | null>(null)
-  const initializedFromCandidates = useRef(false)
+function MapView({ candidates, requestedShelf, onShelfChange }: {
+  candidates: ShelfCandidate[]
+  requestedShelf: string | null
+  onShelfChange: (shelfId: string | null) => void
+}) {
+  const [selectedUnit, setSelectedUnit] = useState(getSlot(requestedShelf ?? undefined)?.unit ?? 'base-01')
+  const [selectedShelf, setSelectedShelf] = useState<string | null>(requestedShelf)
+  const initializedFromCandidates = useRef(Boolean(requestedShelf))
+
+  useEffect(() => {
+    setSelectedShelf(requestedShelf)
+    const unitId = getSlot(requestedShelf ?? undefined)?.unit
+    if (unitId) {
+      setSelectedUnit(unitId)
+      initializedFromCandidates.current = true
+    }
+  }, [requestedShelf])
 
   // Candidates arrive asynchronously, so initialize once after the first
   // successful load without overwriting a location the user subsequently picks.
@@ -166,6 +189,12 @@ function MapView({ candidates }: { candidates: ShelfCandidate[] }) {
   const selectUnit = (unitId: string) => {
     setSelectedUnit(unitId)
     setSelectedShelf(null)
+    onShelfChange(null)
+  }
+
+  const selectShelf = (shelfId: string | null) => {
+    setSelectedShelf(shelfId)
+    onShelfChange(shelfId)
   }
 
   return (
@@ -174,9 +203,10 @@ function MapView({ candidates }: { candidates: ShelfCandidate[] }) {
         <h2 className="w-full text-base font-semibold leading-[19px] text-ink">MAP</h2>
         <div className="flex flex-col items-center gap-5 md:gap-6">
           <LibraryMap selectedUnit={selectedUnit} unitCounts={unitCounts} selectionTone="charcoal" onUnitClick={selectUnit} size="lg" />
-          <div className="flex w-full max-w-[560px] flex-col items-center gap-2">
+          <div className="flex w-full min-w-0 flex-col items-center gap-2">
             <p className="w-full text-xs font-semibold text-ink-muted md:text-sm">棚の区画を選択</p>
-            <UnitCellGrid unitId={selectedUnit} cellCounts={cellCounts} selectedShelf={selectedShelf} onSelectShelf={setSelectedShelf} />
+            <UnitCellGrid unitId={selectedUnit} cellCounts={cellCounts} selectedShelf={selectedShelf} onSelectShelf={selectShelf} />
+            {selectedShelf && <ShelfLocationLabel shelfId={selectedShelf} size="sm" />}
             <p className="w-full text-[11px] text-ink-faint md:text-xs">本が多い区画ほど緑が少し濃くなります</p>
           </div>
         </div>
@@ -189,7 +219,7 @@ function MapView({ candidates }: { candidates: ShelfCandidate[] }) {
             {selectedShelf ? 'この区画の本はまだ登録されていません。' : 'この棚の本はまだ登録されていません。'}
           </p>
         ) : (
-          <BookGrid books={shelfBooks} />
+          <BookGrid books={shelfBooks} shelfId={selectedShelf} />
         )}
       </section>
     </>
@@ -210,12 +240,13 @@ function UnitCellGrid({ unitId, cellCounts, selectedShelf, onSelectShelf }: {
   const gap = 4
   const gridWidth = unit.cols * cellSize + (unit.cols - 1) * gap
   return (
-    <div className="w-full overflow-x-auto pb-1">
+    <div className="w-full min-w-0 overflow-x-auto pb-1">
       <div
         className="grid gap-1"
         style={{
-          gridTemplateColumns: `repeat(${unit.cols}, ${cellSize}px)`,
-          width: `${gridWidth}px`,
+          gridTemplateColumns: `repeat(${unit.cols}, minmax(${cellSize}px, 1fr))`,
+          width: '100%',
+          minWidth: `${gridWidth}px`,
         }}
       >
         {Array.from({ length: unit.rows }, (_, rowIndex) => {
@@ -286,12 +317,12 @@ function ListView({ books }: { books: IndexBook[] }) {
   )
 }
 
-function BookGrid({ books }: { books: IndexBook[] }) {
+function BookGrid({ books, shelfId }: { books: IndexBook[]; shelfId?: string | null }) {
   const navigate = useNavigate()
   return (
     <div className="grid w-full grid-cols-3 gap-x-[5px] gap-y-[13px] md:grid-cols-4 md:gap-x-8 md:gap-y-7">
       {books.map(book => (
-        <button key={book.id} type="button" onClick={() => navigate(`/books/${book.id}`)} className="tap-card flex min-w-0 flex-col items-center gap-[5px] rounded-lg md:gap-[7px]">
+        <button key={book.id} type="button" onClick={() => navigate(`/books/${book.id}${shelfId ? `?shelf=${encodeURIComponent(shelfId)}` : ''}`)} className="tap-card flex min-w-0 flex-col items-center gap-[5px] rounded-lg md:gap-[7px]">
           <div className="flex h-[160px] w-[93px] max-w-full items-end justify-center md:h-[150px] md:w-[112px]">
             <CoverImage
               src={book.cover}

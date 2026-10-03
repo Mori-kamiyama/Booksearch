@@ -11,7 +11,6 @@ const ShelvesPage = lazy(() => import('./pages/ShelvesPage'))
 const TagPlacementPage = lazy(() => import('./pages/TagPlacementPage'))
 const BookDetailPage = lazy(() => import('./pages/BookDetailPage'))
 const IndexPage = lazy(() => import('./pages/IndexPage'))
-const MapPage = lazy(() => import('./pages/MapPage'))
 const ShelfDetailPage = lazy(() => import('./pages/ShelfDetailPage'))
 
 export default function App({ initialFeatured }: { initialFeatured?: FeaturedSnapshot | null } = {}) {
@@ -85,7 +84,7 @@ function AppShell({ initialFeatured }: { initialFeatured?: FeaturedSnapshot | nu
             <Route path="/ai-search" element={<Navigate to="/" replace />} />
             <Route path="/books/:id" element={<BookDetailPage />} />
             <Route path="/index" element={<IndexPage />} />
-            <Route path="/map" element={<MapPage />} />
+            <Route path="/map" element={<Navigate to="/index" replace />} />
             <Route path="/map/:shelfId" element={<ShelfDetailPage />} />
             <Route path="/scan" element={<ScanPage />} />
             <Route path="/jobs/:id" element={<JobPage />} />

@@ -3,11 +3,13 @@ import { test, expect } from '@playwright/test'
 // Opt-in live smoke checks. Deterministic UI/error/race tests are in ui-regression.
 const API_BASE = process.env.API_BASE
 
-test('home exposes a labelled search and scan action', async ({ page }) => {
+test('home exposes search and a separate batch registration menu action', async ({ page }) => {
   await page.goto('/')
   await expect(page.getByRole('combobox', { name: '本を検索' })).toBeVisible()
   await expect(page.getByRole('button', { name: '検索', exact: true })).toBeVisible()
-  await expect(page.getByRole('button', { name: '本棚をスキャン', exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: '本棚をスキャン', exact: true })).toHaveCount(0)
+  await page.getByRole('button', { name: 'メニューを開く' }).click()
+  await expect(page.getByRole('link', { name: '本棚を一括登録', exact: true })).toHaveAttribute('href', '/scan')
 })
 
 test('search handles an absent title', async ({ page }) => {
