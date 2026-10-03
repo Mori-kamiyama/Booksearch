@@ -169,7 +169,7 @@ func (s *Store) SearchSemantic(ctx context.Context, index *SemanticIndex, query 
 	default:
 		return nil, fmt.Errorf("semantic search busy")
 	}
-	vector, err := index.Embedder.Embed(ctx, query)
+	vector, err := index.Embedder.Embed(ctx, semanticEmbeddingQuery(query))
 	if err != nil {
 		return nil, err
 	}

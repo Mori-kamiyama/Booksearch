@@ -20,6 +20,10 @@ func TestSemanticRulesRejectUnsupportedCandidates(t *testing.T) {
 		{"C++", Book{Title: "C#プログラミング"}, 0.9, false},
 		{"C++", Book{Title: "Cプログラミング"}, 0.9, false},
 		{"C++", Book{Title: "C++入門"}, 0.6, true},
+		{"ぷろぐらみんぐ入門", Book{Title: "プログラミング入門"}, 0.6, true},
+		{"LLM", Book{Title: "BERTによる自然言語処理入門", Description: semanticString("言語モデルを学ぶ")}, 0.6, true},
+		{"LLM", Book{Title: "大規模スクラムLarge-Scale Scrum"}, 0.9, false},
+		{"LLM", Book{Title: "はじめてのLinux"}, 0.9, false},
 		{"UI", Book{Title: "Building tools"}, 0.9, false},
 		{"UI", Book{Title: "インタフェースデザイン"}, 0.6, true},
 		{"使いやすいアプリの画面を設計したい", Book{Title: "アプリ入門", Description: semanticString("アプリの画面を設計する方法")}, 0.9, false},
@@ -39,6 +43,20 @@ func TestSemanticRulesRejectUnsupportedCandidates(t *testing.T) {
 }
 
 func semanticString(value string) *string { return &value }
+
+func TestSemanticEmbeddingQueryResolvesKanaAndAcronyms(t *testing.T) {
+	for query, want := range map[string]string{
+		"ぷろぐらみんぐ入門": "プログラミング入門",
+		"LLM":       "大規模言語モデル LLM",
+		"llm 入門":    "大規模言語モデル LLM 入門",
+		"C++":       "C++",
+		"billmeyer": "billmeyer",
+	} {
+		if got := semanticEmbeddingQuery(query); got != want {
+			t.Errorf("%q: got %q want %q", query, got, want)
+		}
+	}
+}
 
 func TestSemanticRulesPreferTitleEvidenceWithoutRescuingLowSimilarity(t *testing.T) {
 	books := []semanticRankedBook{

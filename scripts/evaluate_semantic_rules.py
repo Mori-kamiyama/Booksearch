@@ -16,6 +16,8 @@ from evaluate_semantic_search import MODEL, read_catalog
 
 # Regression checks, not human relevance labels or an accuracy benchmark.
 CASES = [
+    {'query': 'ぷろぐらみんぐ入門', 'embedding_query': 'プログラミング入門'},
+    {'query': 'LLM', 'embedding_query': '大規模言語モデル LLM'},
     {'query': 'ユーザビリティ', 'expected_first': 'ユーザビリティテスト実践ガイドブック'},
     {'query': 'データクレンジング', 'expected_first': '現場で使える!pandas (パンダス) データ前処理入門'},
     {'query': 'リクルーティング'},
@@ -47,7 +49,7 @@ def main():
     vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
     fixtures = []
     for case in CASES:
-        key = hashlib.sha256(json.dumps([MODEL, 'search_query', case['query']], ensure_ascii=False).encode()).hexdigest()
+        key = hashlib.sha256(json.dumps([MODEL, 'search_query', case.get('embedding_query', case['query'])], ensure_ascii=False).encode()).hexdigest()
         # Missing embeddings fail explicitly; this script never creates new ones.
         query = np.asarray(json.loads((args.cache / f'{key}.json').read_text()))
         query /= np.linalg.norm(query)

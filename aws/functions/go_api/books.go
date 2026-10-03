@@ -93,6 +93,12 @@ func searchWhere(terms []searchTerm) (string, []any) {
 	clauses := make([]string, 0, len(terms))
 	args := make([]any, 0, len(terms)*3)
 	for _, term := range terms {
+		if searchAcronym(term.normalized) {
+			clause, values := acronymSearchWhere(term.normalized)
+			clauses = append(clauses, clause)
+			args = append(args, values...)
+			continue
+		}
 		pattern := "%" + escapeLike(term.normalized) + "%"
 		isbnPattern := pattern
 		if term.isbn != "" {
