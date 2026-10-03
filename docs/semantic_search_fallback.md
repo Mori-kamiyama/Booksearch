@@ -31,7 +31,7 @@ SEMANTIC_INDEX_PATH="$PWD/outputs/semantic-serving/index.json" \
   go -C backend run . --library-db "$PWD/outputs/semantic-serving/library.db"
 ```
 
-AWS用は `prepare_assets.sh` で通常のカタログ生成を終えてからベクトルを生成し、生成したDBと索引を必ず組で配置する。Makefileは索引があるときだけ同梱する。SAMの `SemanticSearchEnabled` は既定false。true時のみ索引パスと対象モデル1つのInvokeModel権限を付ける。本番デプロイは未実施。
+AWS用は `prepare_assets.sh` で通常のカタログ生成を終えてからベクトルを生成し、生成したDBと索引を必ず組で配置する。Makefileは索引があるときだけ同梱する。SAMの `SemanticSearchEnabled` は既定false。true時のみ索引パスと対象モデル1つのInvokeModel権限を付ける。2026-10-03にAPIとUIのコードを本番へ反映したが、索引・環境変数・InvokeModel権限は追加せず、意味検索は無効。SAMテンプレート自体は未反映で、既存の手動管理リソースとの整合が必要。詳細は[リリース記録](search_release_20261003.md)を参照。
 
 ```sh
 cp outputs/semantic-serving/library.db aws/functions/go_api/library.db
