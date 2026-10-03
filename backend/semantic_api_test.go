@@ -42,7 +42,7 @@ func TestSemanticAPIAndSnapshotRestarts(t *testing.T) {
 	a := make([]float64, 1024)
 	a[0] = 1
 	b := make([]float64, 1024)
-	b[1] = 1
+	b[0] = 1
 	artifact := db.SemanticIndex{Version: 1, Model: db.SemanticModel, CatalogSHA256: fmt.Sprintf("%x", sha256.Sum256(raw)), Books: []db.SemanticVector{{ID: 1, Vector: a}, {ID: 2, Vector: b}}}
 	encoded, err := json.Marshal(artifact)
 	if err != nil {
@@ -73,7 +73,7 @@ func TestSemanticAPIAndSnapshotRestarts(t *testing.T) {
 	if response := request("/api/books/semantic/status"); response.Code != 200 || response.Body.String() != `{"available":true}` {
 		t.Fatalf("availability: %s", response.Body)
 	}
-	response := request("/api/books/semantic?q=design&exclude=1")
+	response := request("/api/books/semantic?q=Python&exclude=1")
 	var result struct {
 		Books []db.Book `json:"books"`
 	}
@@ -93,6 +93,9 @@ func TestSemanticAPIAndSnapshotRestarts(t *testing.T) {
 	}
 	if provider.calls != 1 {
 		t.Fatalf("invalid queries called model: %d", provider.calls)
+	}
+	if response := request("/api/books/semantic?q=design"); response.Code != 200 || response.Body.String() != `{"books":[]}` {
+		t.Fatalf("unsupported high-similarity books returned: %d %s", response.Code, response.Body)
 	}
 	provider.err = errors.New("private provider failure")
 	if response := request("/api/books/semantic?q=design"); response.Code != 503 {

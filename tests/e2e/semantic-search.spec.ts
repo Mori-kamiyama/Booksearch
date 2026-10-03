@@ -47,3 +47,13 @@ test('semantic API respects exclusions, empty filters and exact queries', async 
   const exact = await request.get(`${api}/api/books/semantic`, { params: { q: 'ユーザビリティ', exact: '1' } })
   expect(exact.status()).toBe(400)
 })
+
+test('semantic API leaves unsupported queries empty', async ({ request }) => {
+  const api = process.env.API_BASE
+  test.skip(!api, 'Set API_BASE for API acceptance checks')
+  for (const q of ['離乳食', 'zxqv987qqq', 'ワープエンジンの修理手順', 'ドラゴンの飼育方法']) {
+    const response = await request.get(`${api}/api/books/semantic`, { params: { q } })
+    expect(response.ok(), q).toBeTruthy()
+    expect((await response.json()).books, q).toEqual([])
+  }
+})
