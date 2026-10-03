@@ -57,3 +57,32 @@ test('semantic API leaves unsupported queries empty', async ({ request }) => {
     expect((await response.json()).books, q).toEqual([])
   }
 })
+
+test('hiragana programming search keeps keyword and semantic matches', async ({ request }) => {
+  const api = process.env.API_BASE
+  test.skip(!api, 'Set API_BASE for API acceptance checks')
+  const keyword = await request.get(`${api}/api/books/search`, { params: { q: 'ぷろぐらみんぐ入門', limit: '5' } })
+  expect(keyword.ok()).toBeTruthy()
+  expect((await keyword.json()).total).toBeGreaterThan(0)
+  const semantic = await request.get(`${api}/api/books/semantic`, { params: { q: 'ぷろぐらみんぐ入門' } })
+  expect(semantic.ok()).toBeTruthy()
+  expect((await semantic.json()).books.length).toBeGreaterThan(0)
+})
+
+test('LLM search automatically shows grounded language model books', async ({ page, request }) => {
+  const api = process.env.API_BASE
+  test.skip(!api, 'Set API_BASE for API acceptance checks')
+  const keyword = await request.get(`${api}/api/books/search`, { params: { q: 'LLM', limit: '5' } })
+  expect(keyword.ok()).toBeTruthy()
+  // No dedicated LLM titles in the current catalog; English-name substrings
+  // must not masquerade as hits and prevent automatic semantic fallback.
+  expect((await keyword.json()).total).toBe(0)
+  await page.goto('/search?q=LLM')
+  const section = page.getByRole('region', { name: '意味の近い本' })
+  const cards = section.locator('button[aria-labelledby^="search-title-"]')
+  await expect(cards.first()).toBeVisible({ timeout: 20_000 })
+  expect(await cards.count()).toBeGreaterThan(0)
+  const titles = await section.locator('[id^="search-title-"]').allTextContents()
+  expect(titles.some(title => title.includes('自然言語処理'))).toBe(true)
+  expect(titles.some(title => /Billmeyer|スクラム|Linux/.test(title))).toBe(false)
+})

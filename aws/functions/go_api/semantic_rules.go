@@ -26,8 +26,11 @@ var semanticTokenizer = func() *tokenizer.Tokenizer {
 
 // Preserve language names: normal keyword normalization strips '+' and '#'.
 var semanticLatinWord = regexp.MustCompile(`[a-z][a-z0-9]*(?:[+#]+)?`)
+var semanticLLMWord = regexp.MustCompile(`(?i)\bllms?\b`)
 
 var semanticAliases = [][]string{
+	{"プログラミング", "ぷろぐらみんぐ", "programming"},
+	{"llm", "llms", "large language model", "大規模言語モデル", "言語モデル", "プロンプトエンジニアリング"},
 	{"データクレンジング", "データクリーニング", "データ前処理"},
 	{"リクルーティング", "採用", "人材募集"},
 	{"英文読解", "英文解釈", "英語リーディング"},
@@ -47,10 +50,15 @@ type semanticTerm struct {
 }
 
 func semanticText(text string) string {
-	return strings.ToLower(norm.NFKC.String(text))
+	return strings.Map(func(r rune) rune {
+		if r >= 'ァ' && r <= 'ヶ' {
+			return r - 0x60
+		}
+		return r
+	}, strings.ToLower(norm.NFKC.String(text)))
 }
 
-func semanticContains(text, term string) bool {
+func semanticLiteralContains(text, term string) bool {
 	if semanticLatinWord.MatchString(term) && semanticLatinWord.FindString(term) == term {
 		for _, word := range semanticLatinWord.FindAllString(text, -1) {
 			if word == term {
@@ -62,11 +70,26 @@ func semanticContains(text, term string) bool {
 	return strings.Contains(text, term)
 }
 
+// Resolve common spelling/abbreviation ambiguity before embedding. An isolated
+// LLM otherwise retrieves Linux/Scrum books with this multilingual model.
+func semanticEmbeddingQuery(query string) string {
+	text := norm.NFKC.String(query)
+	text = strings.ReplaceAll(text, "ぷろぐらみんぐ", "プログラミング")
+	return semanticLLMWord.ReplaceAllString(text, "大規模言語モデル LLM")
+}
+
 func semanticQueryTerms(query string) []semanticTerm {
-	text := semanticText(query)
+	// Keep the original kana for Japanese morphological analysis; fold kana only
+	// when comparing extracted terms against a book, not before tokenization.
+	text := strings.ToLower(norm.NFKC.String(query))
 	terms := []semanticTerm{}
 	seen := map[string]bool{}
 	add := func(variants []string, required bool) {
+		normalized := make([]string, len(variants))
+		for i, variant := range variants {
+			normalized[i] = semanticText(variant)
+		}
+		variants = normalized
 		if !seen[variants[0]] {
 			seen[variants[0]] = true
 			terms = append(terms, semanticTerm{variants, required})
@@ -77,7 +100,7 @@ func semanticQueryTerms(query string) []semanticTerm {
 	for _, variants := range semanticAliases {
 		matched := false
 		for _, variant := range variants {
-			if semanticContains(text, variant) {
+			if semanticLiteralContains(text, variant) {
 				matched = true
 			}
 		}
@@ -131,7 +154,7 @@ func semanticCoverage(terms []semanticTerm, text string) (float64, bool) {
 	for _, term := range terms {
 		found := false
 		for _, variant := range term.variants {
-			if semanticContains(text, variant) {
+			if semanticLiteralContains(text, variant) {
 				found = true
 				break
 			}
